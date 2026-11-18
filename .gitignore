@@ -1,0 +1,51 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# --- Compiled CUDA C++ extensions (torch.utils.cpp_extension, CMake) ---
+# Source under csrc/ is tracked; only the generated build output is ignored.
+build/
+dist/
+*.so
+*.pyd
+*.dll
+*.o
+*.obj
+*.exp
+*.lib
+
+# --- Triton / torch JIT caches ---
+.triton/
+*.cubin
+*.ptx
+*.sass
+
+# --- Model weights and datasets (never commit these) ---
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.bin
+*.npy
+*.npz
+
+# --- Benchmark and profiler output ---
+bench/results/
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdrep
+profile_out/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

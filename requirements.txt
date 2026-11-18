@@ -1,0 +1,10 @@
+# Python dependencies for vla.cu.
+#
+# torch is deliberately NOT pinned here: the correct wheel depends on your GPU
+# and driver (Blackwell / sm_120 needs a CUDA 12.8+ build). Install it first with
+# the exact command recorded in agents/HARDWARE.md, then run:
+#   pip install -r requirements.txt
+torch>=2.7
+triton>=3.3 ; sys_platform != "win32"   # on Windows, use WSL2 or triton-windows
+pytest>=8.0
+numpy>=2.0
