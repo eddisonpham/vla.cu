@@ -25,7 +25,7 @@ Full file formats, templates, and rules are in `agents/README.md`. Never delete 
 
 1. **GPU memory under 7 GB.** Every GPU script calls `enforce_memory_budget()` from `vla_cu/bench_utils.py` before allocating. Suggest nothing that needs more.
 2. **Languages:** Python for glue, tests, benchmarks, CLI; Triton for Python-based kernels; CUDA C++ for hand-written kernels (via `torch.utils.cpp_extension` first, CMake only if asked). No Rust unless asked.
-3. **CLI-usable:** everything runs from `python -m vla_cu ...` or a script the human can run. A small HTML report is fine; no GUI frameworks.
+3. **CLI-usable:** everything runs from `python -m vla_cu <task>`. Long or multi-step commands are abstracted behind a task name or a script; docs and chat never paste pipelines for the human to run.
 4. **Learning over speed.** Never dump a large working system.
 5. **Don't assume hardware.** Use the GPU and toolchain recorded in `agents/HARDWARE.md`; if it's empty, run the environment check first.
 
@@ -57,10 +57,14 @@ Full file formats, templates, and rules are in `agents/README.md`. Never delete 
 
 ## 4. Code documentation standard
 
+- **No comments in code. This is an invariant.** Not `#` lines in Python, not `//` in CUDA. Configuration files (`.gitignore`, `requirements.txt`, `pyproject.toml`) may keep short notes.
 - Module docstring: what the file is for and the concept it demonstrates.
-- Function docstring: what it computes, tensor shapes and dtypes, assumptions (alignment, divisibility).
-- Comments explain **why** (block size, memory layout, reduction pattern), not what.
-- Every kernel gets a comment block with the thread/block-to-data mapping, memory access pattern, and the expected bottleneck (memory-bound or compute-bound).
+- Function docstring: what it computes, tensor shapes and dtypes, assumptions (alignment, divisibility). For a kernel: the thread/block-to-data mapping, the memory access pattern, and the expected bottleneck (memory-bound or compute-bound) belong in the kernel's docstring.
+- **Docstrings are short.** One imperative summary line, then at most two sentences of substance. No restating the signature, no `Args:` blocks that echo parameter names, no essays.
+- Anything that would have been a comment goes in the docstring above it, or in `docs/` when it is bigger than one function (diagrams, tables, tradeoffs).
+- Consistent style: module docstring, imports, constants, typed signatures, `main() -> int` entry points, no side effects at import time. A short docstring that is accurate beats a long one that repeats the code.
+- Output stays visual: tables and diagrams over paragraphs, both in `docs/` and in chat.
+- **Documentation style invariant.** No em dashes, no en dashes, no emojis, no curly quotes. Use a comma or a colon where a dash would go. Plain declarative English, short sentences, one idea each. No filler ("delve", "seamless", "leverage", "it is worth noting"), no stacked bold, no bullet lists that could be a table. It should read like a careful engineer's notes.
 - Python type hints and descriptive names; no clever one-liners.
 
 ## 5. Measurement and honesty
@@ -78,12 +82,13 @@ Full file formats, templates, and rules are in `agents/README.md`. Never delete 
 - **Every commit is authored by the human**, never by the agent: keep the repository's configured `user.name` / `user.email` (`Eddison Pham`). Never add `Co-Authored-By`, "Generated with ...", or any AI attribution footer.
 - Message style: one short imperative subject naming the area, e.g. `env: add environment check script` or `bench: add vector add benchmark`. Body only if the *why* is not obvious.
 - One commit per chunk, after the chunk's test or measurement passes.
-- Never commit model weights, `.venv/`, JIT caches, or `bench/results/` — `.gitignore` covers them; keep it current when a new artifact type appears.
+- Never commit model weights, `.venv/`, JIT caches, or `bench/results/`,  `.gitignore` covers them; keep it current when a new artifact type appears.
 - Never force-push or rewrite history that is already pushed.
 
 ## 7. Never
 
-- Write large amounts of code across many files at once.
+- Write comments in source files; explanation belongs in docstrings or `docs/` (section 4, invariant).
+- Use em dashes, en dashes, emojis, or curly quotes in anything written for this repo (section 4, invariant).
 - Skip the correctness test or `compute-sanitizer`.
 - Present an unmeasured number, or one from another GPU, as a result.
 - Silently change a file outside the current chunk.

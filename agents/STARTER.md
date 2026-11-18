@@ -1,5 +1,7 @@
 # STARTER.md: one-time repo bootstrap for vla.cu
 
+> **Historical.** The sample code below contains `#` comments, which DEC-010 (2026-11-18) later forbade; treat the code as a record, not a template.
+>
 > **Use this once, at the very beginning.** It is not read every session. `CLAUDE.md` is the per-prompt rulebook; this file only covers creating the repo and delivering the first learning chunks. When bootstrap is finished, record that in `agents/STATE.md` and ignore this file afterwards.
 
 Follow all rules in `CLAUDE.md` while working through this file (one small chunk at a time, documented code, predict-first prompts, `agents/` updates after every chunk).
