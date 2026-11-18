@@ -6,6 +6,7 @@
 **Last git commit:** see `git log -1`
 **Bootstrap (`agents/STARTER.md`):** complete 2026-11-18, commit 9b5dee6
 **Remote:** `origin` = https://github.com/eddisonpham/vla.cu.git, branch `main`
+**Checkpoint:** 2026-11-18 at `1b19bca`. Bootstrap, Triton verification, and style invariants are done. Nothing has been measured beyond the environment and the probe; no kernel exists yet.
 
 ## Done so far
 - Skeleton, `.venv` (torch 2.8.0+cu129), `.gitignore`, `.gitattributes`, `requirements.txt`.
