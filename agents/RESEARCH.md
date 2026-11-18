@@ -51,6 +51,13 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Confidence: high that 12.9 matches torch; medium on the exact driver/toolkit forward-compat boundary (from memory of CUDA compatibility rules, not read from NVIDIA docs this session).
 - Relevance to vla.cu: `compute-sanitizer` and `nvcc` only arrive with the toolkit, and a version mismatch with torch's CUDA 12.9 is a classic source of extension-build failures.
 
+## CUDA 12.9.2 Windows installer, verified  (2026-11-18)
+- Question: which exact file should be installed, and how can it be checked afterwards?
+- Finding: Windows 11, x86_64, local (offline) installer is `cuda_12.9.2_576.57_windows.exe`, 3,562,943,232 bytes (3.3 GB), MD5 `3507abab1105669515f3a59f3142e2f8`. URL: https://developer.download.nvidia.com/compute/cuda/12.9.2/local_installers/cuda_12.9.2_576.57_windows.exe . A HEAD request returned 200 and the official `md5sum.txt` lists the same hash.
+- Source: NVIDIA archive page for 12.9 Update 2 with Windows, x86_64, version 11, exe_local selected (accessed 2026-11-18), plus `https://developer.download.nvidia.com/compute/cuda/12.9.2/docs/sidebar/md5sum.txt`.
+- Confidence: high, hash and size come from NVIDIA's own checksum file.
+- Relevance to vla.cu: the machine has no CUDA toolkit, no `nvcc`, and no `compute-sanitizer`, and `CLAUDE.md` requires the sanitizer for every CUDA kernel. The installer needs one administrator approval (UAC) from the human.
+
 ## compute-sanitizer / nvcc ship with the CUDA toolkit, not the driver  (2026-11-18)
 - Question: why are `nvcc`, `nsys`, `ncu`, `compute-sanitizer` missing when the GPU and PyTorch CUDA work?
 - Finding: the display driver (617.42, CUDA UMD 13.4) only provides the runtime/UMD; the CUDA Toolkit provides nvcc, compute-sanitizer, and Nsight tools. PyTorch's wheels bundle the CUDA runtime libraries, so GPU work runs without a toolkit installed.
