@@ -54,3 +54,18 @@
 - Chosen and why: (c), at the human's request. History stays readable, the root stays clean, and `CLAUDE.md` now points at `agents/STARTER.md` only while bootstrap is incomplete.
 - Revisit if: never expected.
 - Status: active
+
+## DEC-008: Triton on native Windows via `triton-windows`, not WSL2  (2026-11-18)
+- Context: `triton` has no Windows wheel, so the Triton chunks needed either a community build or a second Linux toolchain.
+- Options considered: (a) WSL2 + official Triton; (b) `triton-windows` in the existing venv; (c) skip Triton, write CUDA C++ only.
+- Chosen and why: (b), because it was measured working on this exact GPU (EXP-002: bit-exact results on sm_120, bundled `ptxas`, same `import triton` API). It keeps one toolchain, one venv, one set of paths - (a) would double every environment problem, and (c) skips the fastest way to learn the block/mask mental model.
+- Cost accepted: it is a community wrapper, so a bug in it is ours to debug, and advanced features are untested. WSL2 stays the documented fallback.
+- Revisit if: a kernel fails inside the wrapper in a way that official Triton on Linux does not reproduce; or torch is upgraded to a version requiring a different Triton ABI.
+- Status: active
+
+## DEC-009: Publish the repo to the existing `origin`  (2026-11-18)
+- Context: the human asked to publish `main` and to keep committing and pushing under their own name.
+- Options considered: (a) leave it local; (b) push to the already-configured `origin`; (c) create a new remote with `gh`.
+- Chosen and why: (b). `origin` already points at `https://github.com/eddisonpham/vla.cu.git`, and no `gh` CLI is installed, so the existing remote is the only path. Commits stay authored by "Eddison Pham"; no attribution footers are added.
+- Revisit if: the human wants a different host or visibility setting.
+- Status: active

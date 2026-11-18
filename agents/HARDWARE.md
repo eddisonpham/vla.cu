@@ -18,7 +18,7 @@ peak", not as an expectation for any single run.
 - OS / driver: Windows (win32), NVIDIA driver 617.42, CUDA UMD 13.4
 - Python: 3.13.12; project venv at `.venv/` -> use `.venv/Scripts/python.exe`
 - PyTorch / CUDA (torch): 2.8.0+cu129 / 12.9
-- Triton: NOT INSTALLED (`triton` has no Windows wheel; `triton-windows` 3.9.0.post30 exists but is untested)
+- Triton: 3.9.0 via `triton-windows==3.9.0.post30` (cp312-abi3 wheel, works on Python 3.13). Bundles its own `ptxas.exe` at `.venv/Lib/site-packages/triton/backends/nvidia/bin/ptxas.exe`, so kernels compile without a CUDA toolkit. Verified on sm_120: EXP-002.
 - nvcc: NOT FOUND (no CUDA toolkit installed)
 - Nsight Systems (`nsys`): NOT FOUND
 - Nsight Compute (`ncu`): NOT FOUND

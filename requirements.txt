@@ -5,6 +5,14 @@
 # the exact command recorded in agents/HARDWARE.md, then run:
 #   pip install -r requirements.txt
 torch>=2.7
-triton>=3.3 ; sys_platform != "win32"   # on Windows, use WSL2 or triton-windows
+
+# Linux (and WSL2) get Triton from PyPI.
+triton>=3.3 ; sys_platform != "win32"
+
+# Native Windows has no `triton` wheel. This community build provides the same
+# `import triton` module and bundles its own ptxas, so it needs no CUDA toolkit.
+# Verified working on sm_120: agents/EXPERIMENTS.md EXP-002.
+triton-windows==3.9.0.post30 ; sys_platform == "win32"
+
 pytest>=8.0
 numpy>=2.0

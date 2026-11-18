@@ -245,7 +245,7 @@ if __name__ == "__main__":
     main()
 ```
 
-**Predict-first prompt for the human:** what fraction of peak bandwidth do you expect, and will Triton beat torch? Write it in `docs/journal.md` before running. Then log the run in `agents/EXPERIMENTS.md` as EXP-001.
+**Predict-first prompt for the human:** what fraction of peak bandwidth do you expect, and will Triton beat torch? State it before running; the agent logs it in `agents/EXPERIMENTS.md`. Then log the run in `agents/EXPERIMENTS.md` as EXP-001.
 
 ## Part C: Done criteria for bootstrap
 

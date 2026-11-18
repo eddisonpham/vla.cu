@@ -3,34 +3,37 @@
 > Overwrite this file at the end of every session and after every chunk. Keep it under ~60 lines.
 
 **Last updated:** 2026-11-18
-**Last git commit:** see `git log -1` (scaffold commit was 9b5dee6)
-**Bootstrap (see `agents/STARTER.md`):** COMPLETE 2026-11-18, commit 9b5dee6
-**Session summary:** Part A done: skeleton, `.venv`, `.gitignore`, git workflow documented in `CLAUDE.md` section 6, `STARTER.md` moved into `agents/`. Chunk 0 done: `scripts/env_check.py` written and run; hardware recorded from measurement.
+**Last git commit:** see `git log -1` (scaffold was 9b5dee6, memory update e6b5c07)
+**Bootstrap (`agents/STARTER.md`):** COMPLETE 2026-11-18, commit 9b5dee6
+**Remote:** `origin` = https://github.com/eddisonpham/vla.cu.git (branch `main`)
+**Session summary:** Part A + Chunk 0 done earlier. Then: **Triton now works on native Windows** (EXP-002, DEC-008), README added, repo published to `origin`.
 
 ## Done so far
-- Skeleton: `vla_cu/`, `kernels/triton/`, `csrc/`, `scripts/`, `tests/`, `bench/`, `docs/`, `agents/`.
-- `.venv` (torch 2.8.0+cu129, torchvision, numpy, pytest) + `requirements.txt`.
-- `.gitignore` and `.gitattributes`.
-- Chunk 0: `scripts/env_check.py`.
-- `docs/journal.md` stub, ready for the human's predictions.
+- Skeleton, `.venv` (torch 2.8.0+cu129), `.gitignore`, `.gitattributes`, `requirements.txt`.
+- Chunk 0: `scripts/env_check.py`; hardware recorded in `HARDWARE.md`.
+- `scripts/triton_probe.py`: masked vector add, bit-exact at n=1000 and n=1_000_003 on sm_120.
+- `triton-windows==3.9.0.post30` installed in the venv (bundles its own ptxas).
+- `README.md`: project purpose, why batch-1 is memory-bound, status, layout, rules.
 
 ## What works
-- venv Python sees the GPU: RTX 5060 Laptop GPU, sm_120, 26 SMs, 7.9 GB.
-- `python scripts/env_check.py` prints versions, device properties, tool availability.
+- `python scripts/env_check.py` -> RTX 5060 Laptop, sm_120, 26 SMs, 7.9 GB.
+- `python scripts/triton_probe.py` -> `VERDICT: triton works on this GPU`, err 0.0.
+- git: commits authored as Eddison Pham, pushed to `origin/main`.
 
 ## What's broken or missing
-- **No Triton.** `pip install triton` has no Windows wheel. `triton-windows` 3.9.0.post30 exists; untested against torch 2.8.0+cu129. This blocks Chunk 2 as written.
-- **No CUDA toolkit.** No `nvcc`, `nsys`, `ncu`, `compute-sanitizer`, so CUDA C++ chunks cannot build and the CLAUDE.md sanitizer rule cannot be met yet.
-- `requirements.txt` was not installed as a set (torch came from the cu129 index directly); harmless for now, revisit when NumPy/pytest versions must match.
+- **Still no CUDA toolkit**: no `nvcc`, `nsys`, `ncu`, `compute-sanitizer`. Blocks CUDA C++ kernels and the mandatory sanitizer step. Recommended: CUDA **12.9** archive installer (matches torch cu129), not winget's 13.5.
+- `vla_cu/bench_utils.py` does not exist yet, so nothing can be timed or memory-capped.
+- No tests yet (`pytest` reports "no tests ran"); `tests/` is empty.
+- Triton advanced features (`tl.dot`, TMA, autotuning) untested on this wrapper.
 
 ## Current chunk
-- None in progress. STARTER.md Chunks 1-3 remain.
+- None in progress. Chunks 1-3 remain; Chunks 2-3 are no longer blocked.
 
 ## Open questions for the human
-- Triton route before Chunk 2: try `triton-windows` on native Windows, or add WSL2 (official Triton, second toolchain)?
-- Install the CUDA toolkit now (nvcc + compute-sanitizer + Nsight) or when the first CUDA C++ chunk arrives?
+- Install the CUDA 12.9 toolkit now (needs their admin click), or defer to when the first CUDA C++ kernel arrives?
+- Next chunk: Chunk 1 (`bench_utils.py`) or jump to the 4-bit packing + reference dequantize?
 
 ## Suggested next options (see `BACKLOG.md`)
-1. Chunk 1: `vla_cu/bench_utils.py` (CUDA-event timing + 7 GB budget) - every later chunk uses it.
-2. Settle the Triton-on-Windows question so Chunks 2-3 can actually run.
-3. Install the CUDA toolkit so kernels can be sanitized and profiled with counters.
+1. Chunk 1: `vla_cu/bench_utils.py` - timing and the 7 GB cap; everything later depends on it.
+2. Chunk 2 + 3: first real Triton kernel (vector add) + correctness test + bandwidth benchmark, with a written prediction first.
+3. Install CUDA 12.9 toolkit so `compute-sanitizer` and Nsight exist before hand-written CUDA.

@@ -41,7 +41,7 @@ If a session is cut short, a half-updated `STATE.md` that says "interrupted afte
 - **Failures are first-class.** A failed experiment with a clear explanation is as valuable as a win. Record what was expected, what happened, and the leading hypothesis for why.
 - **Separate fact from guess.** Mark guesses as "hypothesis" and untested claims as "unverified". Promote them once tested.
 - **Sources for research:** URL or doc name plus date. If something came from memory instead of a lookup, say "from memory, unverified".
-- **Keep the human's reasoning separate.** The human's own predictions and explanations live in `docs/journal.md`. The agent may reference them from here but never writes the human's reasoning for them.
+- **Keep the human's reasoning separate.** The human's predictions and questions arrive in chat; record them verbatim in the `Prediction` field of their experiment entry. The agent never invents or rewrites the human's reasoning, and never creates a file that pretends to be their notes.
 - **Be concise.** Bullets over paragraphs. If a file gets long, add a short summary at the top rather than deleting content.
 
 ## Experiment entry template (`EXPERIMENTS.md`)
