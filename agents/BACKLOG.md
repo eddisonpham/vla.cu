@@ -4,11 +4,15 @@
 > For each item: why it's interesting, what the human will learn, rough effort, what could go wrong.
 > When an item is finished or dropped, move it to "Done / dropped" with the date and reason; do not delete it.
 
-## Next up (starter chunks, see CLAUDE.md section 7)
-- [ ] Chunk 0: environment check (`scripts/env_check.py`)
-- [ ] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`)
-- [ ] Chunk 2: first Triton kernel, vector add
-- [ ] Chunk 3: correctness test and bandwidth benchmark
+## Next up (starter chunks, see `agents/STARTER.md`)
+- [x] Chunk 0: environment check (`scripts/env_check.py`) - done 2026-11-18, EXP-001
+- [ ] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`) - unblocked, any time
+- [ ] Chunk 2: first Triton kernel, vector add - **blocked on Triton (see Environment blockers)**
+- [ ] Chunk 3: correctness test and bandwidth benchmark - blocked with Chunk 2
+
+## Environment blockers (fix before the kernels that need them)
+- [ ] Get Triton running on Windows: try `triton-windows` (one pip install, stays native) or WSL2 (official Triton, second toolchain to maintain). Why: Chunks 2-3 and every "Triton first" kernel in the plan depend on it. Risk with `triton-windows`: unofficial wrapper, may not support sm_120 or torch 2.8.
+- [ ] Install the CUDA toolkit (nvcc + compute-sanitizer + Nsight Systems/Compute). Why: `CLAUDE.md` requires `compute-sanitizer` on every CUDA kernel, and `ncu` counters are the only honest way to explain a memory-bound result. Risk: ~3 GB download, must match driver 617.42.
 
 ## Foundations
 - [ ] Vector add in CUDA C++ via `torch.utils.cpp_extension.load_inline`; compare against Triton
@@ -32,7 +36,10 @@
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
 
 ## Open questions
-- Which GPU does the human have, and what is its peak bandwidth? (answer after Chunk 0)
+- ~~Which GPU, and what is its peak bandwidth?~~ Answered in `HARDWARE.md`: RTX 5060 Laptop, 384 GB/s.
+- Native Windows Triton (`triton-windows`) or WSL2? Decides the shape of every kernel chunk.
+- Which SmolVLA layer shapes do we target first (hidden size, intermediate size) once we leave toy tensors?
 
 ## Done / dropped
-- (nothing yet)
+- [x] STARTER.md Part A: repo skeleton, venv, first commit (2026-11-18, commit 9b5dee6).
+- [x] STARTER.md Chunk 0: environment check (2026-11-18, EXP-001).

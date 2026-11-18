@@ -1,0 +1,18 @@
+# .gitattributes: keep the repo's line endings and artifact types stable
+
+# The repo stores LF. Windows checkouts may use CRLF locally, but a file that
+# reaches git (and later WSL2, or CI) is always LF, so `.sh`/`.cu` files cannot
+# break on a hidden carriage return.
+* text=auto eol=lf
+
+# Binary artifacts must never be normalized or diffed as text.
+*.pt binary
+*.pth binary
+*.safetensors binary
+*.bin binary
+*.npy binary
+*.npz binary
+*.cubin binary
+*.so binary
+*.pyd binary
+*.dll binary

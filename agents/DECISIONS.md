@@ -33,3 +33,24 @@
 - History note: this log, `EXPERIMENTS.md`, and `RESEARCH.md` are append-only and were not rewritten. "KernelEdge" and "kerneledge" in older entries mean this project (e.g. DEC-003's `kerneledge/bench_utils.py` is now `vla_cu/bench_utils.py`).
 - Revisit if: the human wants a different name.
 - Status: active
+
+## DEC-005: The agent runs git; commits belong to the human  (2026-11-18)
+- Context: the human granted permission to run git (commit, push, pull, etc.) but does not want Freebuff/Codebuff named anywhere in the history.
+- Options considered: (a) agent prints commands, human runs them; (b) agent runs git itself and authors commits as the human.
+- Chosen and why: (b). `CLAUDE.md` section 6 documents it: use the repo's configured `user.name`/`user.email` (Eddison Pham), never add `Co-Authored-By` or "Generated with ..." footers, one commit per chunk after its checks pass, imperative `<area>: <what changed>` subjects.
+- Revisit if: the human wants to review commands before they run, or wants a separate bot identity.
+- Status: active
+
+## DEC-006: Project venv with torch 2.8.0+cu129, not the conda base  (2026-11-18)
+- Context: the machine's conda Python 3.13 already had torch 2.8.0+cu129; STARTER.md Part A asks for a venv.
+- Options considered: (a) reuse conda base; (b) fresh `.venv` with the same wheel; (c) venv with `--system-site-packages`.
+- Chosen and why: (b). Isolates the project from unrelated conda packages, keeps the installed set recorded in `requirements.txt`/`HARDWARE.md`, and (c) makes imports depend on invisible global state while teaching nothing.
+- Revisit if: CUDA toolkit or driver changes force a different wheel (sm_120 needs CUDA 12.8+).
+- Status: active
+
+## DEC-007: STARTER.md archived into `agents/`, bootstrap marked complete  (2026-11-18)
+- Context: the one-time setup instructions should not live in the repo root or be re-read every session.
+- Options considered: (a) delete it; (b) leave it at the root; (c) move it to `agents/STARTER.md` and mark bootstrap complete in `STATE.md`.
+- Chosen and why: (c), at the human's request. History stays readable, the root stays clean, and `CLAUDE.md` now points at `agents/STARTER.md` only while bootstrap is incomplete.
+- Revisit if: never expected.
+- Status: active
