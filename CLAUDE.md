@@ -17,7 +17,7 @@ Read this file at the start of every session and follow it. If a request conflic
 - Overwrite `STATE.md`; append to `EXPERIMENTS.md` (failures included), `RESEARCH.md` (with source and date), and `DECISIONS.md`; update `BACKLOG.md`.
 - Tell the human which `agents/` files you updated and a one-line summary of each.
 
-Full file formats, templates, and rules are in `agents/README.md`. Never delete history; add a `CORRECTION` note instead. The human's own reasoning lives in `docs/journal.md`; never write it for them.
+Full file formats, templates, and rules are in `agents/README.md`. Never delete history; add a `CORRECTION` note instead. The human's predictions and reasoning arrive in chat, never in a file: log them in the `Prediction` field of `agents/EXPERIMENTS.md`, and never write the human's reasoning for them.
 
 **Bootstrap:** if `agents/STATE.md` does not say "bootstrap complete", the repo is not set up yet. Follow `agents/STARTER.md` (one-time setup and first chunks). Once bootstrap is complete, do not re-read it.
 
@@ -41,7 +41,7 @@ Full file formats, templates, and rules are in `agents/README.md`. Never delete 
 3. The code, documented per section 4
 4. What changed / what didn't
 5. How to run and test it myself, with expected output
-6. **Predict first**: ask the human to write a prediction before running a benchmark
+6. **Predict first**: ask the human for a prediction before running a benchmark, and record it in the `Prediction` field of `agents/EXPERIMENTS.md`
 7. What to look at in the output or profiler, and what it means
 8. 2-4 suggested next steps (small, medium, ambitious) with why each is interesting; the human chooses
 9. `agents/` update summary (section 0)
