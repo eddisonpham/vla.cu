@@ -92,3 +92,11 @@
 - Consequences: `README.md` and `docs/ARCHITECTURE.md` rewritten by hand; every tracked file swept for em dashes, en dashes, curly quotes and smart apostrophes. Hyphens in compound words stay.
 - Revisit if: the human wants a different voice, or a linter enforces this automatically.
 - Status: active
+
+## DEC-013: CUDA 12.9.2 toolkit from the archive installer, not winget's 13.5  (2026-11-18)
+- Context: `CLAUDE.md` requires `compute-sanitizer` on every CUDA kernel, and no toolkit was installed. torch is built for CUDA 12.9, while the driver reports CUDA UMD 13.4.
+- Options considered: (a) `winget install Nvidia.CUDA` (13.5); (b) the 12.9.2 archive local installer with Custom install, driver component unchecked.
+- Chosen and why: (b). It keeps `nvcc` on the same major.minor as torch's cu129 runtime, stays at or below the driver's 13.4, and the exact file could be verified against NVIDIA's own MD5 before running it. Installing the bundled 576.57 driver over the working 617.42 was explicitly avoided.
+- Consequences: 12.9.2 is in place and `compute-sanitizer` is usable. The installer did not include `nsys` or `ncu`, so profiling tools remain a separate download. The only MSVC on the machine is 14.50, which nvcc 12.9 rejects, so CUDA C++ builds are still blocked.
+- Revisit if: torch is upgraded to a cu13 wheel, or the host compiler situation is resolved with a different toolchain.
+- Status: active
