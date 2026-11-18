@@ -13,9 +13,9 @@
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.
 - [x] ~~Install the CUDA toolkit~~ DONE 2026-11-18: CUDA 12.9.2 in place, `nvcc` V12.9.86 and `compute-sanitizer` present (EXP-003, DEC-013).
-- [ ] Give `nvcc` 12.9 a host compiler it accepts (MSVC 2017-2022). Why: `nvcc` rejects the installed MSVC 14.50 with `unsupported Microsoft Visual Studio version`, so `torch.utils.cpp_extension` cannot build a single kernel yet. Options: add VS 2022 Build Tools next to the VS 18 BuildTools (cleanest, supported), or pass `-allow-unsupported-compiler` (unsupported, may miscompile). Risk: another multi-GB install.
+- [x] ~~Give `nvcc` 12.9 a supported host compiler~~ DONE 2026-11-18: VS 2022 BuildTools 17.14.45, MSVC 14.44.35207, smoke compile and run OK (EXP-004, DEC-014).
 - [x] ~~Install Nsight Systems / Nsight Compute~~ DONE 2026-11-18: Nsight Compute 2025.2.1 and Nsight Systems 2025.1.3 are installed under `C:\Program Files\NVIDIA Corporation`, but their executables sit in versioned `target-*` subfolders and are not on PATH.
-- [ ] Teach `scripts/env_check.py` to resolve `ncu` and `nsys` by absolute path when `shutil.which` fails. Why: both report NOT FOUND today only because of PATH, which misleads every future session.
+- [x] ~~Resolve `ncu` and `nsys` without PATH edits~~ DONE 2026-11-18: the env task falls back to the versioned install folders (EXP-004).
 
 ## Foundations
 - [ ] Vector add in CUDA C++ via `torch.utils.cpp_extension.load_inline`; compare against Triton

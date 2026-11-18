@@ -25,8 +25,9 @@ peak", not as an expectation for any single run.
 - Nsight Systems (`nsys`): 2025.1.3 at `C:\Program Files\NVIDIA Corporation\Nsight Systems 2025.1.3\target-windows-x64\nsys.exe`. Not on PATH, so call it by path
 - Nsight Compute (`ncu`): 2025.2.1 at `C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.2.1\target\windows-desktop-win7-x64\ncu.exe`, with an `ncu.bat` wrapper one level up. Not on PATH either
 - `compute-sanitizer`: version 2025.2.1.0 (build 35969825). It arrived with the toolkit, while the two Nsight tools are their own installs
-- Host compiler (MSVC): 14.50.35717 from Visual Studio 18 BuildTools, `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`, Windows SDK 10.0.26100.0. No VS 2019/2022, so no VS-integrated Nsight
-- nvcc 12.9 refuses MSVC 14.50: `fatal error C1189: -- unsupported Microsoft Visual Studio version! Only the versions between 2017 and 2022 (inclusive) are supported`. CUDA C++ needs an MSVC 2017-2022 toolchain first (EXP-003)
+- Host compilers (MSVC): 14.44.35207 from Visual Studio 2022 BuildTools 17.14.45, the one nvcc accepts, and 14.50.35717 from Visual Studio 18 BuildTools, which nvcc 12.9 rejects. Windows SDK 10.0.26100.0
+- Use 14.44 by calling `...\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat` first; it puts `cl.exe` on PATH and sets `INCLUDE` and `LIB` (EXP-004)
+- `python -m vla_cu env` finds `ncu` and `nsys` in their versioned install folders, so neither needs to be on PATH (EXP-004)
 - Installed into the venv: torch 2.8.0+cu129, torchvision 0.23.0, numpy 2.5.5, pytest
 
 ## Measured baselines (measured only; include command and date)
@@ -38,3 +39,4 @@ peak", not as an expectation for any single run.
 - 2026-11-18: file created, nothing detected yet.
 - 2026-11-18: Chunk 0 detected the environment above; `.venv` created with the cu129 wheel; no CUDA toolkit present.
 - 2026-11-18: CUDA 12.9.2 toolkit installed. nvcc and compute-sanitizer present; nsys and ncu absent; bundled VS 18 MSVC 14.50 is newer than nvcc 12.9 accepts.
+- 2026-11-18: VS 2022 BuildTools 17.14.45 added (MSVC 14.44.35207). nvcc 12.9 compiles and runs a CUDA file. Nsight Compute and Nsight Systems now found by the env task without PATH edits.

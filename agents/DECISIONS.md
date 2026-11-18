@@ -100,3 +100,11 @@
 - Consequences: 12.9.2 is in place and `compute-sanitizer` is usable. The installer did not include `nsys` or `ncu`, so profiling tools remain a separate download. The only MSVC on the machine is 14.50, which nvcc 12.9 rejects, so CUDA C++ builds are still blocked.
 - Revisit if: torch is upgraded to a cu13 wheel, or the host compiler situation is resolved with a different toolchain.
 - Status: active
+
+## DEC-014: Add VS 2022 Build Tools rather than force nvcc past its version check  (2026-11-18)
+- Context: `nvcc` 12.9 refused the only installed MSVC (14.50 from VS 18 BuildTools) with `unsupported Microsoft Visual Studio version`.
+- Options considered: (a) `-allow-unsupported-compiler`; (b) install VS 2022 Build Tools next to VS 18; (c) move to a CUDA 13.x toolkit; (d) stay Triton-only.
+- Chosen and why: (b). It gives a toolset NVIDIA supports on 12.9, keeps `nvcc` on the same CUDA as torch's cu129 wheel, and does not touch the driver. (a) risks exactly the silent miscompiles this project is learning to detect, (c) breaks the nvcc/torch match, and (d) removes the comparison the repo exists for.
+- Consequences: two Visual Studio installs share the machine, so a build must select 14.44 explicitly, normally through `vcvars64.bat`. A few GB of disk.
+- Revisit if: torch moves to a cu13 wheel, or `torch.utils.cpp_extension` cannot be pointed at the 2022 toolset.
+- Status: active
