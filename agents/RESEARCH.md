@@ -71,3 +71,10 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: PyTorch wheel index `https://download.pytorch.org/whl/cu129` used for the install on 2026-11-18; the sm_120/CUDA 12.8 requirement is from memory, unverified against NVIDIA docs.
 - Confidence: medium-high (the working install is measured; the exact minimum version is not).
 - Relevance to vla.cu: pins future dependency upgrades. Don't downgrade the CUDA wheel.
+
+## How torch.utils.cpp_extension resolves the toolkit, host compiler, and ninja  (2026-11-18)
+- Question: which settings does an extension build actually read on this Windows install?
+- Finding: torch 2.8.0 exposes `cpp_extension.CUDA_HOME` (already resolved here to `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA\v12.9`) and has no `CUDA_VERSION` attribute. `get_cxx_compiler()` returns the bare name `cl` on Windows, so the host compiler is whatever PATH resolves at build time. `is_ninja_available()` probes for a `ninja` executable: False in a plain shell, True after `vcvars64.bat` prepends Visual Studio's bundled ninja.
+- Source: local introspection of the installed torch 2.8.0 on 2026-11-18 (`dir(torch.utils.cpp_extension)`, `get_cxx_compiler()`, `is_ninja_available()`, then the same calls behind `vcvars64.bat`). No PyTorch documentation page was read for this.
+- Confidence: high for this install and version; medium for other platforms, where `get_cxx_compiler()` returns `c++` and the ninja check differs.
+- Relevance to vla.cu: `cuda-check` reads exactly these, and the first real extension build has to run in a shell where `vcvars64.bat` was called until the `-ccbin` path is tested.

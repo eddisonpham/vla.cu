@@ -12,13 +12,15 @@ import sys
 TASKS: dict[str, str] = {
     "env": "scripts.env_check",
     "probe": "scripts.triton_probe",
+    "cuda-check": "scripts.cuda_check",
 }
 
 
 def usage() -> str:
     """Return the task list as text, one task per line."""
     lines = ["usage: python -m vla_cu <task>", "", "tasks:"]
-    lines += [f"  {name:<6} {module}" for name, module in TASKS.items()]
+    width = max(len(name) for name in TASKS)
+    lines += [f"  {name:<{width}} {module}" for name, module in TASKS.items()]
     return "\n".join(lines) + "\n"
 
 

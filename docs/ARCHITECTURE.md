@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -95,5 +95,5 @@ flowchart LR
 | Python venv | 3.13 | isolation, since the torch wheel is GPU specific |
 | PyTorch | 2.8.0+cu129 | reference answer, tensor plumbing, extension loader |
 | Triton | 3.9.0 via `triton-windows` | fast kernel iteration with block and mask reasoning |
-| CUDA C++ | not installed | full control over shared memory and vectorized loads |
-| Nsight and sanitizer | not installed | why a kernel is slow, and whether it is unsafe |
+| CUDA C++ | toolkit 12.9.2, MSVC 14.44 | full control over shared memory and vectorized loads |
+| Nsight and sanitizer | Nsight 2025.x, sanitizer 2025.2.1 | why a kernel is slow, and whether it is unsafe |

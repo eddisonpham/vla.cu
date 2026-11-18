@@ -26,7 +26,10 @@ peak", not as an expectation for any single run.
 - Nsight Compute (`ncu`): 2025.2.1 at `C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.2.1\target\windows-desktop-win7-x64\ncu.exe`, with an `ncu.bat` wrapper one level up. Not on PATH either
 - `compute-sanitizer`: version 2025.2.1.0 (build 35969825). It arrived with the toolkit, while the two Nsight tools are their own installs
 - Host compilers (MSVC): 14.44.35207 from Visual Studio 2022 BuildTools 17.14.45, the one nvcc accepts, and 14.50.35717 from Visual Studio 18 BuildTools, which nvcc 12.9 rejects. Windows SDK 10.0.26100.0
+- Both installs live under `C:\Program Files (x86)\Microsoft Visual Studio` (`2022\BuildTools` and `18\BuildTools`); nothing MSVC lives under `C:\Program Files`
 - Use 14.44 by calling `...\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat` first; it puts `cl.exe` on PATH and sets `INCLUDE` and `LIB` (EXP-004)
+- ninja: absent from the default PATH, present after `vcvars64.bat`, which prepends Visual Studio's bundled copy. `torch.utils.cpp_extension` needs it, so extension builds happen inside a vcvars shell (EXP-005)
+- `python -m vla_cu cuda-check` reports the toolkit nvcc, the resolved `cl`, every installed MSVC toolset, ninja, and one verdict line, without compiling anything (DEC-015)
 - `python -m vla_cu env` finds `ncu` and `nsys` in their versioned install folders, so neither needs to be on PATH (EXP-004)
 - Installed into the venv: torch 2.8.0+cu129, torchvision 0.23.0, numpy 2.5.5, pytest
 
@@ -40,3 +43,4 @@ peak", not as an expectation for any single run.
 - 2026-11-18: Chunk 0 detected the environment above; `.venv` created with the cu129 wheel; no CUDA toolkit present.
 - 2026-11-18: CUDA 12.9.2 toolkit installed. nvcc and compute-sanitizer present; nsys and ncu absent; bundled VS 18 MSVC 14.50 is newer than nvcc 12.9 accepts.
 - 2026-11-18: VS 2022 BuildTools 17.14.45 added (MSVC 14.44.35207). nvcc 12.9 compiles and runs a CUDA file. Nsight Compute and Nsight Systems now found by the env task without PATH edits.
+- 2026-11-18: recorded that both Visual Studio installs sit under `Program Files (x86)`, and that ninja appears only in a vcvars shell. Added the `cuda-check` task (EXP-005).

@@ -108,3 +108,11 @@
 - Consequences: two Visual Studio installs share the machine, so a build must select 14.44 explicitly, normally through `vcvars64.bat`. A few GB of disk.
 - Revisit if: torch moves to a cu13 wheel, or `torch.utils.cpp_extension` cannot be pointed at the 2022 toolset.
 - Status: active
+
+## DEC-015: `cuda-check` inspects build settings and never compiles  (2026-11-18)
+- Context: with the toolkit and two Visual Studio installs present, whether a CUDA C++ build works still depended on invisible shell state (PATH, INCLUDE, LIB), and the answer changes between a plain shell and a vcvars shell.
+- Options considered: (a) document the vcvars recipe in prose; (b) a task that runs a throwaway compile; (c) a task that reads the same sources `torch.utils.cpp_extension` reads, prints them, and adds one verdict line.
+- Chosen and why: (c). It answers the question in one short command in well under a second, cannot half-fail in a confusing way, and does not duplicate the first extension build, which is the step that should teach what a build is. It runs the real `nvcc` only as `--version`, so the reported toolkit is the one torch resolves, not a hardcoded path.
+- Cost accepted: the verdict means "prerequisites present", not "a build succeeded". The docstring and report header say so, and EXP-005 records it as configuration only.
+- Revisit if: the loader starts honoring extra variables (a pinned `CC`, `TORCH_CUDA_ARCH_LIST`), or a build fails while the task says ready.
+- Status: active

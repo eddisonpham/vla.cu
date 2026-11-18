@@ -51,13 +51,13 @@ The environment is real. The kernels are not written yet.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env` and `probe` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check` |
 | Timing and 7 GB cap (`bench_utils`) | next |
 | Vector add kernel, test, benchmark | pending |
 | 4-bit packing, fused dequant GEMV | not started |
 
-The CUDA toolkit is not installed yet, so no CUDA C++ kernel can be built or
-sanitized until it is.
+The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
+vla_cu cuda-check` reports which ones a build would use and what it still needs.
 
 ## Layout
 
@@ -77,6 +77,7 @@ agents/           memory: state, experiments, research, decisions, backlog
 ```bash
 python -m vla_cu env
 python -m vla_cu probe
+python -m vla_cu cuda-check
 ```
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both

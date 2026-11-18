@@ -37,6 +37,7 @@
 ## Infrastructure
 - [ ] `python -m vla_cu bench <kernel>` CLI with JSON output and a small HTML report
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
+- [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 
 ## Open questions
 - ~~Which GPU, and what is its peak bandwidth?~~ Answered in `HARDWARE.md`: RTX 5060 Laptop, 384 GB/s.
