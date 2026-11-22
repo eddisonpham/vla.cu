@@ -13,6 +13,7 @@ TASKS: dict[str, str] = {
     "env": "scripts.env_check",
     "probe": "scripts.triton_probe",
     "cuda-check": "scripts.cuda_check",
+    "bench": "bench.vector_add_bench",
 }
 
 

@@ -8,7 +8,7 @@
 - [x] Chunk 0: environment check (`scripts/env_check.py`) - done 2026-11-18, EXP-001
 - [ ] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`) - unblocked, any time
 - [x] Chunk 2: first Triton kernel, vector add - done 2026-11-22, `kernels/triton/vector_add.py`, EXP-007
-- [ ] Chunk 3: correctness test and bandwidth benchmark - tests done, benchmark next
+- [x] Chunk 3: correctness test and bandwidth benchmark - done 2026-11-22, EXP-008: 86.2% of peak at 16M elements
 
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.
@@ -41,7 +41,7 @@ such as NF4 and FP4. Both are listed in `docs/ARCHITECTURE.md` section 5 and ski
 on purpose, not forgotten.
 
 ## Infrastructure
-- [ ] `python -m vla_cu bench <kernel>` CLI with JSON output and a small HTML report
+- [ ] `bench` with a kernel argument, JSON output and a small HTML report (vector add only so far)
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
 - [ ] Launch-overhead experiment: time one tiny kernel against 1000 launched in a loop, to size the CUDA graph win before building one
 - [ ] CUDA graph capture of the GEMV: batch 1 has static shapes, so capture and replay is a natural fit

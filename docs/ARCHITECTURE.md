@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -88,7 +88,7 @@ kernels, so they are used as references and as performance baselines.
 
 | # | Kernel | Concept to learn | Path | State |
 |---|---|---|---|---|
-| 1 | vector add | program id, offsets, mask | `kernels/triton/vector_add.py` | done, 7 tests pass; benchmark next |
+| 1 | vector add | program id, offsets, mask | `kernels/triton/vector_add.py` | done, 86.2% of peak at 16M elements |
 | 2 | reduction | shared memory, warp shuffles | undecided | backlog |
 | 3 | naive matmul | tiling by block | undecided | backlog |
 | 4 | packed 4-bit weights | group scales, unpacking | undecided | backlog |

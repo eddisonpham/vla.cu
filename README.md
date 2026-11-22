@@ -51,10 +51,10 @@ The environment is real. The kernels are not written yet.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check` |
-| Timing and 7 GB cap (`bench_utils`) | pending |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench` |
+| Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
-| Vector add benchmark | next |
+| Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
 | 4-bit packing, fused dequant GEMV | not started |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -79,6 +79,7 @@ agents/           memory: state, experiments, research, decisions, backlog
 python -m vla_cu env
 python -m vla_cu probe
 python -m vla_cu cuda-check
+python -m vla_cu bench
 ```
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both

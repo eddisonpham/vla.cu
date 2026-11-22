@@ -31,25 +31,31 @@ def vector_add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK: tl.constexpr) ->
     tl.store(out_ptr + offsets, x + y, mask=mask)
 
 
-def vector_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Return x + y elementwise through the Triton kernel.
+def vector_add_into(x: torch.Tensor, y: torch.Tensor, out: torch.Tensor) -> None:
+    """Write x + y into `out` through the Triton kernel.
 
-    Assumptions: both tensors are contiguous, fp32, on the CUDA device, and have
-    identical shapes. Any length is allowed, including 0 and lengths that are not
-    a multiple of BLOCK_SIZE.
+    Assumptions: all three tensors are contiguous, fp32, on the CUDA device, and
+    share one shape. Any length is allowed, including 0 and lengths that are not a
+    multiple of BLOCK_SIZE. Writing into a caller's buffer keeps benchmarks free of
+    allocation, so two kernels can be compared on the same memory traffic.
     """
-    if x.shape != y.shape:
-        raise ValueError(f"shape mismatch: {tuple(x.shape)} vs {tuple(y.shape)}")
+    if not (x.shape == y.shape == out.shape):
+        raise ValueError(f"shape mismatch: {tuple(x.shape)}, {tuple(y.shape)}, {tuple(out.shape)}")
     if x.device.type != "cuda" or x.dtype != torch.float32:
         raise ValueError(f"expected fp32 CUDA tensors, got {x.dtype} on {x.device}")
-    if not (x.is_contiguous() and y.is_contiguous()):
+    if not (x.is_contiguous() and y.is_contiguous() and out.is_contiguous()):
         raise ValueError("expected contiguous tensors")
 
     n_elements = x.numel()
-    out = torch.empty_like(x)
     if n_elements == 0:
-        return out
+        return
 
     grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
     vector_add_kernel[grid](x, y, out, n_elements, BLOCK=BLOCK_SIZE)
+
+
+def vector_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Allocate the output and return x + y through the Triton kernel."""
+    out = torch.empty_like(x)
+    vector_add_into(x, y, out)
     return out

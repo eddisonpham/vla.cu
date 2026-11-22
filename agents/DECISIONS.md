@@ -125,3 +125,10 @@
 - Consequences: the unpacking lives in one named function taking the width as a compile-time constant, decided now and used from the first kernel. `docs/ARCHITECTURE.md` section 5 holds the ladder with per-pass traffic. 3, 5 and 6-bit bitstreams and codebook formats (NF4, FP4) are out of scope and recorded as such rather than silently ignored.
 - Revisit if: the human wants a codebook format, in which case it is an add-on to the int4 path, or wants non-power-of-two widths after the fused kernel works.
 - Status: active
+
+## DEC-017: Benchmark method is preallocated buffers, CUDA events, three size regimes  (2026-11-22)
+- Context: the first benchmark had to compare a Triton kernel against torch without the measurement itself becoming the result.
+- Options considered: (a) time the public wrappers that allocate their output; (b) time both paths writing into one preallocated buffer; (c) wall clock timing.
+- Chosen and why: (b), with 25 warmup calls, 100 timed iterations and CUDA events. Allocation inside the loop would measure the caching allocator, and wall clock would measure launches and queue depth. Byte counts are a fixed 12 per element, identical for both paths, so GB/s is comparable across kernels and sizes.
+- Consequences: `vector_add_into` exists next to `vector_add` only to keep the comparison allocation-free, and the benchmark prints three sizes on purpose: launch-bound at 4K, cache-resident at 1M, memory-bound at 16M. The cache row is reported and labelled instead of being hidden, because a 251 percent of peak reading is the clearest evidence that a benchmark is measuring the wrong thing.
+- Revisit if: kernels start allocating internal workspace, which must then be counted as traffic, or if a size is found where the three regimes disagree with these labels.
