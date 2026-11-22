@@ -93,7 +93,7 @@ kernels, so they are used as references and as performance baselines.
 | 3 | naive matmul | tiling by block | undecided | backlog |
 | 4 | packed 4-bit weights | group scales, unpacking | undecided | backlog |
 | 5 | fused dequant GEMV | read packed bytes once, unpack in registers | undecided | backlog |
-| 6 | CUDA C++ port | explicit shared memory, vectorized loads | `csrc/` | blocked on the toolkit |
+| 6 | CUDA C++ port | explicit shared memory, vectorized loads | `csrc/` | backlog, toolkit ready |
 
 ## 7. Measurement protocol
 

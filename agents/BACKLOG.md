@@ -43,6 +43,9 @@ on purpose, not forgotten.
 ## Infrastructure
 - [ ] `python -m vla_cu bench <kernel>` CLI with JSON output and a small HTML report
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
+- [ ] Launch-overhead experiment: time one tiny kernel against 1000 launched in a loop, to size the CUDA graph win before building one
+- [ ] CUDA graph capture of the GEMV: batch 1 has static shapes, so capture and replay is a natural fit
+- [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 
 ## Open questions

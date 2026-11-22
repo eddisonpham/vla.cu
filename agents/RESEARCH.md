@@ -78,3 +78,11 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local introspection of the installed torch 2.8.0 on 2026-11-18 (`dir(torch.utils.cpp_extension)`, `get_cxx_compiler()`, `is_ninja_available()`, then the same calls behind `vcvars64.bat`). No PyTorch documentation page was read for this.
 - Confidence: high for this install and version; medium for other platforms, where `get_cxx_compiler()` returns `c++` and the ninja check differs.
 - Relevance to vla.cu: `cuda-check` reads exactly these, and the first real extension build has to run in a shell where `vcvars64.bat` was called until the `-ccbin` path is tested.
+
+## torch.compile and vLLM on this Windows install  (2026-11-22)
+- Question: can `torch.compile` and vLLM's PagedAttention be part of this project?
+- Finding, torch.compile: installed and reachable (`torch._dynamo.list_backends()` reports `inductor` and `cudagraphs`), but compiling a 1024x1024 matmul fails after 11.0 s with `BackendCompilerFailed`, cause `ImportError: cannot import name 'triton_key' from 'triton.compiler.compiler'`. `triton-windows` 3.9.0 and the Triton API that torch 2.8.0's inductor expects do not match, so inductor is unusable in this venv as installed.
+- Finding, vLLM: official installation docs list Linux as the only OS and state that vLLM does not support Windows natively, pointing at WSL2 or community forks. Multiple 2026 guides agree.
+- Source: local probe with torch 2.8.0+cu129 and triton 3.9.0 on 2026-11-22; https://docs.vllm.ai/en/latest/getting_started/installation/gpu (accessed 2026-11-22).
+- Confidence: high for both. The torch.compile failure is measured on this machine; the vLLM statement is from its own docs.
+- Relevance to vla.cu: `torch.compile` cannot serve as a baseline here without changing the Triton install or moving to WSL, and vLLM is not an option on native Windows. `torch.cuda.CUDAGraph` is a separate API and is unaffected by the inductor failure; it is untested here.
