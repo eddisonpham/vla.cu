@@ -88,7 +88,7 @@ kernels, so they are used as references and as performance baselines.
 
 | # | Kernel | Concept to learn | Path | State |
 |---|---|---|---|---|
-| 1 | vector add | program id, offsets, mask | `kernels/triton/vector_add.py` | next |
+| 1 | vector add | program id, offsets, mask | `kernels/triton/vector_add.py` | done, 7 tests pass; benchmark next |
 | 2 | reduction | shared memory, warp shuffles | undecided | backlog |
 | 3 | naive matmul | tiling by block | undecided | backlog |
 | 4 | packed 4-bit weights | group scales, unpacking | undecided | backlog |

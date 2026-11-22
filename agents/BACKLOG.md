@@ -7,8 +7,8 @@
 ## Next up (starter chunks, see `agents/STARTER.md`)
 - [x] Chunk 0: environment check (`scripts/env_check.py`) - done 2026-11-18, EXP-001
 - [ ] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`) - unblocked, any time
-- [ ] Chunk 2: first Triton kernel, vector add - unblocked (Triton verified, EXP-002)
-- [ ] Chunk 3: correctness test and bandwidth benchmark - unblocked with Chunk 2
+- [x] Chunk 2: first Triton kernel, vector add - done 2026-11-22, `kernels/triton/vector_add.py`, EXP-007
+- [ ] Chunk 3: correctness test and bandwidth benchmark - tests done, benchmark next
 
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.

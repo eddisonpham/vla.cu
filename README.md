@@ -52,8 +52,9 @@ The environment is real. The kernels are not written yet.
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
 | Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check` |
-| Timing and 7 GB cap (`bench_utils`) | next |
-| Vector add kernel, test, benchmark | pending |
+| Timing and 7 GB cap (`bench_utils`) | pending |
+| Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
+| Vector add benchmark | next |
 | 4-bit packing, fused dequant GEMV | not started |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
