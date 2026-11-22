@@ -26,6 +26,8 @@
 
 ## Toward the project
 - [ ] Pack 4-bit weights with per-group scales plus a PyTorch reference dequantize
+- [ ] int8 path: one scale per output channel, one value per byte, no bit surgery (DEC-016)
+- [ ] One benchmark table across the ladder: fp32, bf16, int8, int4 on identical shapes
 - [ ] Fused dequantize + GEMV (batch 1), Triton first, then CUDA C++
 - [ ] Extract real layer shapes from SmolVLA for benchmarks
 - [ ] Compare against bitsandbytes and torchao on the same shapes
@@ -33,6 +35,10 @@
 - [ ] Fused RMSNorm + residual; small custom attention kernel for short sequences
 - [ ] Register kernels as PyTorch custom ops (`torch.library`); capture a forward pass in a CUDA graph
 - [ ] Plug into LeRobot Edge as a backend, gated by cosine similarity of at least 0.98 vs FP32
+
+Out of scope by decision (DEC-016): 3, 5 and 6-bit bitstreams, and codebook formats
+such as NF4 and FP4. Both are listed in `docs/ARCHITECTURE.md` section 5 and skipped
+on purpose, not forgotten.
 
 ## Infrastructure
 - [ ] `python -m vla_cu bench <kernel>` CLI with JSON output and a small HTML report

@@ -68,7 +68,23 @@ flowchart LR
 | Latency floor | about 0.62 ms | about 2.3 ms |
 | Remaining room under the 7 GB cap | activations at batch 1 are megabytes; the rest absorbs workspace and fragmentation | |
 
-## 5. Kernel roadmap
+## 5. Precision ladder
+
+Only two rungs need a kernel. The dense rungs exist so every result has
+something honest to compare against.
+
+| Format | Storage per parameter | Unpacking | Role | Read per pass, 450M parameters |
+|---|---|---|---|---|
+| fp32 | 4 B | none | exact reference in tests | 1.8 GB |
+| bf16 | 2 B | none | dense baseline, what plain torch runs | 900 MB |
+| int8, one scale per channel | 1 B | one value per byte, no bit surgery | first quantization win, near lossless | 450 MB |
+| int4, one scale per group of 64 | 0.5 B plus a shared scale | two values per byte, shift and mask | project target | 225 MB plus about 14 MB |
+
+At 384 GB/s those become about 4.7, 2.3, 1.2 and 0.62 ms. Arithmetic, not
+measurements. fp32 and bf16 are not kernel work: torch already ships those
+kernels, so they are used as references and as performance baselines.
+
+## 6. Kernel roadmap
 
 | # | Kernel | Concept to learn | Path | State |
 |---|---|---|---|---|
@@ -79,7 +95,7 @@ flowchart LR
 | 5 | fused dequant GEMV | read packed bytes once, unpack in registers | undecided | backlog |
 | 6 | CUDA C++ port | explicit shared memory, vectorized loads | `csrc/` | blocked on the toolkit |
 
-## 6. Measurement protocol
+## 7. Measurement protocol
 
 | Step | Handle | Gate |
 |---|---|---|
@@ -88,7 +104,7 @@ flowchart LR
 | Timing | CUDA events, warmup plus 100 iterations | never wall clock |
 | Report | GB/s and fraction of 384 GB/s | never milliseconds alone |
 
-## 7. Tool stack
+## 8. Tool stack
 
 | Piece | Version | Why it is here |
 |---|---|---|

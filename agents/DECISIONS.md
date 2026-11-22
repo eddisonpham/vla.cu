@@ -116,3 +116,12 @@
 - Cost accepted: the verdict means "prerequisites present", not "a build succeeded". The docstring and report header say so, and EXP-005 records it as configuration only.
 - Revisit if: the loader starts honoring extra variables (a pinned `CC`, `TORCH_CUDA_ARCH_LIST`), or a build fails while the task says ready.
 - Status: active
+
+## DEC-016: Precision scope is fp32, bf16, int8, int4  (2026-11-18)
+- Context: the human proposed a ladder of "BF32, 16, int8, 4" to bound how far quantization is generalized, instead of leaving the bit width open.
+- Naming correction: `bf32` is not a storage format. The two dense rungs are fp32 (4 B, exact) and bf16 (2 B, what plain torch runs). BF32 as an input name maps to fp32. TF32 is a compute mode inside tensor cores, not a way to store weights, so it is not a rung.
+- Options considered: (a) support every bit width, including 3, 5 and 6; (b) pick the four that matter and design the unpack so a width is a parameter; (c) fix 4-bit only, hardcode the shift.
+- Chosen and why: (b). fp32 and bf16 need no kernel at all, since torch ships them, so they cost nothing and give every result a reference and a baseline. int8 is one value per byte, so it isolates scale handling from bit packing and is the cheap second format that proves the abstraction. int4 is the project target. A width that is a power of two is one shift and one mask, so the ladder is a parameter, not a redesign. (a) buys formats whose packing straddles byte boundaries and whose implementations are hundreds of lines of lookup tables, which teaches little here; (c) makes int8 and int2 a rewrite later.
+- Consequences: the unpacking lives in one named function taking the width as a compile-time constant, decided now and used from the first kernel. `docs/ARCHITECTURE.md` section 5 holds the ladder with per-pass traffic. 3, 5 and 6-bit bitstreams and codebook formats (NF4, FP4) are out of scope and recorded as such rather than silently ignored.
+- Revisit if: the human wants a codebook format, in which case it is an add-on to the int4 path, or wants non-power-of-two widths after the fused kernel works.
+- Status: active

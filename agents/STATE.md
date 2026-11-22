@@ -34,6 +34,7 @@
 
 ## Current chunk
 None in progress. Starter chunks 1 to 3 remain; all three are unblocked.
+Precision scope fixed: fp32 reference, bf16 baseline, int8, int4 (DEC-016).
 
 ## Open questions for the human
 - Next: timing utilities (`bench_utils.py`), or straight to the vector add kernel and its benchmark?
