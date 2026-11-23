@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `block`, `fuzz`, `bundle`, `style` |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -79,6 +79,11 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Rotation inside the fast path | neutral on Gaussian weights and 38 percent slower per block, so opt-in (EXP-030) |
 | Clock pinning | refused without administrator rights, paired ratios instead (EXP-032) |
 | Two GEMV kernels chained in a CUDA graph | done, 0.031 ms plain against 0.012 ms graphed, bit exact |
+| Shared input validator | one module fronts all seven wrappers, four missing checks closed (EXP-034) |
+| Grouped int8 kernel | attention block reads 0.99994 at 0.019 ms graphed, 1.54x the int4 time (EXP-035) |
+| Action block stack | four blocks at int8 everywhere read 0.99951 cosine at 0.140 ms, 3.94x the fp32 stack (EXP-036) |
+| Seeded fuzz gate | 160 cases across five kernels, zero failures (EXP-037) |
+| Versioned weight bundle | bit-exact round trip, 5.81x smaller than fp32 at int4, 5.68 ms to load four blocks (EXP-038) |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -95,6 +100,16 @@ bench/            benchmarks; results land in bench/results/, gitignored
 docs/             architecture: diagrams and tables
 agents/           memory: state, experiments, research, decisions, backlog
 ```
+
+## Install
+
+```bash
+pip install -e . --no-deps
+pip install -e .[triton,dev]
+```
+
+The base install needs torch only. The Triton extra resolves to `triton-windows` on
+Windows, because the official wheel has no Windows build.
 
 ## How to run
 
@@ -117,6 +132,10 @@ python -m vla_cu rotate
 python -m vla_cu fastpath
 python -m vla_cu crossover
 python -m vla_cu attn
+python -m vla_cu block
+python -m vla_cu fuzz
+python -m vla_cu bundle
+python -m vla_cu style
 ```
 
 The `cuda` task compiles `csrc/int4_gemv.cu` on first use, so it needs `cl.exe` and
@@ -136,6 +155,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 5. No comments in code. Docstrings are short, and deeper explanation lives in
    `docs/`.
 6. Sanitize CUDA kernels with `compute-sanitizer` before trusting them.
+7. `python -m vla_cu style` is a gate: zero violations, and CI runs it on every push.
 
 ## Where the reasoning lives
 

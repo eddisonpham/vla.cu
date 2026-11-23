@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `block`, `fuzz`, `bundle`, `style` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -106,6 +106,10 @@ kernels, so they are used as references and as performance baselines.
 | 16 | int4 GEMM | dequantize into `tl.dot`, sweep M from 1 to 64 | `kernels/triton/int4_gemm.py`, `bench/crossover.py` | done, GEMM wins from M = 2, 25 to 51x at M = 50 |
 | 17 | attention block | q, k, v on one activation vector through the grouped launch | `bench/attention.py` | done, 0.011 ms graphed against 0.052 fp32, cosine 0.98804 |
 | 18 | rotation in the fast path | block Hadamard at pack time plus a per-block activation rotate | `vla_cu/rotate.py`, `bench/fastpath.py` | done, neutral on Gaussian weights, 0.005 ms per block, opt-in |
+| 19 | grouped int8 | segment table for the int8 path, the same idea as the int4 grouped launch | `kernels/triton/int8_grouped_gemv.py` | done, attention reads 0.99994 at int8, 0.019 ms graphed |
+| 20 | block composition | attention then MLP, precision chosen per matrix | `vla_cu/blocks.py` | done, four blocks read 0.99951 cosine at 0.140 ms |
+| 21 | fuzz gate | seeded random shapes against float64 | `bench/fuzz.py` | done, 160 cases, zero failures |
+| 22 | weight bundle | versioned archive of packed matrices, CPU load | `vla_cu/bundle.py` | done, bit exact, 5.81x smaller than fp32 |
 
 ## 7. Measurement protocol
 
@@ -125,3 +129,21 @@ kernels, so they are used as references and as performance baselines.
 | Triton | 3.9.0 via `triton-windows` | fast kernel iteration with block and mask reasoning |
 | CUDA C++ | toolkit 12.9.2, MSVC 14.44 | full control over shared memory and vectorized loads |
 | Nsight and sanitizer | Nsight 2025.x, sanitizer 2025.2.1 | why a kernel is slow, and whether it is unsafe |
+
+## 9. CUDA kernels
+
+The two C++ ports are the fastest path and the only sources that need `nvcc`. Their
+mapping lives here because source files carry no comments (DEC-010).
+
+| Kernel | Mapping | Memory access | Expected bottleneck |
+|---|---|---|---|
+| `int4_gemv.cu` | one warp per output row; a lane reads 4 packed bytes, 8 weights, per step; 8 lanes share one 64-weight group and its scale | 128 contiguous bytes per warp instruction; two `float4` activation loads per lane; shuffle reduction, no shared memory | memory, N * K / 2 bytes |
+| `int8_gemv.cu` | one warp per output row; a lane reads 16 int8 weights as one 16-byte vector; a guarded scalar tail covers K not divisible by 512 | fully coalesced 16-byte loads with `__ldcs`; four `float4` activation loads; shuffle reduction, no barrier | memory, N * K bytes |
+
+The int4 file holds three variants so one run can attribute cost to one change. Variant
+0 keeps one guarded loop, variant 1 splits it into a full-trip loop plus a tail so the
+compiler can unroll four steps, and variant 2 adds `__ldcs` to the weight load. Every
+launch uses `at::cuda::getCurrentCUDAStream()`, because a launch on the legacy default
+stream is invisible to CUDA graph capture (DEC-031). The host wrapper requires group 64,
+K divisible by 64, contiguous tensors and 16-byte aligned activations for int4; the int8
+wrapper requires K divisible by 16 and 16-byte aligned weights and activations.

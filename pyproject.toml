@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-cu"
+version = "0.1.0"
+description = "Fused 4-bit dequantize and matmul kernels for batch-1 vision-language-action policies"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["torch>=2.8"]
+
+[project.optional-dependencies]
+triton = [
+    "triton>=3.9; sys_platform != 'win32'",
+    "triton-windows>=3.9; sys_platform == 'win32'",
+]
+dev = ["pytest>=8", "ninja>=1.13"]
+
+[tool.setuptools.packages.find]
+include = ["vla_cu*", "kernels*", "bench*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

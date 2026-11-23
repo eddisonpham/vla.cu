@@ -1,22 +1,3 @@
-// Fused int8 dequantize and GEMV for batch 1, one warp per output row, streaming loads.
-//
-// Thread to data mapping: a warp owns one output row. Each lane loads 16 int8 weights
-// as one 16-byte vector and the matching 16 activations as four float4 loads, so a warp
-// step covers 512 contiguous weights with 512 bytes of weight traffic. The warp reduces
-// with shuffles and lane 0 applies the row scale and writes the output, so there is no
-// shared memory and no barrier.
-//
-// Memory access: one 16-byte load per lane per step, fully coalesced, marked streaming
-// with __ldcs because each weight is read exactly once and must not evict the activation
-// vector, which every row reuses. A guarded scalar tail handles K not divisible by 512,
-// which is the common case for real widths such as 960. K must be a multiple of 16 so
-// that every row base stays 16-byte aligned for the vector loads.
-//
-// The launch uses the current torch stream, not the legacy default stream. That is what
-// makes the kernel capturable: a kernel on the legacy default stream is invisible to
-// stream capture, so a graph would record everything except this launch.
-//
-// Expected bottleneck: memory, weights only, N * K bytes.
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAException.h>
@@ -97,7 +78,7 @@ __global__ void int8_gemv_kernel(const signed char* __restrict__ weights,
     }
 }
 
-}  // namespace
+}
 
 void int8_gemv_launch(torch::Tensor weights, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
     TORCH_CHECK(weights.is_cuda() && scales.is_cuda() && x.is_cuda() && out.is_cuda(), "expected CUDA tensors");

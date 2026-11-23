@@ -1,29 +1,3 @@
-// Fused 4-bit dequantize and GEMV for batch 1, one warp per output row.
-//
-// Thread to data mapping: a warp owns one output row. Each lane loads four packed
-// bytes (a uint32) per step, which is eight weights, and the eight lanes of a warp
-// segment share one 64-weight group, so the group scale is a broadcast load instead
-// of a per-byte gather. The warp reduces with shuffles and lane 0 writes the output,
-// so no shared memory and no block-wide barrier are needed.
-//
-// Memory access: packed bytes are read four at a time per lane, 128 contiguous bytes
-// per warp instruction, and each lane reads its eight activations with two float4
-// loads. Weights are read once, activations once per row that is resident in cache.
-// Expected bottleneck: memory, weights only, N * K / 2 bytes.
-//
-// Three variants share this file so one run can attribute cost to one change at a
-// time. Variant 0 keeps the original single guarded loop. Variant 1 splits the loop
-// into a full-trip-count main loop with no bounds check, which lets the compiler
-// unroll four steps and keep four weight loads in flight, plus a guarded tail.
-// Variant 2 is variant 1 with the weight load marked streaming (__ldcs), because
-// each packed word is read exactly once and should not evict the activation vector.
-//
-// Every variant launches on the current torch stream rather than the legacy default
-// stream, because a launch on the legacy stream is invisible to stream capture and a
-// CUDA graph would then record everything except the kernel.
-//
-// Preconditions enforced by the host wrapper: group size 64, K divisible by 64, all
-// tensors fp32 or uint8, contiguous, and 16-byte aligned activations.
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAException.h>
@@ -155,7 +129,7 @@ void launch_impl(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, to
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-}  // namespace
+}
 
 void int4_gemv_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
     launch_impl(packed, scales, x, out, 0);
