@@ -26,9 +26,13 @@
 - [ ] Pin clocks with `nvidia-smi -lgc` (needs admin) and repeat EXP-017, EXP-020, EXP-021, EXP-022.
 - [x] Wire the measured wins into a default path. Done 2026-11-23, EXP-027 and EXP-028: native int8 and int4 streaming kernels, launched on the torch stream so they capture, one block 0.015 ms against fp32's 0.069, bit exact.
 - [x] Grouped launch in a real attention block. Done 2026-11-23, EXP-031: two launches, 0.011 ms graphed against fp32's 0.052, bit exact, cosine 0.98804.
-- [ ] An int8 grouped kernel. The attention block is all int4 and reads 0.98804; the MLP's int8 up projection is what takes it to 0.99451.
+- [x] An int8 grouped kernel. Done 2026-11-23, EXP-035: the attention block reads 0.99994 at int8 for 1.54x the int4 time.
+- [x] Package the project, add a style gate and CPU CI. Done 2026-11-23, EXP-039: editable install works, 47 CUDA comment lines moved to `docs/ARCHITECTURE.md`, gate at zero.
+- [ ] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error.
+- [ ] A GPU runner for CI, so `fuzz` and the native suite are not manual gates.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
 - [ ] A real checkpoint: three layers, cosine per layer, with and without rotation, which is the only way to settle DEC-034.
+- [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.
 - [ ] Pin clocks from an elevated shell (`nvidia-smi -lgc 2000`) and re-run the inconclusive experiments (EXP-032).
 - [ ] A capture-safety check in the tests: assert `torch.equal` between a graph and the eager chain for any kernel added later (the rule in DEC-031).
 - [ ] Write an int4 GEMM that dequantizes into `tl.dot`, and sweep M from 1 to 64 for the GEMV crossover.
@@ -82,7 +86,7 @@ on purpose, not forgotten.
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
-- [ ] Close the two input gaps left in EXP-033: check `block_n` for a power of two, and prove the grouped segment-run invariant without a per-call sync.
+- [x] Close the two input gaps left in EXP-033. Done 2026-11-23, EXP-034: `block_n` is checked. The grouped segment-run invariant stays documented, because proving it needs a device sync.
 
 ## Open questions
 - ~~Which GPU, and what is its peak bandwidth?~~ Answered in `HARDWARE.md`: RTX 5060 Laptop, 384 GB/s.
