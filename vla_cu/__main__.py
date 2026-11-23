@@ -21,6 +21,10 @@ TASKS: dict[str, str] = {
     "matrix": "bench.matrix",
     "layer": "bench.layer",
     "cuda": "bench.cuda_compare",
+    "stream": "bench.bandwidth_probe",
+    "grouped": "bench.grouped",
+    "m50": "bench.m50",
+    "rotate": "bench.rotation",
 }
 
 
