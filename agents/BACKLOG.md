@@ -26,7 +26,7 @@
 
 ## Toward the project
 - [ ] Pack 4-bit weights with per-group scales plus a PyTorch reference dequantize
-- [ ] int8 path: one scale per output channel, one value per byte, no bit surgery (DEC-016)
+- [x] int8 path: one scale per output channel, one value per byte, no bit surgery - done 2026-11-22, `kernels/triton/int8_gemv.py`, EXP-010: 92.4% of peak at 8192 x 16384
 - [ ] One benchmark table across the ladder: fp32, bf16, int8, int4 on identical shapes
 - [ ] Fused dequantize + GEMV (batch 1), Triton first, then CUDA C++
 - [ ] Extract real layer shapes from SmolVLA for benchmarks
@@ -44,7 +44,8 @@ on purpose, not forgotten.
 - [ ] `bench` with a kernel argument, JSON output and a small HTML report (vector add only so far)
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
 - [x] Launch-overhead experiment - done 2026-11-22, EXP-009: 16.71 us from Python, 0.63 us per graph node
-- [ ] CUDA graph capture of the GEMV: batch 1 has static shapes, so capture and replay is a natural fit. Justified by EXP-009, not yet built (DEC-018)
+- [x] CUDA graph capture of a two-kernel GEMV chain - done 2026-11-22, EXP-011: 0.031 ms plain against 0.012 ms graphed, exact. A whole layer stack is still open
+- [ ] BLOCK_K sweep for the int8 GEMV, and split-K for layers with few output rows (DEC-019)
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 

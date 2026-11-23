@@ -24,10 +24,17 @@ SIZES = (1 << 12, 1 << 20, 1 << 24)
 WARMUP = 25
 ITERATIONS = 100
 BYTES_PER_ELEMENT = 12
+GRAPH_REPEAT = 10
+GRAPH_WARMUP = 5
+GRAPH_ITERATIONS = 20
 
 
-def measure(n_elements: int) -> tuple[float, float]:
-    """Return (torch GB/s, triton GB/s) for one size, same buffers for both."""
+def measure(n_elements: int) -> tuple[float, float, float]:
+    """Return (torch GB/s, triton GB/s, graphed triton GB/s) on the same buffers.
+
+    The graph holds GRAPH_REPEAT launches, so one replay overhead is split across
+    them and the per-call number stays comparable with a plain Python launch.
+    """
     x = torch.randn(n_elements, device="cuda")
     y = torch.randn(n_elements, device="cuda")
     out = torch.empty_like(x)
@@ -41,7 +48,18 @@ def measure(n_elements: int) -> tuple[float, float]:
 
     torch_s = time_call(torch_call, WARMUP, ITERATIONS)
     triton_s = time_call(triton_call, WARMUP, ITERATIONS)
-    return bandwidth_gb_s(n_bytes, torch_s), bandwidth_gb_s(n_bytes, triton_s)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for _ in range(GRAPH_REPEAT):
+            triton_call()
+    graph_s = time_call(graph.replay, GRAPH_WARMUP, GRAPH_ITERATIONS) / GRAPH_REPEAT
+
+    return (
+        bandwidth_gb_s(n_bytes, torch_s),
+        bandwidth_gb_s(n_bytes, triton_s),
+        bandwidth_gb_s(n_bytes, graph_s),
+    )
 
 
 def main() -> int:
@@ -50,13 +68,19 @@ def main() -> int:
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s | BLOCK {BLOCK_SIZE}")
     print(f"warmup {WARMUP} | iterations {ITERATIONS} | bytes per element {BYTES_PER_ELEMENT}")
     print()
-    print(f"{'n':>10}  {'moved MB':>9}  {'torch GB/s':>10}  {'triton GB/s':>11}  {'triton % peak':>13}")
+    print(
+        f"{'n':>10}  {'moved MB':>9}  {'torch GB/s':>10}  {'triton GB/s':>11}  "
+        f"{'graph GB/s':>10}  {'graph % peak':>12}"
+    )
 
     for n_elements in SIZES:
-        torch_gbs, triton_gbs = measure(n_elements)
+        torch_gbs, triton_gbs, graph_gbs = measure(n_elements)
         moved_mb = n_elements * BYTES_PER_ELEMENT / 1e6
-        ratio = fraction_of_peak(triton_gbs)
-        print(f"{n_elements:>10}  {moved_mb:>9.2f}  {torch_gbs:>10.1f}  {triton_gbs:>11.1f}  {ratio:>12.1%}")
+        ratio = fraction_of_peak(graph_gbs)
+        print(
+            f"{n_elements:>10}  {moved_mb:>9.2f}  {torch_gbs:>10.1f}  {triton_gbs:>11.1f}  "
+            f"{graph_gbs:>10.1f}  {ratio:>11.1%}"
+        )
 
     return 0
 

@@ -9,36 +9,38 @@
 
 ## Done so far
 - Skeleton, `.venv` (torch 2.8.0+cu129), environment check, hardware record, task runner.
-- Triton verified on native Windows and sm_120, CUDA toolkit and host compiler checked (EXP-002 to EXP-005).
-- Precision ladder fixed: fp32 reference, bf16 baseline, int8, int4 (DEC-016).
+- Triton verified on native Windows and sm_120, toolkit and host compiler checked (EXP-002 to EXP-005).
+- Precision ladder: fp32 reference, bf16 baseline, int8, int4 (DEC-016).
 - torch.compile unusable here, vLLM Linux only (EXP-006).
-- Vector add kernel, 7 tests pass, sanitizer clean on one launch (EXP-007).
-- Benchmark utilities and vector add bandwidth: 330.9 GB/s, 86.2 percent of 384 at 16M elements (EXP-008).
-- Launch overhead measured: 16.7 us from Python, 0.63 us as a graph node (EXP-009).
+- Vector add kernel, 7 tests, sanitizer clean (EXP-007); 86.2 percent of peak at 16M (EXP-008).
+- Launch overhead: 16.71 us from Python, 0.63 us per graph node (EXP-009, DEC-018).
+- int8 GEMV with per-channel scales, 9 tests, sanitizer clean, 92.4 percent of peak at 8192 x 16384 (EXP-010).
+- Graphed vector add and a two-kernel GEMV chain, both bit exact (EXP-011).
 
 ## What works
-- `python -m vla_cu env`, `probe`, `cuda-check`, `bench`, `launch`.
-- `.venv/Scripts/python.exe -m pytest -q`: 7 passed, sizes 0 to 1,000,003, bit exact.
-- CUDA graph capture of Triton kernels on native Windows, verified working.
+- Tasks: `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`.
+- `.venv/Scripts/python.exe -m pytest -q`: 16 passed, awkward sizes included.
+- CUDA graph capture of Triton kernels on native Windows, verified exact against the plain path.
 - git: commits authored as Eddison Pham; local commits are not always pushed.
 
 ## What's broken or missing
-- No graph in the actual inference path yet, only in the experiment.
-- Only one BLOCK_SIZE measured, so 1024 is a default, not a chosen value.
-- The 14 percent gap to spec peak in EXP-008 is still unexplained.
-- `compute-sanitizer` around the whole pytest run exceeded 600 s; single launches are clean.
-- Reduction, matmul, 4-bit packing, fused GEMV, CUDA C++ port: none started.
+- 4-bit packing and the fused dequant GEMV: not started, and it is the project target.
+- `BLOCK_K` fixed at 1024, never swept. Split-K not implemented for layers with few rows (DEC-019).
+- No real SmolVLA layer shapes yet, only round numbers.
+- The naive GEMV baseline is torch's int8 cast path, which measured about 171 GB/s, so the 18.6x is partly a slow baseline.
+- The 14 percent gap to spec peak in EXP-008 remains unexplained.
+- `compute-sanitizer` around the whole pytest run exceeds 600 s; single launches are clean.
 - `docs/PRIMER.md` exists untracked, to be deleted on request.
 
 ## Current chunk
-None in progress. Next is int8 GEMV, the first chunk with a reduction and a scale.
-The launch-overhead answer means graphs belong in the design, not as an afterthought.
+None in progress. Three chunks delivered: int8 GEMV, graphed vector add, graphed two-kernel chain.
+The next real milestone is int4 packing plus the fused dequant GEMV.
 
 ## Open questions for the human
-- int8 GEMV next, or the block sweep now that the launch number explains the 4K row?
-- Should the GEMV test suite run both plain and graphed, or keep graphs to the benchmark?
+- int4 packing next, or a short BLOCK_K sweep to close the tuning question on a kernel that matters?
+- Extract SmolVLA layer shapes now, so benchmarks stop using round numbers?
 
 ## Suggested next options (see `BACKLOG.md`)
-1. int8 GEMV with per-channel scales against a dequantize-then-matmul reference.
-2. Graph the vector add benchmark to confirm the real workload sees the 16 us saving.
-3. BLOCK_SIZE sweep at 16M, cheap closure on the tuning question.
+1. Pack 4-bit weights with per-group scales and a reference dequantize, no kernel yet.
+2. BLOCK_K sweep and split-K for the int8 GEMV, with a measured table.
+3. Pull real layer shapes from SmolVLA and rerun the ladder on them.

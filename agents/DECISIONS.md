@@ -141,3 +141,11 @@
 - Consequences: every benchmark of a multi-kernel chain reports a plain column and a graphed column, and any kernel on the speed path must be capture safe, meaning no host synchronization and no allocation inside capture.
 - Revisit if: a kernel needs a host-side value between launches in a way that breaks capture, or the real model turns out to be a few large kernels rather than many small ones.
 - Status: active
+
+## DEC-019: GEMV is one program per output row, scale applied after the reduction  (2026-11-22)
+- Context: the first project kernel fixed a mapping that later quantized kernels will inherit.
+- Options considered: (a) one program per output row walking K in BLOCK_K steps; (b) split K across programs and combine with atomics; (c) one program per output element with no reduction.
+- Chosen and why: (a). A row is contiguous, so its loads coalesce; the reduction stays inside one program, so there are no atomics and no second pass; and the per-channel scale is constant along the reduction, so it multiplies the finished sum once instead of every product. (c) would re-read the whole activation vector per element. (b) is the fix for shapes where N is small relative to the SM count, which is not the case yet.
+- Consequences: the grid is N, so a layer with fewer rows than SMs underuses the GPU, a known limit to revisit with real SmolVLA shapes. Every program re-reads x, which is free only while K floats stay in cache.
+- Revisit if: a target layer has N below about 64, or K grows until x stops fitting in L2.
+- Status: active

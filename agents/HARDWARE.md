@@ -8,6 +8,7 @@
 - Total memory: 7.9 GB (8151 MiB) | Project budget: 7 GB (enforced in `vla_cu/bench_utils.py`)
 - Compute capability: 12.0 (sm_120) -> needs CUDA 12.8+ builds; older wheels will not run on it
 - SM count: 26
+- L2 cache: 33.6 MB (torch `L2_cache_size`). Any weight matrix under 32 MiB benchmarks as cache, not DRAM, which is why the int8 table carries an L2 column (EXP-010)
 - Theoretical peak memory bandwidth: 384 GB/s (GDDR7, 128-bit bus, 24 Gbps effective) | Source: NVIDIA "GeForce RTX 50 Series Laptop GPU" spec table, https://www.nvidia.com/en-us/geforce/laptops/50-series (accessed 2026-11-18); cross-checked TechPowerUp, https://www.techpowerup.com/gpu-specs/geforce-rtx-5060-mobile.c4230
 
 Caveat: this is a 45-100 W laptop GPU, so clocks (and therefore achieved bandwidth)
@@ -40,6 +41,9 @@ peak", not as an expectation for any single run.
 | 2026-11-22 | vector add, torch against Triton, 16M fp32, 201 MB moved | torch 309.7 GB/s, Triton 330.9 GB/s (86.2 percent of 384) | `python -m vla_cu bench` | EXP-008 |
 | 2026-11-22 | vector add, 1M fp32, 12.6 MB, cache resident | torch 1186.7 GB/s, Triton 966.0 GB/s, above DRAM peak so it measures L2 | `python -m vla_cu bench` | EXP-008 |
 | 2026-11-22 | launch overhead, 1-element Triton kernel, 1000 launches | 16.71 us per launch from Python, 0.63 us per graph node, 26 times cheaper | `python -m vla_cu launch` | EXP-009 |
+| 2026-11-22 | int8 GEMV fused, 8192 x 16384, 134 MB weights, DRAM bound | 354.7 GB/s, 92.4 percent of peak, 0.379 ms; naive path 7.046 ms | `python -m vla_cu gemv` | EXP-010 |
+| 2026-11-22 | int8 GEMV fused, 4096 x 8192, weights equal L2 | 806.2 GB/s, which is L2 bandwidth and not a DRAM result | `python -m vla_cu gemv` | EXP-010 |
+| 2026-11-22 | two int8 GEMV kernels chained, 1024 -> 1024 -> 512 | plain 0.031 ms, graph replay 0.012 ms, bit exact | `python -m vla_cu graph` | EXP-011 |
 
 ## Environment change log
 - 2026-11-18: file created, nothing detected yet.

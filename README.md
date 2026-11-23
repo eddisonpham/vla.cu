@@ -44,19 +44,22 @@ Details and sources: `agents/HARDWARE.md`.
 
 ## Status
 
-The environment is real, and two measurement kernels exist: a vector add with tests,
-and a launch-overhead probe. The project kernels are not written yet.
+The environment is real and the first project kernel exists: a fused int8 GEMV with
+per-channel scales, at 92.4 percent of peak memory bandwidth on a shape that does
+not fit in cache. The 4-bit path, the actual target, is not started.
 
 | Piece | State |
 |---|---|
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph` |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
 | Launch overhead, graph against Python | 16.71 us per launch from Python, 0.63 us per graph node |
+| int8 GEMV with per-channel scales | done, 354.7 GB/s, 92.4 percent of 384, at 8192 x 16384 |
+| Two GEMV kernels chained in a CUDA graph | done, 0.031 ms plain against 0.012 ms graphed, bit exact |
 | 4-bit packing, fused dequant GEMV | not started |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -83,6 +86,8 @@ python -m vla_cu probe
 python -m vla_cu cuda-check
 python -m vla_cu bench
 python -m vla_cu launch
+python -m vla_cu gemv
+python -m vla_cu graph
 ```
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both
