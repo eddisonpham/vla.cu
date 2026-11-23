@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -94,8 +94,14 @@ kernels, so they are used as references and as performance baselines.
 | 4 | naive matmul | tiling by block | undecided | backlog |
 | 5 | packed 4-bit weights | group scales, unpacking | `vla_cu/quant.py` | done, layout and reference dequantize |
 | 6 | fused dequant GEMV | group-major reduction, scale per group not per byte | `kernels/triton/int4_gemv.py` | done, 0.230 ms, 85.5% of peak at 8192 x 16384 |
-| 7 | CUDA C++ port | warp per row, uint32 weight loads, shuffle reduction | `csrc/int4_gemv.cu` | done, 0.240 ms, agrees with Triton on every shape |
+| 7 | CUDA C++ port | warp per row, uint32 weight loads, shuffle reduction | `csrc/int4_gemv.cu` | done, three variants: baseline, unroll, streaming |
 | 8 | custom op | `torch.library.custom_op` plus a fake kernel | `vla_cu/ops.py` | done, one MLP block end to end |
+| 9 | streaming loads | `__ldcs` on one-shot weights, keep x resident | `csrc/int4_gemv.cu` | done, fastest kernel, 0.198 to 0.220 ms at 8192 x 16384 |
+| 10 | grouped launch | one launch for a layer's projections, segment table | `kernels/triton/int4_grouped_gemv.py` | done, 2.73x at 960 x 960, bit identical |
+| 11 | graphed block | capture two launches, replay | `bench/layer.py` | done, 0.018 to 0.019 ms against 0.053 raw |
+| 12 | attainable ceiling | read-only streaming probe, repeated and interleaved | `bench/bandwidth_probe.py` | done, 346 to 360 GB/s, spread up to 2x |
+| 13 | M = 50 probe | 50 GEMV calls against one GEMM on the expert shape | `bench/m50.py` | done, the expert needs a GEMM, 33 to 148x |
+| 14 | rotation | block Hadamard before packing, accuracy not speed | `bench/rotation.py` | done, outlier cosine 0.98788 to 0.99586 |
 
 ## 7. Measurement protocol
 

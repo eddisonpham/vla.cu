@@ -288,3 +288,161 @@
 - Sanitizer, unresolved: `compute-sanitizer` 2025.2.1 reports `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction` when it instruments this extension, both with the default tool and with `--tool memcheck --target-processes all`. That is a tooling failure, not a memory report, so the CUDA kernel has no clean sanitizer pass yet. The Triton kernels are clean. Do not read this as verified memory safety.
 - Build caveat: the extension only builds inside a shell where `vcvars64.bat` has run (EXP-004, EXP-005), and outside that shell torch invalidates the cached build and fails on ninja, so the `cuda` task must run from a vcvars shell.
 - Follow-ups: `ncu` on both kernels to see whether the 4 percent is occupancy or issue stalls; try two rows per warp; graph the CUDA launch to separate dispatch from kernel time.
+
+## EXP-017: the attainable read bandwidth on this part  (2026-11-23, commit 97ad2f0)
+- Goal / question: H1 in `OPTIMIZATIONS.md`. Every "% of peak" in this repo divides by a 384 GB/s spec sheet. What does a read-only kernel actually deliver, and how repeatable is it?
+- Change (one thing): added `bench/bandwidth_probe.py` (task `stream`), a vectorized read with no unpacking, 5 repeats per configuration, repeats interleaved across block sizes after the first run showed order effects.
+- Prediction: agent, from H1: a pure read reaches 350 to 365 GB/s, so int4 at 328 has 6 to 10 percent of headroom, not 15. No human prediction this session.
+- Command: `python -m vla_cu stream`
+- GPU / environment: RTX 5060 Laptop GPU, 26 SM, L2 33.6 MB, spec peak 384 GB/s, warmup 5, 20 iterations, 5 repeats.
+- Result (measured), best sample per configuration:
+
+| size MB | BLOCK 1024 | BLOCK 4096 | BLOCK 16384 |
+|---|---|---|---|
+| 67.1 | 355.8 GB/s (92.7%) | 333.0 (86.7%) | 355.3 (92.5%) |
+| 134.2 | 346.3 (90.2%) | 347.0 (90.4%) | 360.2 (93.8%) |
+
+- Result (measured), spread: the ratio of best to worst sample inside one configuration ranged from 53.5 to 106.8 percent. The worst samples sat near 170 to 225 GB/s while the best sat at 330 to 360 in the same configuration, minutes apart.
+- Explanation / hypothesis: the ceiling is 346 to 360 GB/s, 90 to 94 percent of the spec sheet, which is what a 45 to 100 W laptop part sustains. The enormous spread is a clock and power state effect, not a kernel effect: the medians of some configurations sat at 170 GB/s while a neighbouring configuration in the same loop sat at 330, and the pattern did not follow block size or buffer size.
+- Verdict: worked, H1 confirmed. int4 at 328.2 GB/s (EXP-014) is 91 to 95 percent of attainable, so single digit percent of headroom, and every single-sample table in this repo carries a spread larger than the effects it reports.
+- Follow-ups: fixed clocks (`nvidia-smi -lgc`) would remove the spread but need administrator rights. Until then, report best-of-N and never compare across sessions.
+
+## EXP-018: what a CUDA graph does to the MLP block  (2026-11-23, commit 7d8f8e3)
+- Goal / question: H6. The block is 19.7 MB fp32 and fits in L2, so EXP-015 said its fused path loses only through dispatch. How much is Python, how much is the launch, how much is the kernel?
+- Change (one thing): added two paths to `bench/layer.py`, "fused raw" (the two kernel launches with preallocated buffers, no custom op) and "fused graph" (a `torch.cuda.CUDAGraph` of those two launches).
+- Prediction: agent, from H6: 0.085 ms becomes about 0.055 with a graph. No human prediction this session.
+- Command: `python -m vla_cu layer`, four times, two before and two after the `warm_gpu` fix.
+- GPU / environment: RTX 5060 Laptop GPU, L2 33.6 MB, block 960 to 2560 to 960, batch 1, warmup 10, 50 iterations.
+- Result (measured), milliseconds:
+
+| run | fp32 | dequantize | fused ops | fused raw | fused graph |
+|---|---|---|---|---|---|
+| A | 0.152 | 0.075 | 0.159 | 0.053 | 0.019 |
+| B | 0.150 | 0.071 | 0.224 | 0.054 | 0.019 |
+| C, after warm_gpu | 0.073 | 0.145 | 0.109 | 0.059 | 0.019 |
+| D, after warm_gpu | 0.082 | 0.094 | 0.135 | 0.053 | 0.018 |
+
+- Explanation / hypothesis: the graph column is the only stable one, 0.018 to 0.019 ms in all four runs, and raw launches are stable at 0.053 to 0.059. The custom op path is both slower and unstable, 0.109 to 0.224, because it validates and allocates on every call. Cosine stayed at 0.99346 on every path, so the graph reproduces the eager chain exactly.
+- Surprise (the important one): in run A fp32 read 0.150 and dequantize 0.071, and in run B the two swapped places. Whichever path is timed first is slow. Adding `warm_gpu()` to `bench_utils` fixed that case and did not fix the general instability: in runs C and D the second path became the slow one. fp32 settled at 0.073 to 0.082, matching EXP-015's 0.072.
+- Verdict: worked, H6 confirmed with room to spare. The graph costs 0.0185 against 0.053 raw, a 2.8x, and against fp32 at 0.073 to 0.082 it is 3.8x to 4.5x. The custom op layer is the slowest option on this block.
+- Follow-ups: the instability is now the top measurement problem, see DEC-029.
+
+## EXP-019: profiling the int4 kernel with Nsight Compute  (2026-11-23, commit 97ad2f0)
+- Goal / question: H5. Is the 85 percent a DRAM limit, a latency limit or an occupancy limit?
+- Change (one thing): added `scripts/profile_target.py`, three launches of the Triton int4 kernel at 8192 x 16384, so a profiler can skip two and capture one.
+- Prediction: agent, from `OPTIMIZATIONS.md` section 2: ALU use about 4 percent, so the answer is expected to be memory or latency, not compute. No human prediction this session.
+- Command: `ncu --launch-skip 2 --launch-count 1 --set basic --csv .venv/Scripts/python.exe -m scripts.profile_target`
+- GPU / environment: RTX 5060 Laptop GPU, driver 617.42, Nsight Compute 2025.2.1.
+- Result (measured): `ERR_NVGPUCTRPERM`, "The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0". No counter was collected. `compute-sanitizer` had already failed on the extension for a different reason (EXP-016).
+- Explanation / hypothesis: Windows denies hardware performance counters to non-administrator users by default. It is a policy setting (`NVreg_RestrictProfilingToAdminUsers`), not a tool defect.
+- Verdict: failed, as a tooling blocker. This machine currently has no way to explain a kernel's stalls, so every attribution in this repo is inference from timing, not measurement.
+- Follow-ups: run the profiler from an elevated shell, or ask the human to allow non-admin profiling and reboot. Until then H2, H4 and H5 stay unproven.
+
+## EXP-020: do Triton eviction hints move the int4 streaming rate?  (2026-11-23, commit 7d8f8e3)
+- Goal / question: H2. Weights are read once and x is reused by every program, so should weights be `evict_first` and x `evict_last`?
+- Change (one thing): `eviction_policy` on all three loads in `kernels/triton/int4_gemv.py`, exposed as a `hints` boolean.
+- Prediction: agent, from H2: 2 to 5 percent at DRAM sizes. No human prediction this session.
+- Command: `python -m vla_cu matrix`, ablation table, two samples.
+- Result (measured) at 8192 x 16384, 75.6 MB:
+
+| configuration | sample 1 ms | sample 1 GB/s | sample 2 ms | sample 2 GB/s |
+|---|---|---|---|---|
+| fp32 scales, no hint | 0.232 | 325.6 | 0.216 | 350.1 |
+| fp32 scales, hints | 0.216 | 350.5 | 0.229 | 330.3 |
+
+- Explanation / hypothesis: the two samples disagree in sign. The mean is 0.224 against 0.2225, a 0.7 percent difference against a 6 percent noise floor, which is what EXP-017 predicts. Relative L2 error was identical, 1.07e-1.
+- Verdict: inconclusive. The hints are left on because they cannot hurt and they encode the intent, but no gain is claimed for Triton.
+- Follow-ups: the CUDA `__ldcs` variant (EXP-022) is the same idea through a stronger instruction level hint and it did show a consistent sign.
+
+## EXP-021: do fp16 group scales save anything?  (2026-11-23, commit 7d8f8e3)
+- Goal / question: H3. Scales are 8.39 MB of the 75.6 MB at this shape, 11.1 percent of the bytes. fp16 halves them.
+- Change (one thing): `pack_int4(..., scale_dtype=torch.float16)` and a kernel that converts the loaded scale to fp32.
+- Prediction: agent, from H3: 0.230 to 0.218 ms, and error unchanged to three digits. No human prediction this session.
+- Command: `python -m vla_cu matrix`, ablation table, two samples.
+- Result (measured), 71.4 MB with fp16 scales: 0.219 ms (325.8 GB/s) and 0.207 ms (344.7 GB/s). Against the fp32 scale rows of 0.232, 0.216, 0.216 and 0.229.
+- Explanation / hypothesis: 5.6 percent fewer bytes, no measurable time change, and the effective GB/s drops by the same 5.6 percent. Either the scale traffic was already absorbed by L2, or the narrower scale tile coalesces worse, 16 half values are 32 bytes where 16 floats are 64. The error is unchanged at 1.07e-1, as predicted, because the codes are chosen with fp32 scales and only the stored table is narrowed.
+- Verdict: inconclusive, no gain. Direction agrees with the byte arithmetic, magnitude is under the noise floor. fp32 stays the default.
+- Follow-ups: revisit only with a fixed-clock harness. The 4.2 MB saved is worth having in a real model even at zero time change, since it is 5.6 percent of the weight footprint.
+
+## EXP-022: three CUDA variants of the same kernel  (2026-11-23, commit cc33ac1)
+- Goal / question: H4. Does the guarded loop cost anything, and does the streaming load hint that Triton cannot express pay?
+- Change (one thing): `csrc/int4_gemv.cu` now holds one templated kernel and three exports: baseline (the EXP-016 loop), unroll (split full-trip loop, `#pragma unroll 4`, guarded tail) and stream (unroll plus `__ldcs` on the packed word).
+- Prediction: agent, from H4: unrolling buys 0 to 8 percent, and streaming loads are the same idea as EXP-020 so probably nothing. No human prediction this session.
+- Command: `python -m vla_cu cuda`, twice.
+- Result (measured) at 8192 x 16384, 75.6 MB:
+
+| implementation | run 1 ms | run 1 GB/s | run 2 ms | run 2 GB/s |
+|---|---|---|---|---|
+| Triton | 0.244 | 309.8 | 0.217 | 348.7 |
+| cuda baseline | 0.476 | 159.0 | 0.265 | 285.8 |
+| cuda unroll | 0.234 | 322.6 | 0.269 | 281.1 |
+| cuda stream | 0.220 | 343.5 | 0.198 | 381.1 |
+
+- Result (measured), small shapes, run 2: 1024 x 1024 Triton 0.027 against cuda baseline 0.010; 4096 x 2048 Triton 0.026 against cuda unroll 0.014. Every output agreed with Triton.
+- Explanation / hypothesis: `stream` is fastest in both runs, 0.220 and 0.198, and beats Triton by 10 and 9 percent. That is the only change here with a consistent sign, and it is the same idea as EXP-020 expressed as `ld.global.cs`, a stronger hint than an eviction policy. `unroll` did not separate from `baseline`: 0.234 against 0.476 in run 1 and 0.269 against 0.265 in run 2, so H4 is not supported.
+- Surprise, unresolved: the baseline reads 0.476 in run 1 where EXP-016 measured 0.240 on the same kernel body. The refactor replaced the old `if (j == 0) ... else if` chain with a shared `dot_eight` helper of eight dependent `fmaf` calls, which may have serialized the accumulator. Unverified, because counters are blocked (EXP-019). Treat the baseline column as not comparable with EXP-016.
+- Verdict: worked for the streaming variant, now the fastest int4 kernel in the repo. The 381.1 GB/s sample is above the probe's best 360.2, so the probe under-sampled the ceiling and absolute cross-task comparisons need care.
+- Sanitizer: not run. `compute-sanitizer` cannot instrument this extension (EXP-016), so the new variants have no memory safety pass. They agree with Triton and with the float64 reference through the test suite, which is not the same thing.
+
+## EXP-023: the action expert at its real M  (2026-11-23, commit 97ad2f0)
+- Goal / question: H9, the model-level question. SmolVLA predicts 50 actions per forward, so the expert's linear layers see 50 tokens. Is a per-row GEMV still the right kernel?
+- Change (one thing): added `bench/m50.py` (task `m50`), which times 50 GEMV calls against one bf16 GEMM on the same int4 weights.
+- Prediction: agent, from H9: the GEMV reads the weights 50 times and should lose badly. No human prediction this session.
+- Command: `python -m vla_cu m50`
+- GPU / environment: RTX 5060 Laptop GPU, M = 50, expert widths 1920 x 720 and 720 x 1920, warmup 5, 20 iterations.
+- Result (measured):
+
+| N x K | group | path | bytes | ms | GB/s |
+|---|---|---|---|---|---|
+| 1920 x 720 | 16 | gemv loop x50 | 52.4 MB | 2.588 | 20.2 |
+| 1920 x 720 | 16 | bf16 gemm x1 | 3.4 MB | 0.018 | 192.4 |
+| 720 x 1920 | 64 | gemv loop x50 | 39.4 MB | 1.649 | 23.9 |
+| 720 x 1920 | 64 | bf16 gemm x1 | 3.1 MB | 0.050 | 62.9 |
+
+- Explanation / hypothesis: the byte ratio is 15.5x and 12.7x because the GEMV re-reads every weight for every token, and the measured time ratio is 147x and 33x. Part of the gap is dispatch: 2.588 ms over 50 calls is 51.8 us per call against about 34 us of launch cost, so a graphed 50-launch version would narrow the gap without closing it.
+- Side finding: 720 is not a multiple of 64, so group 64 cannot represent the expert hidden width. The benchmark uses group 16 for that shape, which puts 4 bytes of scale on every 16 weights, 25 percent scale overhead instead of 6.25. Format constraint, recorded in DEC-030.
+- Verdict: worked, H9 confirmed, the largest finding of the session. Below some M the per-row GEMV is right, at M = 50 it is wrong by an order of magnitude, and the crossover is unmeasured.
+- Follow-ups: an int4 GEMM that dequantizes into `tl.dot` operands, which is Marlin's design and now has a reason to exist here. Sweep M from 1 to 64 to find where the GEMV stops being the right kernel.
+
+## EXP-024: three projections in one launch  (2026-11-23, commit 97ad2f0)
+- Goal / question: H8. q, k and v share one activation vector at batch 1. Does concatenating their rows into one launch pay?
+- Change (one thing): added `kernels/triton/int4_grouped_gemv.py` (a segment table plus a per-segment activation base) and `bench/grouped.py` (task `grouped`).
+- Prediction: agent, from H8: three launches to one, small gain at DRAM sizes, large gain where dispatch dominates. No human prediction this session.
+- Command: `python -m vla_cu grouped`
+- Result (measured):
+
+| case | separate | grouped | ratio | agree |
+|---|---|---|---|---|
+| 3 x 960 x 960, 1.57 MB | 0.101 ms (15.5 GB/s) | 0.037 ms (42.4 GB/s) | 2.73x | yes, max abs diff 0.0 |
+| 3 x 8192 x 4096, 56.7 MB | 0.268 ms (212.1 GB/s) | 0.260 ms (217.9 GB/s) | 1.03x | yes, max abs diff 0.0 |
+
+- Explanation / hypothesis: at 1.57 MB nothing is bandwidth bound, so the only cost is three dispatches against one, which shows as 2.73x. At 56.7 MB the weights dominate and the concatenated layout costs nothing, 1.03x, which answers the page locality worry. Outputs are bit identical because the arithmetic and the order of the reduction are unchanged.
+- Verdict: worked. The cheapest structural win in the repo, and it generalizes to every layer of a transformer.
+- Follow-ups: group the whole layer, q, k, v and the MLP pair, with the segment table built at load time.
+
+## EXP-025: one persistent cooperative launch per block, not attempted  (2026-11-23)
+- Goal / question: H7. Would a single cooperative kernel per MLP block beat a graph of two launches?
+- Change: none. Nothing was built.
+- Prediction: agent: no, and the reason is measurable rather than speculative.
+- Result: not run, by decision rather than failure. EXP-018 measured a graph of the two launches at 0.018 to 0.019 ms and raw launches at 0.053 ms. The 34 us difference is Python and dispatch, which a persistent kernel removes only by also removing the Python. The launch it could still save is one graph node, 0.63 us (EXP-009), against a grid sync that costs microseconds.
+- Verdict: dropped, with the reasoning above. Recorded so it is not proposed again without new information.
+- Follow-ups: revisit only if a block grows enough that one kernel can keep several SMs busy across a whole layer.
+
+## EXP-026: does a Hadamard rotation rescue group 64?  (2026-11-23, commit 97ad2f0)
+- Goal / question: H11. int4 at group 64 sits near cosine 0.99. Does an orthogonal block rotation, which spreads outliers across a group, buy accuracy at zero byte cost?
+- Change (one thing): added `bench/rotation.py` (task `rotate`), a 64-block Sylvester Hadamard applied to weights and activations, with outlier injection.
+- Prediction: agent, from H11: no change on Gaussian weights, large improvement once outliers exist. No human prediction this session.
+- Command: `python -m vla_cu rotate`
+- Result (measured), cosine and relative L2 against the exact fp32 product:
+
+| shape | weights | int4 | int4 plus rotation |
+|---|---|---|---|
+| 2560 x 960 | gaussian | 0.99409, 1.09e-1 | 0.99425, 1.08e-1 |
+| 2560 x 960 | outliers | 0.98788, 1.56e-1 | 0.99586, 9.14e-2 |
+| 1920 x 768 | gaussian | 0.99429, 1.07e-1 | 0.99410, 1.09e-1 |
+| 1920 x 768 | outliers | 0.98615, 1.66e-1 | 0.99492, 1.02e-1 |
+
+- Result (measured), cost: not timed. The transform is 2 K log K operations per row against K / 2 bytes, so under a percent at these shapes, but that is derived, not measured.
+- Explanation / hypothesis: the rotation does nothing on Gaussian weights, as expected since they are already incoherent, and it repairs most of the outlier damage: cosine 0.98788 to 0.99586 and relative error down 41 percent. The mechanism is that one outlier no longer sets the scale for 63 well behaved weights.
+- Verdict: worked, H11 confirmed. Whether it matters depends on real checkpoint weights, which the repo does not have yet.
+- Follow-ups: run this on extracted SmolVLA weights before claiming a quality win. Fusing the rotation into the kernel is a later chunk; for now it is a pack-time change plus one small kernel.

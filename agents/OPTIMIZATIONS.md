@@ -253,3 +253,40 @@ them as such. The defensible novel contributions are C7 (one persistent launch p
 batch 1), C8 (grouped GEMV keyed to transformer structure), C11 (rotation fused into a streaming
 forward) and H9 (the finding that the expert is M = 50 while the VLM prefix is the only true batch 1
 part). Those are what make the writeup interesting, and none of them is claimed until measured.
+---
+
+## 9. Results, 2026-11-23 session
+
+Everything below was measured this session. Full entries are EXP-017 to EXP-026, and DEC-029 changes how the next numbers are read.
+
+| Hypothesis | Verdict | Evidence |
+|---|---|---|
+| H1 attainable ceiling | confirmed | 346 to 360 GB/s, 90 to 94 percent of spec, so int4 at 328 has single digit percent of headroom (EXP-017) |
+| H2 Triton eviction hints | inconclusive | sign flipped between two samples, 0.216 against 0.232 then 0.229 against 0.216 (EXP-020) |
+| H2 as CUDA `__ldcs` | supported | fastest variant in both runs, 0.220 and 0.198 ms, 9 to 10 percent ahead of Triton (EXP-022) |
+| H3 fp16 group scales | inconclusive, no gain | 0.207 and 0.219 ms against 0.216 to 0.232, inside the noise floor (EXP-021) |
+| H4 unroll and tail guard | not supported | unroll did not separate from baseline in either run (EXP-022) |
+| H5 profiler truth | blocked | counters denied to non-administrators, `ERR_NVGPUCTRPERM` (EXP-019) |
+| H6 graph the block | confirmed, strongly | 0.018 to 0.019 ms against 0.053 raw and 0.073 to 0.152 fp32, cosine unchanged (EXP-018) |
+| H7 persistent launch | dropped by reasoning | a graph already removes the 34 us of dispatch a persistent kernel would target (EXP-025) |
+| H8 grouped GEMV | confirmed | 2.73x at 1.57 MB, 1.03x at 56.7 MB, bit identical (EXP-024) |
+| H9 expert at M = 50 | confirmed, largest finding | 50 GEMV calls 2.588 ms against one bf16 GEMM 0.018 ms (EXP-023) |
+| H10 lop3 dequant | not attempted | ALU use is about 4 percent, so it stays the lowest value item on the list |
+| H11 Hadamard rotation | confirmed for outliers | cosine 0.98788 to 0.99586, relative error down 41 percent (EXP-026) |
+
+New facts that outrank the hypothesis list:
+
+1. **The part does not hold a clock.** One read-only configuration returned 164 to 356 GB/s in five repeats. Until clocks are pinned, a difference under 6 percent is not a result (DEC-029).
+2. **A graph beats custom ops by 2.8x on a 19.7 MB block**, and the block is now 0.0185 ms against fp32's 0.073 to 0.082 (DEC-025).
+3. **The expert is M = 50**, so the kernel plan for half the model changes (DEC-028).
+4. **Group 64 does not divide the expert hidden width 720** (DEC-030).
+
+Revised queue, in the order the evidence now supports:
+
+| Next | Item | Why now |
+|---|---|---|
+| 1 | pin clocks, then repeat EXP-017, EXP-020, EXP-021, EXP-022 | without this, H2, H3 and H4 cannot be settled, and they are all one knob |
+| 2 | adopt the three measured wins: CUDA streaming kernel, grouped launch, block graph | already measured, no new research needed |
+| 3 | an int4 GEMM that dequantizes into `tl.dot`, swept over M from 1 to 64 | H9 says the expert needs it, and the crossover M is unknown |
+| 4 | decide group 16 against padding to 768 for the expert | blocks packing real checkpoint weights |
+| 5 | run EXP-026 on real checkpoint weights | the rotation result only means something on weights that have outliers |

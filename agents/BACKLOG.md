@@ -10,18 +10,26 @@
 - [x] Chunk 2: first Triton kernel, vector add - done 2026-11-22, `kernels/triton/vector_add.py`, EXP-007
 - [x] Chunk 3: correctness test and bandwidth benchmark - done 2026-11-22, EXP-008: 86.2% of peak at 16M elements
 
-## Optimization queue (ranked arguments in `agents/OPTIMIZATIONS.md`, written 2026-11-23)
-- [ ] EXP-017 H1: measure the attainable streaming ceiling on this part, plus run-to-run spread. Decides whether any micro-optimization below can claim anything. Task `stream`.
-- [ ] EXP-018 H6: CUDA-graph the MLP block, target 0.085 to about 0.055 ms.
-- [ ] EXP-019 H5: `ncu` both int4 kernels and `nsys` the layer. Explains the 328 against 358 GB/s gap, or proves it is noise.
-- [ ] EXP-020 H2: streaming cache hints, weights `evict_first`, x `evict_last`.
-- [ ] EXP-021 H3: fp16 group scales, 5.6 percent of bytes for 5e-4 of accuracy.
-- [ ] EXP-022 H4: drop the CUDA tail guard and unroll 4 steps so four loads sit in flight.
-- [ ] EXP-023 H9: is the action expert M = 50, not M = 1? Read `modeling_smolvla.py` first. If yes, tensor cores become legal for the expert and the whole model plan changes.
-- [ ] EXP-024 H8: grouped GEMV, q, k, v in one launch off one x read.
-- [ ] EXP-025 H7: one persistent cooperative launch per MLP block, hidden never leaves L2.
-- [ ] EXP-026 H11: Hadamard rotation fused into the forward, for cosine at group 64.
-- [ ] C14, decided against for now: tensor-core int4 at M = 1 wastes 15 of 16 rows and ALU use is 4 percent. Revisit only under EXP-023.
+## Ran 2026-11-23 (full entries in `agents/EXPERIMENTS.md`, verdicts in `OPTIMIZATIONS.md` section 9)
+- [x] EXP-017 H1: attainable ceiling is 346 to 360 GB/s, 90 to 94 percent of spec. Spread inside one configuration reaches 2x.
+- [x] EXP-018 H6: block graph 0.018 to 0.019 ms against 0.053 raw and 0.073 to 0.082 fp32, cosine unchanged.
+- [ ] EXP-019 H5: blocked. `ncu` needs administrator rights, `ERR_NVGPUCTRPERM`.
+- [x] EXP-020 H2: Triton eviction hints inconclusive, the sign flipped between samples.
+- [x] EXP-021 H3: fp16 group scales inconclusive, no measurable gain.
+- [x] EXP-022 H4: unroll not supported. The `__ldcs` streaming variant is the fastest kernel in the repo.
+- [x] EXP-023 H9: the expert is M = 50. Fifty GEMV calls 2.588 ms against one bf16 GEMM 0.018 ms.
+- [x] EXP-024 H8: grouped launch 2.73x at 1.57 MB and bit identical, 1.03x at 56.7 MB.
+- [x] EXP-025 H7: dropped by reasoning, a graph already removes the dispatch a persistent kernel would target.
+- [x] EXP-026 H11: rotation lifts outlier cosine 0.98788 to 0.99586 at no byte cost.
+
+## Next, ranked by the evidence (detail in `OPTIMIZATIONS.md` section 9)
+- [ ] Pin clocks with `nvidia-smi -lgc` (needs admin) and repeat EXP-017, EXP-020, EXP-021, EXP-022.
+- [ ] Wire the three measured wins into a default path: CUDA streaming kernel, grouped launch, block graph.
+- [ ] Write an int4 GEMM that dequantizes into `tl.dot`, and sweep M from 1 to 64 for the GEMV crossover.
+- [ ] Decide group 16 against padding to 768 for the 720-wide expert (DEC-030).
+- [ ] Download `lerobot/smolvla_base` config and index, then re-run EXP-023 and EXP-026 on real weights.
+- [ ] Make every table best-of-N with the run count stated (DEC-029).
+- [ ] Explain the CUDA baseline regression, 0.240 in EXP-016 against 0.265 to 0.476 in EXP-022, once counters are available.
 
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.

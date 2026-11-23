@@ -134,3 +134,16 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: https://arxiv.org/html/2506.01844 (SmolVLA paper, implementation details); https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/smolvla/configuration_smolvla.py; https://huggingface.co/blog/smolvla (accessed 2026-11-23).
 - Confidence: high for the four config values and the 10 steps; the widths 960 and 2560 remain the repo's assumption, not read from a `config.json` (DEC-024).
 - Relevance to vla.cu: rewrites the model-level budget. Derived, 0.586 ms floor for 450M parameters at 4-bit, of which 1.30 ms comes from the ten sequential expert passes, so the expert (M = 50) is the part worth a tensor-core kernel and the VLM prefix is the only true batch 1 part. It also kills the idea of fusing the denoising loop, because the steps are sequential.
+## Nsight Compute needs administrator rights on Windows  (2026-11-23)
+- Question: why does `ncu` refuse to collect counters on this machine?
+- Finding: `ncu --launch-skip 2 --launch-count 1 --set basic` connects to the process and then fails with `ERR_NVGPUCTRPERM`, "The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0". The documented fix is to run elevated or to set `NVreg_RestrictProfilingToAdminUsers=0` in the driver and reboot.
+- Source: the error text itself, plus the NVIDIA page it links, https://developer.nvidia.com/ERR_NVGPUCTRPERM (accessed 2026-11-23). Not applied here, it needs administrator rights and a reboot.
+- Confidence: high that it is a permission policy, the message says so.
+- Relevance to vla.cu: the repo has no profiler data at all, from `ncu` or from `compute-sanitizer` on the extension (EXP-016). Any statement about stalls or occupancy in `agents/` is inference, and is labelled as such.
+
+## Laptop GPUs do not hold a steady clock under sustained load  (2026-11-23)
+- Question: how much of a benchmark table on this part is the kernel and how much is the power state?
+- Finding: on an otherwise idle RTX 5060 Laptop GPU, the same read-only kernel over the same buffer returned 164 to 356 GB/s in five interleaved repeats, and the same `torch.mv` pair returned 0.073 and 0.145 ms in two consecutive processes. Whichever path a process times first is systematically slow, and a 200-iteration bandwidth warmup fixed that case but not the general instability. `nvidia-smi -lgc` would pin clocks but needs administrator rights.
+- Source: local measurements this session (EXP-017, EXP-018); no vendor document read on the boost algorithm.
+- Confidence: high for the measurement, medium for the explanation, since no clock counter could be read without administrator rights.
+- Relevance to vla.cu: sets the reporting rule in DEC-029. Effects below about 6 percent cannot be claimed on this machine today, and a single table is a sample of a distribution whose tail is 2x.

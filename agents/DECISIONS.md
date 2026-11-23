@@ -189,3 +189,50 @@
 - Consequence: every layer-level number in EXP-015 and every derived model number inherits 960 and 2560. Expert hidden 720 and intermediate 1920 are derived from the verified 0.75 ratio, not read from a file.
 - Revisit if: `lerobot/smolvla_base` config and index are downloaded, or the benchmark moves onto a real checkpoint.
 - Status: active
+## DEC-025: the MLP block runs as a CUDA graph, not through custom ops  (2026-11-23)
+- Context: EXP-015 left the fused block slower than fp32. EXP-018 split the cost into three paths on the same 19.7 MB block.
+- Options considered: (a) keep calling the custom ops from model code; (b) call the kernel wrappers directly with preallocated buffers; (c) capture those launches in a `torch.cuda.CUDAGraph` and replay.
+- Chosen and why: (c) for the benchmark and the inference path, (b) whenever a graph is not convenient, and (a) never on a hot path. Measured: ops 0.109 to 0.224 ms, raw 0.053, graph 0.018 to 0.019, all with cosine 0.99346. The custom op layer costs more than the two kernels it launches.
+- Consequence: custom ops remain the honest way to expose the kernels to torch, and they stay for tracing and for tests. The speed path bypasses them.
+- Revisit if: the op layer gets cheaper, or an integration needs one callable entry point more than it needs 2.8x.
+- Status: active
+
+## DEC-026: a layer's projections ship as one grouped launch  (2026-11-23)
+- Context: EXP-024 measured 2.73x from concatenating three projections into one launch at 960 x 960, and 1.03x, meaning no loss, at 56.7 MB.
+- Options considered: (a) one launch per projection; (b) one grouped launch with a segment table; (c) a fully fused layer kernel.
+- Chosen and why: (b). It is bit identical, it needs one int32 table per row built at load time, and it keeps the weight layout unchanged, so nothing about packing or accuracy moves. (c) is EXP-025, dropped because a graph already removes the dispatch it would target.
+- Consequence: every packed weight set gains a companion segment table and an activation base table. Packing becomes a per-layer operation, not a per-matrix one.
+- Revisit if: a projection needs a different K, which the current kernel cannot express because K is per launch.
+- Status: active
+
+## DEC-027: `__ldcs` on the CUDA path, no claim on Triton eviction hints  (2026-11-23)
+- Context: EXP-020 and EXP-022 tested the same idea, keep one-shot weights out of the way of the reused activation vector, in both languages.
+- Options considered: (a) adopt both; (b) adopt neither; (c) adopt the one with a consistent measured sign.
+- Chosen and why: (c). The CUDA streaming variant was fastest in both runs and 10 and 9 percent ahead of Triton; the Triton eviction policy flipped sign between two samples. The Triton hints stay enabled because they express the intent and cannot hurt, but no gain is claimed for them.
+- Consequence: the fastest int4 kernel in the repo is now the CUDA streaming variant, 0.198 to 0.220 ms at 8192 x 16384, at the cost of needing a vcvars shell to build.
+- Revisit if: a fixed-clock harness makes the Triton hint effect measurable, or Triton exposes `.cs` on loads.
+- Status: active
+
+## DEC-028: the action expert is a GEMM problem, the VLM prefix is the GEMV problem  (2026-11-23)
+- Context: EXP-023. SmolVLA predicts 50 actions per forward and the expert is a transformer over those 50 tokens, so its linear layers have M = 50. A per-row GEMV re-reads every weight 50 times.
+- Options considered: (a) keep the GEMV and loop over tokens; (b) one GEMM per matrix at M = 50; (c) an int4 weight-only GEMM that dequantizes into tensor core operands.
+- Chosen and why: (b) immediately, as the baseline to beat, and (c) as the next kernel worth writing. Measured: 50 GEMV calls cost 2.588 ms against 0.018 ms for one bf16 GEMM on the same computation, byte ratio 15.5x.
+- Consequence: the repo's framing needs one sentence of care. Batch 1 is true for the VLM prefix, which runs once per observation, and false for the expert, which runs 10 times per action at M = 50. The grouped launch and the whole-model budget both follow from this.
+- Revisit if: a real checkpoint run shows the expert to be a small share of latency after all, for instance because the prefix dominates.
+- Status: active
+
+## DEC-029: measurement protocol, best of N in one process  (2026-11-23)
+- Context: EXP-017 and EXP-018 measured the spread directly. One configuration of the read probe returned 164 to 356 GB/s in five interleaved repeats, and the first path timed in a process is systematically slow. Every table in this repo before today is one sample.
+- Options considered: (a) keep single samples and note the caveat; (b) repeat inside a process and report best, median and spread; (c) require fixed clocks via `nvidia-smi -lgc` before any number is quoted.
+- Chosen and why: (b) now, because it needs no administrator rights, and (c) when the human can grant it. `warm_gpu()` was added to `bench_utils` and is called at the start of every benchmark, which fixed the first-path penalty but not the general instability.
+- Consequence: a difference under about 6 percent is not a result on this machine, comparisons are only valid inside one table, and a headline number is quoted as a range from repeated runs with the run count stated. Numbers measured before 2026-11-23 are samples too.
+- Revisit if: clocks are pinned, or the machine stops being a power-limited laptop.
+- Status: active
+
+## DEC-030: group 64 does not fit the action expert, decide before packing real weights  (2026-11-23)
+- Context: EXP-023 found the expert hidden width is 720, and 720 = 11 x 64 + 16, so group 64 cannot divide K.
+- Options considered: (a) pad the width to 768 and keep group 64; (b) fall back to group 16, which divides 720 but puts a scale on every 16 weights; (c) allow a ragged last group in the kernel.
+- Chosen and why: nothing chosen yet. (a) wastes 6.7 percent of the weights and keeps the fast kernel, (b) costs 25 percent scale overhead, (c) complicates the inner loop for one shape. The decision needs the real checkpoint and a sensitivity measurement.
+- Consequence: `bench/m50.py` uses group 16 for the 720 shapes and says so in its output. No other benchmark is affected, since 960, 2560, 1920 and 768 all divide by 64.
+- Revisit if: the checkpoint shows a different expert width, or the rotation in EXP-026 makes a coarser group affordable.
+- Status: active
