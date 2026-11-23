@@ -1,9 +1,12 @@
-"""Triton against CUDA C++ on the same int4 GEMV, same shapes, same inputs.
+"""Triton against three CUDA C++ variants of the same int4 GEMV, same inputs.
 
-Both kernels implement the same format and the same memory traffic, so the only
-differences are how the work is mapped onto threads and how the compiler schedules
-it. Agreement is checked before either is timed: an error table next to a speed
-table is the only honest way to present a port.
+Every implementation here reads the same bytes and does the same arithmetic, so the
+only differences are how the work is mapped onto threads and which cache hints the
+loads carry. Agreement is checked before anything is timed.
+
+The three CUDA variants differ by one change each: "baseline" is the guarded loop from
+EXP-016, "unroll" splits the loop so the compiler can unroll four steps, and "stream"
+adds streaming weight loads on top.
 
 Task: python -m vla_cu cuda
 """
@@ -19,11 +22,13 @@ from vla_cu.bench_utils import (
     enforce_memory_budget,
     fraction_of_peak,
     time_call,
+    warm_gpu,
 )
-from vla_cu.cuda_int4 import int4_gemv_cuda, int4_gemv_cuda_into
+from vla_cu.cuda_int4 import int4_gemv_cuda_into
 from vla_cu.quant import GROUP_SIZE, pack_int4
 
 SHAPES = ((1024, 1024), (4096, 2048), (8192, 16384))
+CUDA_VARIANTS = ("baseline", "unroll", "stream")
 WARMUP = 5
 ITERATIONS = 20
 
@@ -39,13 +44,14 @@ def moved_bytes(n_out: int, n_in: int) -> int:
 
 
 def main() -> int:
-    """Run each shape through both kernels, verify agreement, then time them."""
+    """Run each shape through every implementation, verify agreement, then time them."""
     enforce_memory_budget()
+    warm_gpu()
     l2_bytes = getattr(torch.cuda.get_device_properties(0), "L2_cache_size", 0)
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s | L2 {l2_bytes / 1e6:.1f} MB")
     print(f"warmup {WARMUP} | iterations {ITERATIONS} | group {GROUP_SIZE} | batch 1")
     print()
-    print(f"{'N x K':>14}  {'MB':>7}  {'impl':>7}  {'ms':>8}  {'GB/s':>8}  {'% DRAM':>7}  {'rel L2 err':>11}  {'agree':>7}")
+    print(f"{'N x K':>14}  {'impl':>9}  {'ms':>8}  {'GB/s':>8}  {'% DRAM':>7}  {'vs triton':>10}  {'rel L2 err':>11}  {'agree':>7}")
 
     for n_out, n_in in SHAPES:
         generator = torch.Generator(device="cuda").manual_seed(0)
@@ -54,30 +60,34 @@ def main() -> int:
         packed, scales = pack_int4(w)
         n_bytes = moved_bytes(n_out, n_in)
 
-        out_cuda = int4_gemv_cuda(packed, scales, x)
-        out_triton = torch.empty(n_out, device="cuda")
-        int4_gemv_into(packed, scales, x, out_triton)
+        reference_out = torch.empty(n_out, device="cuda")
+        int4_gemv_into(packed, scales, x, reference_out)
+        cuda_out = torch.empty(n_out, device="cuda")
+        exact = torch.mv(w, x)
         torch.cuda.synchronize()
 
-        exact = torch.mv(w, x)
-        agree = bool(torch.allclose(out_cuda, out_triton, rtol=1e-4, atol=1e-3))
-        times = {
-            "triton": time_call(lambda: int4_gemv_into(packed, scales, x, out_triton), WARMUP, ITERATIONS),
-            "cuda": time_call(lambda: int4_gemv_cuda_into(packed, scales, x, out_cuda), WARMUP, ITERATIONS),
-        }
+        times = {"triton": time_call(lambda: int4_gemv_into(packed, scales, x, reference_out), WARMUP, ITERATIONS)}
+        results = {"triton": reference_out}
+        for variant in CUDA_VARIANTS:
+            def call(variant=variant) -> None:
+                int4_gemv_cuda_into(packed, scales, x, cuda_out, variant=variant)
 
-        for name, result in (("triton", out_triton), ("cuda", out_cuda)):
+            times[f"cuda:{variant}"] = time_call(call, WARMUP, ITERATIONS)
+            results[f"cuda:{variant}"] = cuda_out.clone()
+
+        triton_seconds = times["triton"]
+        for name in ("triton",) + tuple(f"cuda:{variant}" for variant in CUDA_VARIANTS):
+            result = results[name]
             seconds = times[name]
             gbs = bandwidth_gb_s(n_bytes, seconds)
+            agree = bool(torch.allclose(result, results["triton"], rtol=1e-4, atol=1e-3))
             print(
-                f"{f'{n_out} x {n_in}':>14}  {n_bytes / 1e6:>7.1f}  {name:>7}  {seconds * 1e3:>8.3f}  "
-                f"{gbs:>8.1f}  {fraction_of_peak(gbs):>6.1%}  {relative_error(result, exact):>11.2e}  "
-                f"{'yes' if agree else 'NO':>7}"
+                f"{f'{n_out} x {n_in}':>14}  {name:>9}  {seconds * 1e3:>8.3f}  {gbs:>8.1f}  "
+                f"{fraction_of_peak(gbs):>6.1%}  {triton_seconds / seconds:>9.2f}x  "
+                f"{relative_error(result, exact):>11.2e}  {'yes' if agree else 'NO':>7}"
             )
-        print(f"{'':>14}  cuda / triton {times['triton'] / times['cuda']:.2f}x on time")
         print()
-
-        del w, packed, scales, out_cuda, out_triton, exact
+        del w, packed, scales, x, exact, reference_out, cuda_out, results
 
     return 0
 

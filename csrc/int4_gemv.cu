@@ -11,6 +11,13 @@
 // loads. Weights are read once, activations once per row that is resident in cache.
 // Expected bottleneck: memory, weights only, N * K / 2 bytes.
 //
+// Three variants share this file so one run can attribute cost to one change at a
+// time. Variant 0 keeps the original single guarded loop. Variant 1 splits the loop
+// into a full-trip-count main loop with no bounds check, which lets the compiler
+// unroll four steps and keep four weight loads in flight, plus a guarded tail.
+// Variant 2 is variant 1 with the weight load marked streaming (__ldcs), because
+// each packed word is read exactly once and should not evict the activation vector.
+//
 // Preconditions enforced by the host wrapper: group size 64, K divisible by 64, all
 // tensors fp32 or uint8, contiguous, and 16-byte aligned activations.
 
@@ -26,6 +33,25 @@ constexpr int THREADS = WARPS_PER_BLOCK * 32;
 constexpr int WEIGHTS_PER_LANE = 8;
 constexpr int WEIGHTS_PER_STEP = 32 * WEIGHTS_PER_LANE;
 
+template <bool STREAM>
+__device__ __forceinline__ unsigned int load_word(const unsigned int* address) {
+    return STREAM ? __ldcs(address) : *address;
+}
+
+__device__ __forceinline__ float dot_eight(unsigned int word, float4 lo, float4 hi) {
+    float local = 0.0f;
+    local = fmaf(static_cast<float>(word & 0x0F) - 8.0f, lo.x, local);
+    local = fmaf(static_cast<float>((word >> 4) & 0x0F) - 8.0f, lo.y, local);
+    local = fmaf(static_cast<float>((word >> 8) & 0x0F) - 8.0f, lo.z, local);
+    local = fmaf(static_cast<float>((word >> 12) & 0x0F) - 8.0f, lo.w, local);
+    local = fmaf(static_cast<float>((word >> 16) & 0x0F) - 8.0f, hi.x, local);
+    local = fmaf(static_cast<float>((word >> 20) & 0x0F) - 8.0f, hi.y, local);
+    local = fmaf(static_cast<float>((word >> 24) & 0x0F) - 8.0f, hi.z, local);
+    local = fmaf(static_cast<float>((word >> 28) & 0x0F) - 8.0f, hi.w, local);
+    return local;
+}
+
+template <bool UNROLL, bool STREAM>
 __global__ void int4_gemv_kernel(const unsigned char* __restrict__ packed,
                                  const float* __restrict__ scales,
                                  const float* __restrict__ x,
@@ -44,33 +70,38 @@ __global__ void int4_gemv_kernel(const unsigned char* __restrict__ packed,
     const float* row_scales = scales + static_cast<long>(row) * n_groups;
 
     float acc = 0.0f;
-    for (int base = 0; base < n_cols; base += WEIGHTS_PER_STEP) {
-        const int weight = base + lane * WEIGHTS_PER_LANE;
-        if (weight >= n_cols) {
-            continue;
+
+    if constexpr (UNROLL) {
+        const int steps = n_cols / WEIGHTS_PER_STEP;
+#pragma unroll 4
+        for (int step = 0; step < steps; ++step) {
+            const int weight = step * WEIGHTS_PER_STEP + lane * WEIGHTS_PER_LANE;
+            const unsigned int word = load_word<STREAM>(reinterpret_cast<const unsigned int*>(row_bytes + weight / 2));
+            const float4 act_lo = *reinterpret_cast<const float4*>(x + weight);
+            const float4 act_hi = *reinterpret_cast<const float4*>(x + weight + 4);
+            acc += dot_eight(word, act_lo, act_hi) * row_scales[weight / GROUP];
         }
-
-        const unsigned int word = *reinterpret_cast<const unsigned int*>(row_bytes + weight / 2);
-        const float4 act_lo = *reinterpret_cast<const float4*>(x + weight);
-        const float4 act_hi = *reinterpret_cast<const float4*>(x + weight + 4);
-
-        float local = 0.0f;
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            const float low = static_cast<float>((word >> (8 * j)) & 0x0F) - 8.0f;
-            const float high = static_cast<float>((word >> (8 * j + 4)) & 0x0F) - 8.0f;
-            if (j == 0) {
-                local += low * act_lo.x + high * act_lo.y;
-            } else if (j == 1) {
-                local += low * act_lo.z + high * act_lo.w;
-            } else if (j == 2) {
-                local += low * act_hi.x + high * act_hi.y;
-            } else {
-                local += low * act_hi.z + high * act_hi.w;
+        for (int base = steps * WEIGHTS_PER_STEP; base < n_cols; base += WEIGHTS_PER_STEP) {
+            const int weight = base + lane * WEIGHTS_PER_LANE;
+            if (weight >= n_cols) {
+                continue;
             }
+            const unsigned int word = load_word<STREAM>(reinterpret_cast<const unsigned int*>(row_bytes + weight / 2));
+            const float4 act_lo = *reinterpret_cast<const float4*>(x + weight);
+            const float4 act_hi = *reinterpret_cast<const float4*>(x + weight + 4);
+            acc += dot_eight(word, act_lo, act_hi) * row_scales[weight / GROUP];
         }
-
-        acc += local * row_scales[weight / GROUP];
+    } else {
+        for (int base = 0; base < n_cols; base += WEIGHTS_PER_STEP) {
+            const int weight = base + lane * WEIGHTS_PER_LANE;
+            if (weight >= n_cols) {
+                continue;
+            }
+            const unsigned int word = *reinterpret_cast<const unsigned int*>(row_bytes + weight / 2);
+            const float4 act_lo = *reinterpret_cast<const float4*>(x + weight);
+            const float4 act_hi = *reinterpret_cast<const float4*>(x + weight + 4);
+            acc += dot_eight(word, act_lo, act_hi) * row_scales[weight / GROUP];
+        }
     }
 
 #pragma unroll
@@ -82,9 +113,7 @@ __global__ void int4_gemv_kernel(const unsigned char* __restrict__ packed,
     }
 }
 
-}  // namespace
-
-void int4_gemv_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
+void launch_impl(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out, int variant) {
     TORCH_CHECK(packed.is_cuda() && scales.is_cuda() && x.is_cuda() && out.is_cuda(), "expected CUDA tensors");
     TORCH_CHECK(packed.scalar_type() == torch::kUInt8, "expected uint8 packed weights");
     TORCH_CHECK(scales.scalar_type() == torch::kFloat32 && x.scalar_type() == torch::kFloat32 && out.scalar_type() == torch::kFloat32,
@@ -105,16 +134,37 @@ void int4_gemv_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor 
     }
 
     const int blocks = (n_rows + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-    int4_gemv_kernel<<<blocks, THREADS>>>(
-        reinterpret_cast<const unsigned char*>(packed.data_ptr()),
-        scales.data_ptr<float>(),
-        x.data_ptr<float>(),
-        out.data_ptr<float>(),
-        n_rows,
-        n_cols);
+    const unsigned char* packed_ptr = reinterpret_cast<const unsigned char*>(packed.data_ptr());
+    const float* scale_ptr = scales.data_ptr<float>();
+    const float* x_ptr = x.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+
+    if (variant == 0) {
+        int4_gemv_kernel<false, false><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+    } else if (variant == 1) {
+        int4_gemv_kernel<true, false><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+    } else {
+        int4_gemv_kernel<true, true><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+}  // namespace
+
+void int4_gemv_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
+    launch_impl(packed, scales, x, out, 0);
+}
+
+void int4_gemv_unroll_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
+    launch_impl(packed, scales, x, out, 1);
+}
+
+void int4_gemv_stream_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
+    launch_impl(packed, scales, x, out, 2);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("int4_gemv_launch", &int4_gemv_launch, "fused 4-bit dequantize and GEMV (one warp per row)");
+    m.def("int4_gemv_launch", &int4_gemv_launch, "fused 4-bit dequantize and GEMV, guarded loop");
+    m.def("int4_gemv_unroll_launch", &int4_gemv_unroll_launch, "same kernel, split loop, unroll 4");
+    m.def("int4_gemv_stream_launch", &int4_gemv_stream_launch, "same kernel, unrolled, streaming weight loads");
 }
