@@ -45,7 +45,14 @@ on purpose, not forgotten.
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
 - [x] Launch-overhead experiment - done 2026-11-22, EXP-009: 16.71 us from Python, 0.63 us per graph node
 - [x] CUDA graph capture of a two-kernel GEMV chain - done 2026-11-22, EXP-011: 0.031 ms plain against 0.012 ms graphed, exact. A whole layer stack is still open
-- [x] BLOCK_K sweep and split-K for the int8 GEMV - done 2026-11-22, EXP-012: 256 to 1024 within 0.2 percent, split-K 6.53x below 32 rows and a loss above 256. Hoisting the int4 group scale out of the inner loop is still open
+- [x] BLOCK_K sweep and split-K for the int8 GEMV - done 2026-11-22, EXP-012: 256 to 1024 within 0.2 percent, split-K 6.53x below 32 rows and a loss above 256
+- [x] Hoist the int4 group scale out of the inner loop - done 2026-11-23, EXP-014: 0.263 to 0.230 ms, 75.0 to 85.5 percent of peak. The tile plateaus at 4 rows
+- [x] Wrap the kernels as torch custom ops and run one layer end to end - done 2026-11-23, EXP-015, DEC-022
+- [x] Port the int4 GEMV to CUDA C++ and compare - done 2026-11-23, EXP-016, DEC-023
+- [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015)
+- [ ] Resolve the compute-sanitizer failure on the CUDA extension, or run `ncu` on both kernels instead
+- [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile
+- [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 

@@ -23,6 +23,8 @@ from vla_cu.bench_utils import (
 from vla_cu.quant import GROUP_SIZE, pack_int4
 
 SIZES = ((1024, 1024), (4096, 2048), (8192, 16384))
+INT4_ROW_TILES = (1, 2, 4, 8, 16, 32)
+INT4_BLOCK_SIZES = (512, 1024)
 WARMUP = 5
 ITERATIONS = 20
 
@@ -44,8 +46,13 @@ def bytes_moved(fmt: str, n_out: int, n_in: int) -> int:
     return int(weights + scales + 4 * n_in + output * n_out)
 
 
-def int4_rows_sweep(n_out: int, n_in: int) -> None:
-    """Print the int4 time for each row tile, the knob that controls activation reuse."""
+def int4_tuning_sweep(n_out: int, n_in: int) -> None:
+    """Print int4 time for each (row tile, block size) pair, the kernel's two knobs.
+
+    The row tile sets how many output rows reuse one activation load, and the block
+    size sets how many groups one program reduces per step. Both move register
+    pressure and activation traffic, so they are swept together.
+    """
     generator = torch.Generator(device="cuda").manual_seed(0)
     w = torch.randn((n_out, n_in), device="cuda", generator=generator) * 0.05
     x = torch.randn(n_in, device="cuda", generator=generator)
@@ -53,11 +60,14 @@ def int4_rows_sweep(n_out: int, n_in: int) -> None:
     packed, scales = pack_int4(w)
     n_bytes = bytes_moved("int4", n_out, n_in)
 
-    print(f"int4 row tile sweep at {n_out} x {n_in}, {n_bytes / 1e6:.1f} MB moved")
-    print(f"{'rows':>5}  {'ms':>8}  {'GB/s':>8}")
-    for rows in (1, 2, 4, 8):
-        seconds = time_call(lambda: int4_gemv_into(packed, scales, x, out, rows=rows), WARMUP, ITERATIONS)
-        print(f"{rows:>5}  {seconds * 1e3:>8.3f}  {bandwidth_gb_s(n_bytes, seconds):>8.1f}")
+    print(f"int4 tuning at {n_out} x {n_in}, {n_bytes / 1e6:.1f} MB moved")
+    print(f"{'rows':>5}  " + "  ".join(f"block {block_k:>4} (ms, GB/s)" for block_k in INT4_BLOCK_SIZES))
+    for rows in INT4_ROW_TILES:
+        cells = []
+        for block_k in INT4_BLOCK_SIZES:
+            seconds = time_call(lambda: int4_gemv_into(packed, scales, x, out, block_k=block_k, rows=rows), WARMUP, ITERATIONS)
+            cells.append(f"{seconds * 1e3:>10.3f} {bandwidth_gb_s(n_bytes, seconds):>7.1f}")
+        print(f"{rows:>5}  " + "  ".join(cells))
     print()
 
 
@@ -125,7 +135,7 @@ def main() -> int:
         f"{'% DRAM':>7}  {'x fp32':>7}  {'rel L2 err':>11}"
     )
 
-    int4_rows_sweep(*SIZES[-1])
+    int4_tuning_sweep(*SIZES[-1])
 
     for n_out, n_in in SIZES:
         rows = run_shape(n_out, n_in)

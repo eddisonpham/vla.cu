@@ -1,9 +1,15 @@
 """Fused 4-bit dequantize and GEMV with one scale per group of 64 weights.
 
 Concept: the weights arrive as packed nibbles and never become fp32 in memory. The
-kernel reads one byte, turns it into two weights, multiplies each by its activation
-and the scale of its group, and accumulates. Weights therefore stream at half a byte
-per parameter, which is the entire point of the project at batch 2 elements per byte.
+kernel reads one byte, turns it into two weights, multiplies each by its activation,
+and accumulates. Weights therefore stream at half a byte per parameter, which is the
+entire point of the project at two elements per byte.
+
+The group structure drives the loop shape. A group is 64 consecutive weights, which
+is 32 packed bytes, so the kernel reduces a whole group before it multiplies by that
+group's scale. That gives one scale load and one multiply per 64 weights instead of
+one per weight, and it shrinks the accumulator by the group size, which is what
+allows a wide row tile.
 
 Layout matches `vla_cu.quant`: element 2i is the low nibble, element 2i+1 the high
 nibble, value is (nibble - 8) * group_scale.
@@ -39,34 +45,42 @@ def int4_gemv_kernel(
 
     packed: uint8 [N, K // 2], scales: fp32 [N, K // GROUP], x: fp32 [K], out: fp32 [N].
     Mapping: program p owns outputs p*ROWS to p*ROWS+ROWS-1 and walks K in BLOCK_K
-    element steps. Each step loads BLOCK_K // 2 bytes per row and splits every byte
-    into its low and high nibble, so one load feeds two weights; a pair of lanes no
-    longer fetches the same byte twice. The activation pair is loaded once per step
-    and reused across all ROWS rows, which is the point of the tiling: every program
-    would otherwise re-read the whole vector and make it the dominant traffic.
-    The block is a whole number of groups, so both nibbles of a byte share a scale.
-    Expected bottleneck: memory, weights and one activation stream, provided ROWS is
-    large enough to amortize the activation; too large and accumulators spill.
+    element steps. A step covers BLOCK_K // GROUP whole groups, and the tile is shaped
+    [ROWS, groups, GROUP // 2 bytes] so the reduction runs inside each group first.
+    One scale per group then multiplies the group's finished sum, so the scale is
+    loaded once per group per row instead of being gathered per byte.
+    The activation pair is loaded once per step and reused across all ROWS rows: every
+    program would otherwise re-read the whole vector, and there are N / ROWS programs.
+    Expected bottleneck: memory, weights plus one activation stream. A wider ROWS tile
+    cuts activation traffic but multiplies the transient products tile, so ROWS is the
+    knob to sweep. Too wide and the products tile spills out of registers.
     """
+    n_groups = K // GROUP
+    groups_per_block: tl.constexpr = BLOCK_K // GROUP
     rows = tl.program_id(axis=0) * ROWS + tl.arange(0, ROWS)
     row_mask = rows < N
-    lanes = tl.arange(0, BLOCK_K // 2)
-    n_groups = K // GROUP
-    row_bytes = rows[:, None] * (K // 2)
+    group_lanes = tl.arange(0, groups_per_block)
+    byte_lanes = tl.arange(0, GROUP // 2)
+    row_bytes = rows[:, None, None] * (K // 2)
     row_scales = rows[:, None] * n_groups
-    acc = tl.zeros((ROWS, BLOCK_K // 2), dtype=tl.float32)
+    acc = tl.zeros((ROWS, groups_per_block), dtype=tl.float32)
 
     for k in range(0, K, BLOCK_K):
-        byte_offsets = k // 2 + lanes
-        byte_mask = byte_offsets < K // 2
-        mask = row_mask[:, None] & byte_mask[None, :]
-        packed = tl.load(packed_ptr + row_bytes + byte_offsets[None, :], mask=mask, other=0).to(tl.int32)
+        group_ids = k // GROUP + group_lanes
+        group_mask = group_ids < n_groups
+        byte_offsets = k // 2 + group_lanes[:, None] * (GROUP // 2) + byte_lanes[None, :]
+        weights_mask = row_mask[:, None, None] & group_mask[None, :, None]
+
+        packed = tl.load(packed_ptr + row_bytes + byte_offsets[None, :, :], mask=weights_mask, other=0).to(tl.int32)
         low = (packed & 0x0F).to(tl.float32) - 8.0
         high = ((packed >> 4) & 0x0F).to(tl.float32) - 8.0
-        scale = tl.load(scale_ptr + row_scales + ((2 * byte_offsets) // GROUP)[None, :], mask=mask, other=0.0)
-        activations_low = tl.load(x_ptr + 2 * byte_offsets, mask=byte_mask, other=0.0)
-        activations_high = tl.load(x_ptr + 2 * byte_offsets + 1, mask=byte_mask, other=0.0)
-        acc += (low * activations_low[None, :] + high * activations_high[None, :]) * scale
+
+        activations_low = tl.load(x_ptr + 2 * byte_offsets, mask=group_mask[:, None], other=0.0)
+        activations_high = tl.load(x_ptr + 2 * byte_offsets + 1, mask=group_mask[:, None], other=0.0)
+        products = low * activations_low[None, :, :] + high * activations_high[None, :, :]
+
+        scale = tl.load(scale_ptr + row_scales + group_ids[None, :], mask=row_mask[:, None] & group_mask[None, :], other=0.0)
+        acc += tl.sum(products, axis=2) * scale
 
     tl.store(out_ptr + rows, tl.sum(acc, axis=1), mask=row_mask)
 

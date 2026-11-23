@@ -2,44 +2,45 @@
 
 > Overwrite this file at the end of every session and after every chunk. Keep it under ~60 lines.
 
-**Last updated:** 2026-11-22
+**Last updated:** 2026-11-23
 **Last git commit:** see `git log -1`
 **Bootstrap (`agents/STARTER.md`):** complete 2026-11-18, commit 9b5dee6
 **Remote:** `origin` = https://github.com/eddisonpham/vla.cu.git, branch `main`
 
 ## Done so far
-- Skeleton, `.venv` (torch 2.8.0+cu129), environment check, hardware record, task runner.
-- Triton verified on Windows and sm_120, toolkit and compiler checked (EXP-002 to EXP-005). torch.compile unusable, vLLM Linux only (EXP-006).
-- Vector add kernel and benchmark (EXP-007, EXP-008); launch overhead and CUDA graphs (EXP-009, EXP-011, DEC-018).
-- int8 GEMV with per-channel scales, 92.4 percent of peak on a DRAM-bound shape (EXP-010, DEC-019).
-- BLOCK_K sweep and split-K: 256 to 1024 within 0.2 percent, split-K 6.53x at 16 rows (EXP-012).
-- 4-bit packing with per-group scales, fused dequant GEMV, full ladder matrix (EXP-013, DEC-020).
+- Skeleton, `.venv`, environment check, hardware record, task runner.
+- Triton verified on Windows and sm_120 (EXP-002 to EXP-005). torch.compile unusable, vLLM Linux only (EXP-006).
+- Vector add and launch overhead (EXP-007 to EXP-009); CUDA graphs on a two-kernel chain (EXP-011, DEC-018).
+- int8 GEMV at 92.4 percent of peak (EXP-010, DEC-019); block sweep and split-K (EXP-012).
+- 4-bit format, fused GEMV, full ladder matrix (EXP-013, DEC-020); group-major reduction (EXP-014, DEC-021).
+- Torch custom ops and one MLP block end to end (EXP-015, DEC-022).
+- CUDA C++ port of the int4 GEMV, compared against Triton (EXP-016, DEC-023).
 
 ## What works
-- Tasks: `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`.
-- `.venv/Scripts/python.exe -m pytest -q`: 49 passed in 7 s, awkward sizes and rejection paths included.
-- Ladder at 8192 x 16384: fp32 1.614 ms, bf16 0.803, int8 0.375, int4 0.263, relative L2 errors 0, 2.9e-3, 9.4e-3, 1.07e-1.
-- `compute-sanitizer`: 0 errors on the int4 tiled kernel and the int8 split kernel; racecheck 0 hazards on atomics.
-- git: commits authored as Eddison Pham; local commits are not always pushed.
+- Tasks: `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`.
+- `.venv/Scripts/python.exe -m pytest -q`: 60 passed, run inside a vcvars shell.
+- Ladder at 8192 x 16384: fp32 1.587 ms, bf16 0.811, int8 0.400, int4 0.230 (85.5 percent of peak, 6.89x fp32).
+- MLP block 960 -> 2560 -> 960: fp32 0.072 ms, fused 0.085 ms, cosine 0.99346.
+- Triton kernels are sanitizer clean; the CUDA kernel is not (tooling failure, EXP-016).
 
 ## What's broken or missing
-- No end-to-end model: kernels are measured on synthetic tensors, never wired into a policy or a custom op.
-- The int4 group scale is gathered per byte instead of hoisted once per 64 weights, which is why int4 sits at 75 percent of DRAM peak against 93 for int8.
-- Real SmolVLA layer shapes are still unknown here, so every benchmark uses round numbers.
-- CUDA C++ port not started, though the toolkit and host compiler are verified.
-- Run-to-run variance is unmeasured; single runs are reported.
-- `compute-sanitizer` around the whole pytest run exceeds 600 s; single launches are clean.
+- No full model: the MLP block is two matrices, not an attention stack or a policy.
+- The fused path is slower than fp32 on that block because it fits in L2 and pays dispatch. Only above L2 does fusion win.
+- CUDA kernel has no sanitizer pass: `compute-sanitizer` cannot instrument the extension launch.
+- The CUDA build needs a vcvars shell; outside it torch invalidates the cache.
+- Real SmolVLA layer shapes are still assumed, not extracted from a checkpoint (DEC-024).
+- Run-to-run variance is unmeasured; single runs are reported. int8 moved 0.400 to 0.375 ms between sessions.
+- `compute-sanitizer` around the whole pytest run still exceeds 600 s.
 - `docs/PRIMER.md` exists untracked, to be deleted on request.
 
 ## Current chunk
-None in progress. The measured ladder is complete for Triton at batch 1.
-The two obvious quality gaps are int4 kernel efficiency and model-level integration.
+None in progress. All three requested follow-ups are implemented, measured and documented.
 
 ## Open questions for the human
-- Optimize int4 further (hoisted scale, shared-memory x tile), or wire the kernels into a real forward pass first?
-- Which SmolVLA layer shapes should the benchmarks adopt?
+- Next milestone: a CUDA-graphed block (cheap, fixes the dispatch loss), or a real checkpoint forward pass?
+- Does the cosine 0.9935 at block level clear the 0.98 model gate once a real checkpoint is used?
 
 ## Suggested next options (see `BACKLOG.md`)
-1. Hoist the int4 group scale and retune ROWS, aiming for parity with int8 in GB/s.
-2. Register the GEMV as a `torch.library` custom op and run one real layer end to end.
-3. CUDA C++ port of the int4 GEMV, the comparison the repo exists for.
+1. Graph the MLP block so dispatch stops dominating, then re-run `python -m vla_cu layer`.
+2. `ncu` both int4 kernels to explain the 4 percent Triton lead and the remaining 15 percent of peak.
+3. Extract real SmolVLA shapes and rerun the matrix on them.

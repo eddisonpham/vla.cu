@@ -157,3 +157,27 @@
 - Consequences: K must divide by 64, which 960 and 2560 do, both nibbles of a byte always share one scale while the group is even, and an all-zero group stores scale 1 with codes 8 so it dequantizes to exactly zero. The kernel gathers the scale per byte; that gather is the next thing to hoist (EXP-013 shows it costs bandwidth).
 - Revisit if: a real layer has K not divisible by 64, or accuracy needs groups of 32 or 16 with a larger scale table.
 - Status: active
+
+## DEC-021: The int4 reduction is group-major, one scale multiply per group  (2026-11-23)
+- Context: the first fused kernel multiplied every element by its group's scale, which meant a scale load per byte even though 32 bytes share a value. int4 sat at 75 percent of peak while int8 sat at 93.
+- Options considered: (a) keep the per-element scale and hope the L1 cache absorbs the gather; (b) reduce inside each group and multiply the group sum once; (c) pre-expand the scales into a per-byte table during packing.
+- Chosen and why: (b). It removes 32 times the scale loads and multiplies, and it shrinks the accumulator by the group size, which is what makes a wide row tile affordable. (c) would trade DRAM traffic for bandwidth and break the format's compactness.
+- Consequences: the kernel tile is 3D, `[ROWS, groups, GROUP // 2]`, which is harder to read than a flat tile but mirrors the format. Block size must be a multiple of the group size, already enforced. Measured effect: EXP-014, 0.263 to 0.230 ms.
+- Revisit if: a group size smaller than 32 makes the group tile too narrow to fill a warp.
+- Status: active
+
+## DEC-022: The model-facing entry point is a torch custom op, not a bare launch  (2026-11-23)
+- Context: the benchmarks call the wrappers directly, but anything upstream (compile, tracing, an nn.Module) needs an operator torch can see.
+- Options considered: (a) call the Triton wrapper from model code; (b) register with `torch.library.custom_op` and provide a fake implementation; (c) write a full `autograd.Function`.
+- Chosen and why: (b). Inference at batch 1 needs no backward, the fake implementation gives correct shapes under tracing, and `opcheck` validates the schema for free. (c) would be dead code.
+- Consequences: `vla_cu/ops.py` must be imported before use, and the ops inherit the kernels' Python-level validation cost. EXP-015 shows that cost dominates a small layer, so the next step for small shapes is a graph, not a faster kernel.
+- Revisit if: a real forward pass needs autograd, or the Python validation shows up in a profile.
+- Status: active
+
+## DEC-023: The CUDA port stays a comparison, not the default path  (2026-11-23)
+- Context: the roadmap had a CUDA C++ port of the int4 GEMV. It exists now, and it needs a vcvars shell to build, which the Triton path does not.
+- Options considered: (a) make the CUDA kernel the default; (b) keep both and compare on identical shapes; (c) drop the port.
+- Chosen and why: (b). At the DRAM-bound shape the port is 4 percent slower and inside the noise, so there is no reason to prefer it, while it is 2.5x faster on tiny shapes purely through dispatch cost, which is a launch-overhead fact rather than a kernel fact. Keeping both is the point of the project.
+- Consequences: two implementations to keep correct, and the CUDA one carries an unresolved sanitizer result (EXP-016) until the tooling problem is understood.
+- Revisit if: profiling shows the Triton kernel leaving performance on the table, or the sanitizer issue is fixed.
+- Status: active

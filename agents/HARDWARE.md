@@ -47,6 +47,9 @@ peak", not as an expectation for any single run.
 | 2026-11-22 | int8 GEMV block size sweep, 8192 x 16384 | 256 to 1024 within 0.2 percent, 336.7 GB/s best, 128 loses 13 percent | `python -m vla_cu tune` | EXP-012 |
 | 2026-11-22 | int8 GEMV split-K, 16 x 8388608, 134 MB | 3.430 ms at split 1, 0.525 ms at split 8, 6.53x; loss above 256 rows | `python -m vla_cu tune` | EXP-012 |
 | 2026-11-22 | ladder at 8192 x 16384, batch 1 | fp32 1.614 ms, bf16 0.803, int8 0.375, int4 0.263, all with relative L2 error | `python -m vla_cu matrix` | EXP-013 |
+| 2026-11-23 | ladder at 8192 x 16384 after the group-major int4 fix | fp32 1.587 ms, bf16 0.811, int8 0.400, int4 0.230 (85.5 percent of peak, 6.89x) | `python -m vla_cu matrix` | EXP-014 |
+| 2026-11-23 | MLP block 960 -> 2560 -> 960, batch 1 | fp32 0.072 ms, fused 0.085 ms, cosine 0.99346; L2 resident, so dispatch bound | `python -m vla_cu layer` | EXP-015 |
+| 2026-11-23 | CUDA C++ against Triton int4 GEMV | 8192 x 16384: 0.240 against 0.231 ms; 1024 x 1024: 0.008 against 0.021 ms | `python -m vla_cu cuda` | EXP-016 |
 
 ## Environment change log
 - 2026-11-18: file created, nothing detected yet.
@@ -54,3 +57,5 @@ peak", not as an expectation for any single run.
 - 2026-11-18: CUDA 12.9.2 toolkit installed. nvcc and compute-sanitizer present; nsys and ncu absent; bundled VS 18 MSVC 14.50 is newer than nvcc 12.9 accepts.
 - 2026-11-18: VS 2022 BuildTools 17.14.45 added (MSVC 14.44.35207). nvcc 12.9 compiles and runs a CUDA file. Nsight Compute and Nsight Systems now found by the env task without PATH edits.
 - 2026-11-18: recorded that both Visual Studio installs sit under `Program Files (x86)`, and that ninja appears only in a vcvars shell. Added the `cuda-check` task (EXP-005).
+- 2026-11-23: installed `ninja 1.13.2` into the venv (it is now in `requirements.txt`). A `torch.utils.cpp_extension` build still needs `cl.exe`, so builds and every `cuda` task run happen inside `vcvars64.bat`; outside it, torch invalidates the cached build and fails on ninja. First successful extension build and load: EXP-016.
+- 2026-11-23: `compute-sanitizer` 2025.2.1 cannot instrument this extension's launch (`CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction`), so the CUDA kernel has no sanitizer pass. Triton kernels remain clean (EXP-016).

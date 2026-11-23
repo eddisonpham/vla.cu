@@ -224,3 +224,67 @@
 - Small shapes: at 1024 x 1024 every format lands between 0.016 and 0.027 ms, dispatch dominated, and the ladder says nothing there. At 4096 x 2048 the fp32 row reads 1265.8 GB/s because 33.6 MB fits L2, so only the 8192 x 16384 block is a DRAM result.
 - Caveats: the matrix first reported nonsense errors because elementwise relative error explodes near zero outputs; it now reports relative L2 norm, which is the right measure for a quantization comparison but still not a quality measure. Cosine similarity against fp32 is the gate for a real model.
 - Follow-ups: hoist the group scale out of the inner loop (64 weights share one value); try 8 rows with a shared-memory x tile; compare against torchao and bitsandbytes on the same shapes.
+
+## EXP-014: Group-major reduction closes the int4 bandwidth gap  (2026-11-23)
+- Goal / question: int4 streamed 287.8 GB/s against 358.0 for int8. Was that the nibble unpack, or the per-byte scale gather?
+- Change (one thing): the tile became `[ROWS, groups, GROUP // 2 bytes]` and the reduction runs inside each group first, so one scale load and one multiply serve 64 weights. The accumulator shrank from `[ROWS, BLOCK_K // 2]` to `[ROWS, BLOCK_K // GROUP]`, a factor of 32. Supersedes the int4 timing in EXP-013.
+- Prediction: no prediction recorded. This is a regression against the rule in CLAUDE.md, noted here rather than hidden.
+- Result at 8192 x 16384, batch 1 (measured, same run for both formats):
+
+| kernel | ms | GB/s | % of 384 | x fp32 |
+|---|---|---|---|---|
+| int4 per-byte scale (EXP-013) | 0.263 | 287.8 | 75.0 | 6.15 |
+| int4 group-major | 0.230 | 328.2 | 85.5 | 6.89 |
+| int8 reference, same run | 0.400 | 336.1 | 87.5 | 3.97 |
+
+- Result, tile sweep at the same shape (ms, block_k 512 / 1024):
+
+| rows | block 512 | block 1024 |
+|---|---|---|
+| 1 | 0.634 | 0.368 |
+| 2 | 0.294 | 0.252 |
+| 4 | 0.231 | 0.229 |
+| 8 | 0.250 | 0.231 |
+| 16 | 0.228 | 0.231 |
+| 32 | 0.238 | 0.257 |
+
+- Explanation / hypothesis: the gather was a real cost, 12.5 percent of runtime, and 32 times fewer scale loads plus 32 times fewer scale multiplies recovered it. The gap to int8 is now 2 points of peak, which is what the nibble surgery should cost. The row tile saturates at 4: below that every program re-reads the activation vector, above it the transient products tile costs more than the activation traffic it saves, and 32 rows loses 10 percent.
+- Decision: keep `ROWS_PER_PROGRAM = 4`, `BLOCK_K = 1024`. Rows 4 to 16 sit within 1 percent, which is inside run-to-run noise, so there is no evidence to move the default.
+- Caveats: one run per configuration, no repeats, and no profiler trace of the L2 read traffic that the model predicts.
+- Follow-ups: stage the activation tile in shared memory; measure the same sweep on a shape that does not fit in L2 anyway (4096 x 2048 is L2-resident here); try `tl.dot`-style reduction instead of `tl.sum` over a 3D tile.
+
+## EXP-015: Custom ops and one SmolVLA-shaped MLP block end to end  (2026-11-23)
+- Goal / question: once the kernels are reachable as torch operators, does fusion still pay on a real layer instead of a synthetic matrix?
+- Change (one thing): `vla_cu/ops.py` registers both GEMVs with `torch.library.custom_op` and a fake implementation, and `bench/layer.py` runs the MLP block 960 -> 2560 -> 960 at batch 1 on three paths.
+- Prediction: no prediction recorded.
+- Result (measured, warmup 10, iterations 50):
+
+| path | ms | GB/s | x fp32 | cosine | rel L2 |
+|---|---|---|---|---|---|
+| fp32, two `torch.mv` | 0.072 | 273.3 | 1.00 | 1.00000 | 0 |
+| dequantize, then `torch.mv` | 0.072 | 272.6 | 1.00 | 0.99346 | 1.15e-1 |
+| fused, through the custom ops | 0.085 | 45.3 | 0.85 | 0.99346 | 1.15e-1 |
+
+- Explanation / hypothesis: the block is 19.7 MB in fp32, so it fits in the 33.6 MB L2 and never touches DRAM. There are no bytes to save, and the fused path pays two Python-dispatched launches (about 16 us each, EXP-009) against kernels that take about 20 us. The 45.3 GB/s is not a bandwidth result, it is the dispatch floor divided by the byte count. Fusion wins only above L2, which is exactly the 8192 x 16384 row of the matrix.
+- Both quantized paths agree to 5 decimals in cosine, which is the correctness result that matters here: the custom op path reproduces the reference chain, not just the single kernel.
+- Bugs found and fixed in this chunk: the dequantize baseline first forgot to apply the int8 row scale (reported 1.4e3 relative L2), and the fused path returned `None` because the timed helper had no return value.
+- Caveats: the 0.9935 cosine is for one random block, not a checkpoint, and the 0.98 gate in the prior project was measured on a whole model. Real weights could sit either side of that.
+- Follow-ups: CUDA-graph the block to remove the dispatch cost (DEC-018); compare `torch.compile` on the custom op path; run a real checkpoint when one is available.
+
+## EXP-016: CUDA C++ port of the int4 GEMV against Triton  (2026-11-23)
+- Goal / question: what does hand-written CUDA buy over the Triton kernel on the same shapes?
+- Change (one thing): `csrc/int4_gemv.cu`, built with `torch.utils.cpp_extension.load`. One warp per output row, each lane loads a uint32 (four bytes, eight weights) and two float4 activations, the group scale is a warp-uniform load, and the row sum is a shuffle reduction. No shared memory, no barrier.
+- Prediction: no prediction recorded.
+- Result (measured, warmup 5, iterations 20, both kernels on the same tensors):
+
+| N x K | MB | Triton ms | Triton GB/s | CUDA ms | CUDA GB/s | CUDA / Triton | agree |
+|---|---|---|---|---|---|---|---|
+| 1024 x 1024 | 0.6 | 0.021 | 28.9 | 0.008 | 73.5 | 2.54x | yes |
+| 4096 x 2048 | 4.7 | 0.021 | 227.4 | 0.014 | 331.7 | 1.46x | yes |
+| 8192 x 16384 | 75.6 | 0.231 | 327.2 | 0.240 | 315.1 | 0.96x | yes |
+
+- Explanation / hypothesis: at the DRAM-bound shape the two kernels are 4 percent apart, well inside the noise this laptop GPU produces, so the port buys nothing where bytes matter. The large small-shape gaps are dispatch cost, not kernel speed: 21 us from Python through Triton against 8 us through pybind. That is the same launch overhead EXP-009 measured, and it is why CUDA graphs exist.
+- Correctness: outputs agree with Triton within `rtol=1e-4` on every shape, and both match the float64 dequantize-then-matmul reference on 5 shapes including a 3-row tail and K=320. 60 tests pass.
+- Sanitizer, unresolved: `compute-sanitizer` 2025.2.1 reports `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction` when it instruments this extension, both with the default tool and with `--tool memcheck --target-processes all`. That is a tooling failure, not a memory report, so the CUDA kernel has no clean sanitizer pass yet. The Triton kernels are clean. Do not read this as verified memory safety.
+- Build caveat: the extension only builds inside a shell where `vcvars64.bat` has run (EXP-004, EXP-005), and outside that shell torch invalidates the cached build and fails on ninja, so the `cuda` task must run from a vcvars shell.
+- Follow-ups: `ncu` on both kernels to see whether the 4 percent is occupancy or issue stalls; try two rows per warp; graph the CUDA launch to separate dispatch from kernel time.

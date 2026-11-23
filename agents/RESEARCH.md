@@ -86,3 +86,23 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local probe with torch 2.8.0+cu129 and triton 3.9.0 on 2026-11-22; https://docs.vllm.ai/en/latest/getting_started/installation/gpu (accessed 2026-11-22).
 - Confidence: high for both. The torch.compile failure is measured on this machine; the vLLM statement is from its own docs.
 - Relevance to vla.cu: `torch.compile` cannot serve as a baseline here without changing the Triton install or moving to WSL, and vLLM is not an option on native Windows. `torch.cuda.CUDAGraph` is a separate API and is unaffected by the inductor failure; it is untested here.
+
+## SmolVLA layer shapes used by the end-to-end block  (2026-11-23)
+- Question: which shapes should stand in for a real layer in `python -m vla_cu layer`?
+- Finding: the block uses hidden 960 and intermediate 2560, the widths of the SmolVLM2-500M backbone that SmolVLA builds on. Both are divisible by the group size 64 (DEC-020). This was **not** verified against a checkpoint in this session; no `config.json` was read, and the figure comes from the repo's own assumption plus the project brief of about 450M parameters.
+- Source: repo assumption (DEC-020, README target of about 450M parameters), not a lookup. Confidence: low.
+- Relevance to vla.cu: every layer-level number in EXP-015 inherits this assumption. Do not present 960/2560 as extracted from SmolVLA until a config is read.
+
+## compute-sanitizer cannot instrument the torch extension on this install  (2026-11-23)
+- Question: can the CUDA C++ kernel get the sanitizer pass that `CLAUDE.md` requires?
+- Finding: no. compute-sanitizer 2025.2.1 fails the run with `Program hit CUDA_ERROR_INVALID_HANDLE (error 400) due to "invalid resource handle" on CUDA API call to cuKernelGetFunction`, raised from `cudaLaunchKernel` inside `vla_cu_int4_gemv.pyd`, both with the default tool and with `--tool memcheck --target-processes all --print-limit 3`. The kernel still executes and returns values that match the reference; only the instrumentation fails. Triton kernel launches on the same machine are clean.
+- Source: local runs on 2026-11-23 (EXP-016), toolkit 12.9.2, driver 617.42. No NVIDIA issue tracker entry was read.
+- Confidence: high that it fails here; unknown whether a driver or sanitizer update, or linking the runtime differently, changes it.
+- Relevance to vla.cu: the CUDA kernel has no memory-safety pass. Report it as unverified, never as sanitized.
+
+## A torch extension build is invalidated outside the vcvars shell  (2026-11-23)
+- Question: why does a previously working extension fail to import in a new shell?
+- Finding: with `cl.exe` absent from PATH, `torch.utils.cpp_extension.load` decides to rebuild and then fails in `verify_ninja_availability` with `RuntimeError: Ninja is required`, even though `ninja` and a cached `.pyd` both exist. Inside a shell where `vcvars64.bat` ran, the same call builds once and imports. So the build and every `cuda` task belong in a vcvars shell.
+- Source: local reproduction on 2026-11-23 (EXP-016); torch 2.8.0 source path `cpp_extension.py:2248`.
+- Confidence: high for this install and version.
+- Relevance to vla.cu: README documents the vcvars requirement, and `vla_cu/cuda_int4.py` turns the bare ninja error into a message that names the cause.
