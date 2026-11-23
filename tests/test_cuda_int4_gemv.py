@@ -6,14 +6,24 @@ a comparison against the Triton kernel alone.
 
 from __future__ import annotations
 
+import os
 import shutil
 
 import pytest
 import torch
 
+from vla_cu.cuda_int4 import VARIANTS
 from vla_cu.quant import dequantize_int4, pack_int4
 
-pytestmark = pytest.mark.skipif(shutil.which("nvcc") is None, reason="nvcc not on PATH")
+HOST_COMPILER = (
+    shutil.which("cl")
+    if os.name == "nt"
+    else shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+)
+pytestmark = pytest.mark.skipif(
+    shutil.which("nvcc") is None or HOST_COMPILER is None,
+    reason="no CUDA build toolchain on PATH; on Windows, run inside vcvars64.bat",
+)
 
 SHAPES = ((1, 64), (3, 128), (17, 320), (64, 960), (128, 2048))
 
@@ -24,8 +34,9 @@ def reference(packed: torch.Tensor, scales: torch.Tensor, x: torch.Tensor) -> to
     return (weights @ x.to(torch.float64)).to(torch.float32)
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize(("n_out", "n_in"), SHAPES)
-def test_matches_dequantize_then_matmul(n_out: int, n_in: int) -> None:
+def test_matches_dequantize_then_matmul(n_out: int, n_in: int, variant: str) -> None:
     """Warp per row, uint32 weight loads and the row tail all have to agree with the reference."""
     from vla_cu.cuda_int4 import int4_gemv_cuda
 
@@ -34,7 +45,7 @@ def test_matches_dequantize_then_matmul(n_out: int, n_in: int) -> None:
     x = torch.randn(n_in, device="cuda", generator=generator)
     packed, scales = pack_int4(w)
 
-    out = int4_gemv_cuda(packed, scales, x)
+    out = int4_gemv_cuda(packed, scales, x, variant=variant)
 
     assert out.shape == (n_out,)
     torch.testing.assert_close(out, reference(packed, scales, x), rtol=1e-4, atol=1e-3)

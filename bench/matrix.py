@@ -43,8 +43,8 @@ def bytes_moved(fmt: str, n_out: int, n_in: int) -> int:
     """Bytes one call of `fmt` moves: weights, activations, scales, output."""
     weights = {"fp32": 4, "bf16": 2, "int8": 1, "int4": 0.5}[fmt] * n_out * n_in
     scales = {"fp32": 0, "bf16": 0, "int8": 4 * n_out, "int4": 4 * n_out * n_in // GROUP_SIZE}[fmt]
-    output = 2 if fmt == "bf16" else 4
-    return int(weights + scales + 4 * n_in + output * n_out)
+    element = 2 if fmt == "bf16" else 4
+    return int(weights + scales + element * n_in + element * n_out)
 
 
 def int4_tuning_sweep(n_out: int, n_in: int) -> None:

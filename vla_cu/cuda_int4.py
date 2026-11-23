@@ -14,6 +14,7 @@ Task: python -m vla_cu cuda
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import torch
@@ -31,8 +32,8 @@ def extension():
     """Compile the extension on first use and return the cached module.
 
     A build needs nvcc, a host compiler and ninja, and on Windows the host compiler is
-    only on PATH inside a shell where vcvars64.bat has been called. The error says so,
-    because the underlying message is only about ninja.
+    only on PATH inside a shell where vcvars64.bat has been called. torch reports a
+    missing compiler as CalledProcessError, so that type is wrapped too.
     """
     global _EXTENSION
     if _EXTENSION is None:
@@ -43,7 +44,7 @@ def extension():
                 extra_cflags=["-O3"],
                 extra_cuda_cflags=["-O3"],
             )
-        except RuntimeError as error:
+        except (RuntimeError, subprocess.CalledProcessError) as error:
             raise RuntimeError(
                 f"could not build {CSRC.name}: {error}. On Windows, call vcvars64.bat in this shell first (see agents/HARDWARE.md)."
             ) from error

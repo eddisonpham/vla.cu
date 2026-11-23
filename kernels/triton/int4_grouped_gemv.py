@@ -116,9 +116,30 @@ def int4_grouped_gemv_into(
     int32 [R], x_base int32 [S]. Every matrix's row count must be a multiple of `rows`
     and K must be divisible by `block_k` and by group_size.
     """
+    if packed.dim() != 2 or scales.dim() != 2 or x.dim() != 1 or out.dim() != 1:
+        raise ValueError(f"expected packed [R, K // 2], scales [R, K // G], x [X], out [R]; got {tuple(packed.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
+    if segment.dim() != 1 or x_base.dim() != 1:
+        raise ValueError(f"expected segment [R] and x_base [S]; got {tuple(segment.shape)}, {tuple(x_base.shape)}")
+    if packed.dtype != torch.uint8 or segment.dtype != torch.int32 or x_base.dtype != torch.int32:
+        raise ValueError(f"expected uint8 packed weights and int32 segment tables; got {packed.dtype}, {segment.dtype}, {x_base.dtype}")
+    if scales.dtype not in (torch.float32, torch.float16) or x.dtype != torch.float32 or out.dtype != torch.float32:
+        raise ValueError(f"expected fp32 or fp16 scales and fp32 x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
+
     total_rows = packed.shape[0]
     if total_rows == 0:
         return
+    if scales.shape[0] != total_rows or out.shape[0] != total_rows or segment.shape[0] != total_rows:
+        raise ValueError(f"expected one scale row, output and segment entry per packed row; got {total_rows} rows")
+    if packed.shape[1] * 2 % group_size or block_k % group_size:
+        raise ValueError(f"K {packed.shape[1] * 2} and block size {block_k} must be multiples of group size {group_size}")
+    if rows <= 0 or rows & (rows - 1):
+        raise ValueError(f"expected a power of two row tile, got {rows}")
+    if x.shape[0] < packed.shape[1] * 2:
+        raise ValueError(f"expected an activation vector of at least {packed.shape[1] * 2}, got {x.shape[0]}")
+    if not (packed.is_contiguous() and scales.is_contiguous() and x.is_contiguous() and out.is_contiguous() and segment.is_contiguous() and x_base.is_contiguous()):
+        raise ValueError("expected contiguous tensors")
+    if packed.device.type != "cuda" or any(t.device != packed.device for t in (scales, x, out, segment, x_base)):
+        raise ValueError("expected all tensors on the same CUDA device")
     grid = (triton.cdiv(total_rows, rows),)
     int4_grouped_gemv_kernel[grid](
         packed,

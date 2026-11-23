@@ -17,9 +17,15 @@ import math
 import torch
 
 
-def hadamard(size: int) -> torch.Tensor:
-    """Return a normalized Sylvester Hadamard matrix of order `size`, which must be 2^n."""
-    matrix = torch.ones((1, 1), device="cuda")
+def hadamard(size: int, device: str = "cuda") -> torch.Tensor:
+    """Return a normalized Sylvester Hadamard matrix of order `size`, a power of two.
+
+    The order is checked because the recursive doubling below would otherwise return the
+    next power of two, and a caller would rotate blocks of the wrong width.
+    """
+    if size < 1 or size & (size - 1):
+        raise ValueError(f"expected a positive power of two, got {size}")
+    matrix = torch.ones((1, 1), device=device)
     while matrix.shape[0] < size:
         matrix = torch.cat(
             (torch.cat((matrix, matrix), dim=1), torch.cat((matrix, -matrix), dim=1)), dim=0

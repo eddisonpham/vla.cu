@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+
 import pytest
 import torch
 
 from kernels.triton.int8_gemv import int8_gemv
 from vla_cu.cuda_int8 import int8_gemv_cuda
+
+HOST_COMPILER = (
+    shutil.which("cl")
+    if os.name == "nt"
+    else shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+)
+pytestmark = pytest.mark.skipif(
+    shutil.which("nvcc") is None or HOST_COMPILER is None,
+    reason="no CUDA build toolchain on PATH; on Windows, run inside vcvars64.bat",
+)
 
 SHAPES = ((1, 16), (3, 960), (17, 1040), (64, 2560))
 

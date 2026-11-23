@@ -10,6 +10,7 @@ Task: python -m vla_cu fastpath
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import torch
@@ -24,7 +25,8 @@ def extension():
     """Compile the extension on first use and return the cached module.
 
     Like the int4 loader, this needs nvcc, a host compiler and ninja, which on Windows
-    means a shell where vcvars64.bat has run.
+    means a shell where vcvars64.bat has run. A missing compiler arrives as
+    CalledProcessError, so both failure types are wrapped.
     """
     global _EXTENSION
     if _EXTENSION is None:
@@ -35,7 +37,7 @@ def extension():
                 extra_cflags=["-O3"],
                 extra_cuda_cflags=["-O3"],
             )
-        except RuntimeError as error:
+        except (RuntimeError, subprocess.CalledProcessError) as error:
             raise RuntimeError(
                 f"could not build {CSRC.name}: {error}. On Windows, call vcvars64.bat in this shell first (see agents/HARDWARE.md)."
             ) from error

@@ -140,6 +140,8 @@ def int4_gemv_into(
         raise ValueError(f"K {n_cols} is not divisible by group size {group_size}")
     if scales.shape != (n_rows, n_cols // group_size):
         raise ValueError(f"expected scales {(n_rows, n_cols // group_size)}, got {tuple(scales.shape)}")
+    if block_k <= 0 or block_k & (block_k - 1):
+        raise ValueError(f"expected a power of two block size, got {block_k}")
     if block_k % group_size:
         raise ValueError(f"block size {block_k} must be a multiple of group size {group_size}")
     if rows < 1 or rows & (rows - 1):
