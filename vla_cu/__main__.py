@@ -25,6 +25,7 @@ TASKS: dict[str, str] = {
     "grouped": "bench.grouped",
     "m50": "bench.m50",
     "rotate": "bench.rotation",
+    "fastpath": "bench.fastpath",
 }
 
 

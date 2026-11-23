@@ -18,11 +18,16 @@
 // Variant 2 is variant 1 with the weight load marked streaming (__ldcs), because
 // each packed word is read exactly once and should not evict the activation vector.
 //
+// Every variant launches on the current torch stream rather than the legacy default
+// stream, because a launch on the legacy stream is invisible to stream capture and a
+// CUDA graph would then record everything except the kernel.
+//
 // Preconditions enforced by the host wrapper: group size 64, K divisible by 64, all
 // tensors fp32 or uint8, contiguous, and 16-byte aligned activations.
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
 namespace {
@@ -139,12 +144,13 @@ void launch_impl(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, to
     const float* x_ptr = x.data_ptr<float>();
     float* out_ptr = out.data_ptr<float>();
 
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     if (variant == 0) {
-        int4_gemv_kernel<false, false><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+        int4_gemv_kernel<false, false><<<blocks, THREADS, 0, stream>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
     } else if (variant == 1) {
-        int4_gemv_kernel<true, false><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+        int4_gemv_kernel<true, false><<<blocks, THREADS, 0, stream>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
     } else {
-        int4_gemv_kernel<true, true><<<blocks, THREADS>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
+        int4_gemv_kernel<true, true><<<blocks, THREADS, 0, stream>>>(packed_ptr, scale_ptr, x_ptr, out_ptr, n_rows, n_cols);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
