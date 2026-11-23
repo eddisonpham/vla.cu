@@ -96,3 +96,9 @@ Full file formats, templates, and rules are in `agents/README.md`. Never delete 
 - Use more than 7 GB of GPU memory.
 - Commit as the agent, or add any AI attribution to a commit (section 6).
 - **End a session or chunk without updating `agents/`.**
+
+## 8. TEMPORARY: improvement campaign (2026-11-23)
+
+Five cycles of inspect, hypothesize, measure, solidify, clean, each ending in one commit
+and an `agents/` update. Remove this section once cycle 4 is committed; cycle 5 runs
+without it. This is a session instruction, not a rule for the repo.
