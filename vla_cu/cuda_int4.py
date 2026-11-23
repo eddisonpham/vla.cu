@@ -22,6 +22,7 @@ from torch import Tensor
 from torch.utils.cpp_extension import load
 
 from vla_cu.quant import GROUP_SIZE
+from vla_cu.validate import check_int4_gemv, require
 
 CSRC = Path(__file__).resolve().parent.parent / "csrc" / "int4_gemv.cu"
 VARIANTS = ("baseline", "unroll", "stream")
@@ -70,10 +71,12 @@ def int4_gemv_cuda_into(
         raise ValueError(f"the CUDA kernel is written for group size {GROUP_SIZE}, got {group_size}")
     if variant not in VARIANTS:
         raise ValueError(f"expected one of {VARIANTS}, got {variant}")
-    if packed.dtype != torch.uint8:
-        raise ValueError(f"expected uint8 packed weights, got {packed.dtype}")
-    if packed.dim() != 2 or scales.dim() != 2 or x.dim() != 1 or out.dim() != 1:
-        raise ValueError("expected packed [N, K // 2], scales [N, groups], x [K], out [N]")
+    n_rows, _, _ = check_int4_gemv(packed, scales, x, out, group_size)
+    require(scales.dtype == torch.float32, f"the CUDA kernel reads fp32 scales, got {scales.dtype}")
+    require(x.data_ptr() % 16 == 0, "activations must be 16-byte aligned")
+    require(packed.data_ptr() % 4 == 0, "packed weights must be 4-byte aligned")
+    if n_rows == 0:
+        return
     launcher = {
         "baseline": extension().int4_gemv_launch,
         "unroll": extension().int4_gemv_unroll_launch,

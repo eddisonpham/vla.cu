@@ -17,6 +17,8 @@ import torch
 from torch import Tensor
 from torch.utils.cpp_extension import load
 
+from vla_cu.validate import check_int8_gemv, require
+
 CSRC = Path(__file__).resolve().parent.parent / "csrc" / "int8_gemv.cu"
 _EXTENSION = None
 
@@ -51,14 +53,12 @@ def int8_gemv_cuda_into(w: Tensor, scales: Tensor, x: Tensor, out: Tensor) -> No
     out fp32 [N], all on one CUDA device. K must be a multiple of 16 so every row base
     stays aligned for the 16-byte weight load; a scalar tail handles K not divisible by 512.
     """
-    if w.dtype != torch.int8:
-        raise ValueError(f"expected int8 weights, got {w.dtype}")
-    if scales.dtype != torch.float32 or x.dtype != torch.float32 or out.dtype != torch.float32:
-        raise ValueError(f"expected fp32 scales, x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
-    if w.dim() != 2 or scales.dim() != 1 or x.dim() != 1 or out.dim() != 1:
-        raise ValueError("expected w [N, K], scales [N], x [K], out [N]")
-    if w.shape[0] != scales.shape[0] or w.shape[1] != x.shape[0] or out.shape[0] != w.shape[0]:
-        raise ValueError(f"shape mismatch: w {tuple(w.shape)}, scales {tuple(scales.shape)}, x {tuple(x.shape)}, out {tuple(out.shape)}")
+    n_rows, n_cols = check_int8_gemv(w, scales, x, out)
+    require(n_cols % 16 == 0, f"K must be a multiple of 16 so every row stays 16-byte aligned, got {n_cols}")
+    require(x.data_ptr() % 16 == 0, "activations must be 16-byte aligned")
+    require(w.data_ptr() % 16 == 0, "weights must be 16-byte aligned")
+    if n_rows == 0 or n_cols == 0:
+        return
     extension().int8_gemv_launch(w, scales, x, out)
 
 

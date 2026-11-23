@@ -28,10 +28,10 @@ import triton
 import triton.language as tl
 
 from vla_cu.quant import GROUP_SIZE
+from vla_cu.validate import check_int4_gemv, check_power_of_two, require
 
 BLOCK_K = 1024
 ROWS_PER_PROGRAM = 4
-SCALE_DTYPES = (torch.float32, torch.float16)
 
 
 @triton.jit
@@ -123,33 +123,10 @@ def int4_gemv_into(
     contiguous, all on one CUDA device. K must be divisible by group_size, and
     block_k must be a power of two that is a multiple of group_size.
     """
-    if packed.dim() != 2 or scales.dim() != 2 or x.dim() != 1 or out.dim() != 1:
-        raise ValueError(f"expected packed [N, K // 2], scales [N, K // G], x [K], out [N]; got {tuple(packed.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
-    if packed.dtype != torch.uint8:
-        raise ValueError(f"expected uint8 packed weights, got {packed.dtype}")
-    if scales.dtype not in SCALE_DTYPES:
-        raise ValueError(f"expected fp32 or fp16 scales, got {scales.dtype}")
-    if x.dtype != torch.float32 or out.dtype != torch.float32:
-        raise ValueError(f"expected fp32 x and out; got {x.dtype}, {out.dtype}")
-
-    n_rows, n_bytes = packed.shape
-    n_cols = n_bytes * 2
-    if x.shape[0] != n_cols or out.shape[0] != n_rows:
-        raise ValueError(f"shape mismatch: packed {tuple(packed.shape)} implies K {n_cols}, got x {tuple(x.shape)} and out {tuple(out.shape)}")
-    if group_size <= 0 or n_cols % group_size:
-        raise ValueError(f"K {n_cols} is not divisible by group size {group_size}")
-    if scales.shape != (n_rows, n_cols // group_size):
-        raise ValueError(f"expected scales {(n_rows, n_cols // group_size)}, got {tuple(scales.shape)}")
-    if block_k <= 0 or block_k & (block_k - 1):
-        raise ValueError(f"expected a power of two block size, got {block_k}")
-    if block_k % group_size:
-        raise ValueError(f"block size {block_k} must be a multiple of group size {group_size}")
-    if rows < 1 or rows & (rows - 1):
-        raise ValueError(f"expected a power of two row tile, got {rows}")
-    if not (packed.is_contiguous() and scales.is_contiguous() and x.is_contiguous() and out.is_contiguous()):
-        raise ValueError("expected contiguous tensors")
-    if packed.device.type != "cuda" or scales.device != packed.device or x.device != packed.device or out.device != packed.device:
-        raise ValueError("expected all tensors on the same CUDA device")
+    n_rows, n_cols, _ = check_int4_gemv(packed, scales, x, out, group_size)
+    check_power_of_two("block size", block_k)
+    require(block_k % group_size == 0, f"block size {block_k} must be a multiple of group size {group_size}")
+    check_power_of_two("row tile", rows)
     if n_rows == 0:
         return
 

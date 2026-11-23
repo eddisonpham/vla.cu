@@ -44,7 +44,7 @@ def test_rejects_length_that_breaks_vector_alignment() -> None:
     scales = torch.ones(4, device="cuda")
     x = torch.zeros(1025, device="cuda")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="multiple of 16"):
         int8_gemv_cuda(w, scales, x)
 
 

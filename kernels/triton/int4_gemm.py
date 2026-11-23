@@ -29,6 +29,7 @@ import triton
 import triton.language as tl
 
 from vla_cu.quant import GROUP_SIZE
+from vla_cu.validate import check_int4_gemm, check_power_of_two, require
 
 BLOCK_N = 64
 BLOCK_K = 64
@@ -134,27 +135,14 @@ def int4_gemm_into(
     Assumptions: packed uint8 [N, K // 2] contiguous, scales fp32 or fp16
     [N, K // group_size] contiguous, x fp32 [M, K] contiguous, out fp32 [M, N]
     contiguous, all on one CUDA device. K must be divisible by group_size and block_k
-    must be a multiple of group_size. M is padded up to the next power of two, and
-    block_k defaults to the widest step that fits in shared memory.
+    must be a multiple of group_size, which is a power of two. block_n is a power of two
+    of at least 16. M is padded up to the next power of two.
     """
-    if packed.dim() != 2 or scales.dim() != 2 or x.dim() != 2 or out.dim() != 2:
-        raise ValueError(f"expected packed [N, K // 2], scales [N, K // G], x [M, K], out [M, N]; got {tuple(packed.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
-    if packed.dtype != torch.uint8:
-        raise ValueError(f"expected uint8 packed weights, got {packed.dtype}")
-    if x.dtype != torch.float32 or out.dtype != torch.float32:
-        raise ValueError(f"expected fp32 x and out; got {x.dtype}, {out.dtype}")
-
-    n_rows, n_bytes = packed.shape
-    n_cols = n_bytes * 2
-    n_tokens = x.shape[0]
-    if x.shape[1] != n_cols or out.shape != (n_tokens, n_rows):
-        raise ValueError(f"shape mismatch: packed {tuple(packed.shape)} implies N {n_rows} and K {n_cols}, got x {tuple(x.shape)} and out {tuple(out.shape)}")
-    if n_cols % group_size or block_k % group_size:
-        raise ValueError(f"K {n_cols} and block size {block_k} must be multiples of group size {group_size}")
-    if scales.shape != (n_rows, n_cols // group_size):
-        raise ValueError(f"expected scales {(n_rows, n_cols // group_size)}, got {tuple(scales.shape)}")
-    if not (packed.is_contiguous() and scales.is_contiguous() and x.is_contiguous() and out.is_contiguous()):
-        raise ValueError("expected contiguous tensors")
+    n_tokens, n_rows, n_cols, _ = check_int4_gemm(packed, scales, x, out, group_size)
+    check_power_of_two("block size", block_k)
+    require(block_k % group_size == 0, f"block size {block_k} must be a multiple of group size {group_size}")
+    check_power_of_two("output tile", block_n)
+    require(block_n >= 16, f"expected an output tile of at least 16, got {block_n}")
     if n_tokens == 0 or n_rows == 0:
         return
 

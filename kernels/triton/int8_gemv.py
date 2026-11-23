@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vla_cu.validate import check_int8_gemv, check_power_of_two, require
+
 BLOCK_K = 1024
 
 
@@ -106,24 +108,9 @@ def int8_gemv_into(
     power of two and `split` at least 1; split above 1 zeroes `out` first because the
     partial sums are combined with atomics.
     """
-    if w.dim() != 2 or scales.dim() != 1 or x.dim() != 1:
-        raise ValueError(f"expected w [N, K], scales [N], x [K]; got {tuple(w.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}")
-    if w.shape != (scales.shape[0], x.shape[0]) or out.shape != scales.shape:
-        raise ValueError(f"shape mismatch: w {tuple(w.shape)}, scales {tuple(scales.shape)}, x {tuple(x.shape)}, out {tuple(out.shape)}")
-    if w.dtype != torch.int8:
-        raise ValueError(f"expected int8 weights, got {w.dtype}")
-    if scales.dtype != torch.float32 or x.dtype != torch.float32 or out.dtype != torch.float32:
-        raise ValueError(f"expected fp32 scales, x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
-    if not (w.is_contiguous() and scales.is_contiguous() and x.is_contiguous() and out.is_contiguous()):
-        raise ValueError("expected contiguous tensors")
-    if w.device.type != "cuda" or scales.device != w.device or x.device != w.device or out.device != w.device:
-        raise ValueError("expected all tensors on the same CUDA device")
-    if block_k <= 0 or block_k & (block_k - 1):
-        raise ValueError(f"expected a power of two block size, got {block_k}")
-    if split < 1:
-        raise ValueError(f"expected split >= 1, got {split}")
-
-    n_rows, n_cols = w.shape
+    n_rows, n_cols = check_int8_gemv(w, scales, x, out)
+    check_power_of_two("block size", block_k)
+    require(split >= 1, f"expected split >= 1, got {split}")
     if n_rows == 0:
         return
 
