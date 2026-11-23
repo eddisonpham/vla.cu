@@ -7,7 +7,7 @@ times, while one GEMM reads them once and reuses each byte 50 times. The two pat
 different numbers of bytes, so both a time column and a derived byte budget are shown.
 
 The expert width is 0.75 times the VLM width (verified in the LeRobot config) applied
-to the repo's assumed 960 and 2560, so 720 and 1920. Note that 720 is not a multiple of
+to the published 960 and 2560 of the SmolVLM2-500M backbone, so 720 and 1920. Note that 720 is not a multiple of
 the 64-weight group: 720 = 11 * 64 + 16, so this benchmark has to fall back to group 16
 for that shape, which puts 4 bytes of scale on every 16 weights instead of every 64.
 That is a real constraint on the format, not a benchmark detail (DEC-020).

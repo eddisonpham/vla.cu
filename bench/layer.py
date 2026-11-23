@@ -1,9 +1,9 @@
 """One SmolVLA-shaped MLP block end to end, fp32 against four low-bit paths.
 
 The block is the transformer MLP at the sizes SmolVLA's 500M backbone uses: hidden
-960 into intermediate 2560 and back, batch 1. Those are the repo's assumed layer
-shapes (see agents/RESEARCH.md, DEC-024); the config has not been read here, so treat
-the numbers as that layer, not as a whole model.
+960 into intermediate 2560 and back, batch 1. Those widths are read from the published
+configs (agents/RESEARCH.md, DEC-043), so treat the numbers as that layer, not as a
+whole model.
 
 The paths exist to separate three costs that are usually tangled:
   fp32         torch.mv on the original weights, the baseline

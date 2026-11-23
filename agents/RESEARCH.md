@@ -154,3 +154,15 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: the traceback from `python -m pytest -q` on this machine, torch 2.8.0 `torch/utils/cpp_extension.py` line 577 raising `CalledProcessError`, and `shutil.which` output from the same shell (2026-11-23). No vendor document read.
 - Confidence: high, reproduced in both shells.
 - Relevance to vla.cu: DEC-036. The loaders wrap both types, and the cuda tests skip when `cl` is missing on Windows.
+
+## SmolVLA and SmolVLM2 published configs  (2026-11-23)
+- Question: are the widths this repo benchmarks, hidden 960 and intermediate 2560, the real ones, and what else does the policy config fix?
+- Finding: `lerobot/smolvla_base` gives chunk 50, `n_action_steps` 50, `num_steps` 10, 16 VLM layers, `expert_width_multiplier` 0.75, 6 action dimensions, state 6 padded to 32, three cameras at 256 x 256, tokenizer max 48. `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` gives `hidden_size` 960, `intermediate_size` 2560, 32 layers, 15 heads, head_dim 64, vocab 49280, vision hidden 768, patch 16, image 512. The checkpoint is public and ungated, 450,046,176 parameters (446.77M bf16, 3.27M fp32), and `model.safetensors` is 906,712,520 bytes.
+- Source: https://huggingface.co/lerobot/smolvla_base/resolve/main/config.json and https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct/resolve/main/config.json, read 2026-11-23. Confidence: high.
+- Relevance: closes DEC-024. Expert hidden 720 and intermediate 1920 are 0.75 times the confirmed widths, which is why group 64 cannot divide the expert hidden width (DEC-030).
+
+## compute-sanitizer and torch extension kernels  (2026-11-23)
+- Question: why does compute-sanitizer fail on the loaded CUDA extension, and is there a flag that avoids it?
+- Finding: with `--target-processes all` the tool starts, the kernels return correct results, and it reports `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction` once per extension, one for the int4 module and one for the int8 module. It cannot resolve the handle torch's launcher uses. Setting `CUDA_MODULE_LOADING=EAGER` and `CUDA_LAUNCH_BLOCKING=1` did not finish inside 600 seconds, so that path is dropped. No memory error was reported.
+- Source: local runs, EXP-041. Confidence: high for the behavior, low for the root cause.
+- Relevance: the CUDA kernels have API-level sanitizer coverage and no kernel-level pass until an elevated run or a standalone harness.

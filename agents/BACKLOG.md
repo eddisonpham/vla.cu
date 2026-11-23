@@ -29,7 +29,8 @@
 - [x] An int8 grouped kernel. Done 2026-11-23, EXP-035: the attention block reads 0.99994 at int8 for 1.54x the int4 time.
 - [x] Package the project, add a style gate and CPU CI. Done 2026-11-23, EXP-039: editable install works, 47 CUDA comment lines moved to `docs/ARCHITECTURE.md`, gate at zero.
 - [ ] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error.
-- [ ] A GPU runner for CI, so `fuzz` and the native suite are not manual gates.
+- [x] CI removed 2026-11-23 at the human's request (DEC-042). The local gate is `style`, `pytest`, `fuzz`, and the vcvars suite. A GPU runner is moot until CI returns.
+- [ ] Convert three layers of `lerobot/smolvla_base` once the 865 MiB `model.safetensors` download is approved. The configs are read, so only the weights are missing.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
 - [ ] A real checkpoint: three layers, cosine per layer, with and without rotation, which is the only way to settle DEC-034.
 - [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.
@@ -39,7 +40,7 @@
 - [ ] Decide group 16 against padding to 768 for the 720-wide expert (DEC-030).
 - [ ] Download `lerobot/smolvla_base` config and index, then re-run EXP-023 and EXP-026 on real weights.
 - [ ] Make every table best-of-N with the run count stated (DEC-029).
-- [ ] Explain the CUDA baseline regression, 0.240 in EXP-016 against 0.265 to 0.476 in EXP-022, once counters are available.
+- [x] Explain the CUDA baseline regression. Done 2026-11-23, EXP-040: it does not reproduce. Baseline 0.238 ms and stream 0.208 ms at 8192 x 16384 in one process, so the 0.476 reading was a clock outlier.
 
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.

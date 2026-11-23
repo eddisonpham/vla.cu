@@ -188,7 +188,8 @@
 - Chosen and why: (a) for now, with the assumption stated in the docstring, `agents/RESEARCH.md` and this entry. The widths only set a benchmark's constants, while the verified ratio facts already carry the model-level arithmetic in `OPTIMIZATIONS.md`. (b) is small and is queued as a follow-up.
 - Consequence: every layer-level number in EXP-015 and every derived model number inherits 960 and 2560. Expert hidden 720 and intermediate 1920 are derived from the verified 0.75 ratio, not read from a file.
 - Revisit if: `lerobot/smolvla_base` config and index are downloaded, or the benchmark moves onto a real checkpoint.
-- Status: active
+- Status: superseded by DEC-043
+- CORRECTION 2026-11-23: the two configs were read, so 960 and 2560 are no longer assumptions. See DEC-043 and `agents/RESEARCH.md`.
 ## DEC-025: the MLP block runs as a CUDA graph, not through custom ops  (2026-11-23)
 - Context: EXP-015 left the fused block slower than fp32. EXP-018 split the cost into three paths on the same 19.7 MB block.
 - Options considered: (a) keep calling the custom ops from model code; (b) call the kernel wrappers directly with preallocated buffers; (c) capture those launches in a `torch.cuda.CUDAGraph` and replay.
@@ -321,4 +322,20 @@
 - Chosen and why: (b). It needs no dependency, it is the same command locally and in CI, and it states the no-comments rule that no general linter carries. (c) would add a tool for one rule.
 - Cost accepted: CI cannot run the GPU tests, so the workflow checks style and byte-compiles only. GPU correctness stays a manual gate on this machine.
 - Revisit if: a GPU runner exists, or a linter is adopted for type and import checks.
+- Status: superseded by DEC-042
+
+## DEC-042: the CI workflow is removed at the human's request  (2026-11-23)
+- Context: EXP-039 added `.github/workflows/ci.yml` for a style gate and a byte-compile. The human asked for the CI checker to be removed.
+- Options considered: (a) keep the workflow; (b) delete it and keep the local `style` task; (c) delete the style task too.
+- Chosen and why: (b). The workflow is gone, and `python -m vla_cu style` still checks the invariants locally. The task costs nothing, needs no network, and catches the source-comment and punctuation rules the repo actually broke.
+- Consequence: no automation runs on push. The local gate is `python -m vla_cu style`, `python -m pytest -q`, `python -m vla_cu fuzz`, and the vcvars suite for the native path. `README.md` ground rule 7 says so.
+- Revisit if: the human wants CI back, with or without a GPU runner.
+- Status: active
+
+## DEC-043: the model widths are read, not assumed  (2026-11-23)
+- Context: DEC-024 kept hidden 960 and intermediate 2560 as assumptions because no config had been read.
+- Finding: the published `lerobot/smolvla_base` config and the `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` text config confirm 960 and 2560, 16 VLM layers, the 0.75 expert multiplier, chunk 50 and 10 sampler steps. Sources and the full fact table are in `agents/RESEARCH.md`.
+- Chosen and why: treat 960, 2560, 720 and 1920 as read values. The expert widths follow from 0.75 times the two confirmed widths.
+- Consequence: `bench/layer.py` and `bench/m50.py` may say "published" instead of "assumed". Group 64 still cannot divide 720, so DEC-030 stays open on its own terms.
+- Revisit if: a checkpoint shows a different width, which would itself be a finding.
 - Status: active

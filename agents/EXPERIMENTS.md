@@ -383,6 +383,7 @@
 - Surprise, unresolved: the baseline reads 0.476 in run 1 where EXP-016 measured 0.240 on the same kernel body. The refactor replaced the old `if (j == 0) ... else if` chain with a shared `dot_eight` helper of eight dependent `fmaf` calls, which may have serialized the accumulator. Unverified, because counters are blocked (EXP-019). Treat the baseline column as not comparable with EXP-016.
 - Verdict: worked for the streaming variant, now the fastest int4 kernel in the repo. The 381.1 GB/s sample is above the probe's best 360.2, so the probe under-sampled the ceiling and absolute cross-task comparisons need care.
 - Sanitizer: not run. `compute-sanitizer` cannot instrument this extension (EXP-016), so the new variants have no memory safety pass. They agree with Triton and with the float64 reference through the test suite, which is not the same thing.
+- CORRECTION 2026-11-23: the 0.476 ms baseline did not reproduce. EXP-040 measured 0.238 ms for baseline, 0.230 for unroll, 0.208 for stream and 0.221 for Triton in one process, so the 0.476 sample was a clock outlier and the `dot_eight` serialization hypothesis is withdrawn. The sanitizer statement is also narrower: EXP-041 got the tool to start with `--target-processes all`, and it reports a handle error rather than a memory error.
 
 ## EXP-023: the action expert at its real M  (2026-11-23, commit 97ad2f0)
 - Goal / question: H9, the model-level question. SmolVLA predicts 50 actions per forward, so the expert's linear layers see 50 tokens. Is a per-row GEMV still the right kernel?
@@ -629,3 +630,25 @@
 - Explanation / hypothesis: the CUDA files predate the no-comments invariant, and their mapping and access notes are documentation, so `docs/` is where they belong. The CI job checks style and byte-compiles only, because a GPU runner does not exist here.
 - Verdict: worked.
 - Follow-ups: add the GPU suites to CI when a runner exists; keep the gate at zero so a new comment fails the push.
+
+## EXP-040: the CUDA baseline regression does not reproduce  (2026-11-23, docs from commit a11e321)
+- Goal / question: explain the 0.240 to 0.265 to 0.476 ms baseline drift recorded in EXP-022.
+- Change (one thing): none. Re-ran the existing task in one process after the extension rebuilt.
+- Prediction (agent's, labelled): if the drift was code, the baseline is still near 0.47 ms; if it was clocks, it is near 0.24 ms and the variants keep their usual order.
+- Command: `python -m vla_cu cuda` inside the vcvars environment.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, MSVC 14.44, CUDA 12.9.
+- Result (measured): 8192 x 16384: Triton 0.221 ms, baseline 0.238, unroll 0.230, stream 0.208. 4096 x 2048: 0.026, 0.015, 0.014, 0.014. 1024 x 1024: 0.012, 0.013, 0.012, 0.012. Stream reaches 363.5 GB/s, 94.7 percent of peak, and is the fastest variant again.
+- Explanation / hypothesis: the 0.476 reading was a power and clock outlier on this 45 to 100 W part, not a code regression. The variants rank as they did in EXP-016 and EXP-022.
+- Verdict: resolved, no code change.
+- Follow-ups: quote ranges, not single samples (DEC-029). CORRECTION added to EXP-022.
+
+## EXP-041: compute-sanitizer reaches the extension and fails on the kernel handle  (2026-11-23, docs from commit a11e321)
+- Goal / question: get a memcheck pass over the hand-written CUDA kernels after EXP-016 could not.
+- Change (one thing): none. Ran the tool with `--target-processes all`, then with eager module loading and blocking launches.
+- Prediction (agent's, labelled): the handle error would disappear if lazy module loading caused it.
+- Command: `compute-sanitizer --tool memcheck --target-processes all python /tmp/check_cuda.py` from a vcvars environment, over both extensions and six shapes.
+- GPU / environment: RTX 5060 Laptop, RTX 5060, CUDA 12.9 sanitizer 2025.2.1.
+- Result (measured): the plain run completes, prints correct results, and reports two errors, both `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction`, one from `vla_cu_int4_gemv.pyd` and one from `vla_cu_int8_gemv.pyd`. With `CUDA_MODULE_LOADING=EAGER` and `CUDA_LAUNCH_BLOCKING=1` the run did not finish inside 600 seconds.
+- Explanation / hypothesis: the tool instruments the API but cannot resolve the kernel handle torch's launcher asks for, so no kernel-level pass happens. No memory error was reported, which is not the same as a clean pass.
+- Verdict: blocked, with a narrower cause than EXP-016.
+- Follow-ups: retry from an elevated shell; a standalone CUDA harness without torch's launcher is the fallback.

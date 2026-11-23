@@ -84,6 +84,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Action block stack | four blocks at int8 everywhere read 0.99951 cosine at 0.140 ms, 3.94x the fp32 stack (EXP-036) |
 | Seeded fuzz gate | 160 cases across five kernels, zero failures (EXP-037) |
 | Versioned weight bundle | bit-exact round trip, 5.81x smaller than fp32 at int4, 5.68 ms to load four blocks (EXP-038) |
+| Model widths | hidden 960 and intermediate 2560 confirmed from the SmolVLM2-500M config, expert 720 and 1920 from the 0.75 multiplier (RESEARCH 2026-11-23) |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -155,7 +156,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 5. No comments in code. Docstrings are short, and deeper explanation lives in
    `docs/`.
 6. Sanitize CUDA kernels with `compute-sanitizer` before trusting them.
-7. `python -m vla_cu style` is a gate: zero violations, and CI runs it on every push.
+7. `python -m vla_cu style` is a gate: zero violations before a push.
 
 ## Where the reasoning lives
 

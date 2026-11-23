@@ -79,3 +79,18 @@ To pin clocks, run an elevated shell once: `nvidia-smi -pm 1` then `nvidia-smi -
 | `clang` outside a vcvars shell | `C:\Program Files\LLVM\bin\clang.EXE` |
 | nvcc 12.9 with that clang | not a supported host compiler on Windows |
 | Consequence | the cuda tests skip when `cl` is absent (DEC-036); a vcvars shell is still required to build |
+
+## Sanitizer and the extension (2026-11-23)
+
+| Fact | Value |
+|---|---|
+| `compute-sanitizer --target-processes all` | starts, runs the kernels, reports 2 errors |
+| Error | `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction`, once per extension |
+| Memory errors reported | none |
+| `CUDA_MODULE_LOADING=EAGER` with `CUDA_LAUNCH_BLOCKING=1` | did not finish inside 600 s |
+| Consequence | no kernel-level sanitizer pass on the CUDA ports (DEC-041, EXP-041) |
+
+## Measured baselines (2026-11-23, added this pass)
+| Date | Test | Result | Command | Commit |
+|---|---|---|---|---|
+| 2026-11-23 | int4 CUDA variants, 8192 x 16384 | Triton 0.221 ms, baseline 0.238, unroll 0.230, stream 0.208 (363.5 GB/s, 94.7 percent) | `python -m vla_cu cuda` | EXP-040 |
