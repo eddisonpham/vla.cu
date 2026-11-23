@@ -12,7 +12,11 @@ one per weight, and it shrinks the accumulator by the group size, which is what
 allows a wide row tile.
 
 Layout matches `vla_cu.quant`: element 2i is the low nibble, element 2i+1 the high
-nibble, value is (nibble - 8) * group_scale.
+nibble, value is (nibble - 8) * group_scale. Scales may be fp32 or fp16.
+
+Eviction hints are on by default: each packed byte is read once, so it is marked
+evict_first and kept out of the way, while the activation vector is reused by every
+program and is marked evict_last to stay resident.
 
 Task: python -m vla_cu matrix
 """
@@ -27,6 +31,7 @@ from vla_cu.quant import GROUP_SIZE
 
 BLOCK_K = 1024
 ROWS_PER_PROGRAM = 4
+SCALE_DTYPES = (torch.float32, torch.float16)
 
 
 @triton.jit
@@ -40,10 +45,12 @@ def int4_gemv_kernel(
     GROUP: tl.constexpr,
     BLOCK_K: tl.constexpr,
     ROWS: tl.constexpr,
+    W_EVICT: tl.constexpr,
+    X_EVICT: tl.constexpr,
 ) -> None:
     """Dequantize packed int4 rows in registers and dot them with one fp32 vector.
 
-    packed: uint8 [N, K // 2], scales: fp32 [N, K // GROUP], x: fp32 [K], out: fp32 [N].
+    packed: uint8 [N, K // 2], scales: fp32 or fp16 [N, K // GROUP], x: fp32 [K], out: fp32 [N].
     Mapping: program p owns outputs p*ROWS to p*ROWS+ROWS-1 and walks K in BLOCK_K
     element steps. A step covers BLOCK_K // GROUP whole groups, and the tile is shaped
     [ROWS, groups, GROUP // 2 bytes] so the reduction runs inside each group first.
@@ -71,15 +78,29 @@ def int4_gemv_kernel(
         byte_offsets = k // 2 + group_lanes[:, None] * (GROUP // 2) + byte_lanes[None, :]
         weights_mask = row_mask[:, None, None] & group_mask[None, :, None]
 
-        packed = tl.load(packed_ptr + row_bytes + byte_offsets[None, :, :], mask=weights_mask, other=0).to(tl.int32)
+        packed = tl.load(
+            packed_ptr + row_bytes + byte_offsets[None, :, :],
+            mask=weights_mask,
+            other=0,
+            eviction_policy=W_EVICT,
+        ).to(tl.int32)
         low = (packed & 0x0F).to(tl.float32) - 8.0
         high = ((packed >> 4) & 0x0F).to(tl.float32) - 8.0
 
-        activations_low = tl.load(x_ptr + 2 * byte_offsets, mask=group_mask[:, None], other=0.0)
-        activations_high = tl.load(x_ptr + 2 * byte_offsets + 1, mask=group_mask[:, None], other=0.0)
+        activations_low = tl.load(
+            x_ptr + 2 * byte_offsets, mask=group_mask[:, None], other=0.0, eviction_policy=X_EVICT
+        )
+        activations_high = tl.load(
+            x_ptr + 2 * byte_offsets + 1, mask=group_mask[:, None], other=0.0, eviction_policy=X_EVICT
+        )
         products = low * activations_low[None, :, :] + high * activations_high[None, :, :]
 
-        scale = tl.load(scale_ptr + row_scales + group_ids[None, :], mask=row_mask[:, None] & group_mask[None, :], other=0.0)
+        scale = tl.load(
+            scale_ptr + row_scales + group_ids[None, :],
+            mask=row_mask[:, None] & group_mask[None, :],
+            other=0.0,
+            eviction_policy=W_EVICT,
+        ).to(tl.float32)
         acc += tl.sum(products, axis=2) * scale
 
     tl.store(out_ptr + rows, tl.sum(acc, axis=1), mask=row_mask)
@@ -93,10 +114,11 @@ def int4_gemv_into(
     group_size: int = GROUP_SIZE,
     block_k: int = BLOCK_K,
     rows: int = ROWS_PER_PROGRAM,
+    hints: bool = True,
 ) -> None:
     """Write (packed weights dequantized) @ x into `out`, no fp32 weights in memory.
 
-    Assumptions: packed is uint8 [N, K // 2] contiguous, scales is fp32
+    Assumptions: packed is uint8 [N, K // 2] contiguous, scales is fp32 or fp16
     [N, K // group_size] contiguous, x is fp32 [K] contiguous, out is fp32 [N]
     contiguous, all on one CUDA device. K must be divisible by group_size, and
     block_k must be a power of two that is a multiple of group_size.
@@ -105,8 +127,10 @@ def int4_gemv_into(
         raise ValueError(f"expected packed [N, K // 2], scales [N, K // G], x [K], out [N]; got {tuple(packed.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
     if packed.dtype != torch.uint8:
         raise ValueError(f"expected uint8 packed weights, got {packed.dtype}")
-    if scales.dtype != torch.float32 or x.dtype != torch.float32 or out.dtype != torch.float32:
-        raise ValueError(f"expected fp32 scales, x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
+    if scales.dtype not in SCALE_DTYPES:
+        raise ValueError(f"expected fp32 or fp16 scales, got {scales.dtype}")
+    if x.dtype != torch.float32 or out.dtype != torch.float32:
+        raise ValueError(f"expected fp32 x and out; got {x.dtype}, {out.dtype}")
 
     n_rows, n_bytes = packed.shape
     n_cols = n_bytes * 2
@@ -128,7 +152,19 @@ def int4_gemv_into(
         return
 
     grid = (triton.cdiv(n_rows, rows),)
-    int4_gemv_kernel[grid](packed, scales, x, out, n_rows, n_cols, GROUP=group_size, BLOCK_K=block_k, ROWS=rows)
+    int4_gemv_kernel[grid](
+        packed,
+        scales,
+        x,
+        out,
+        n_rows,
+        n_cols,
+        GROUP=group_size,
+        BLOCK_K=block_k,
+        ROWS=rows,
+        W_EVICT="evict_first" if hints else "",
+        X_EVICT="evict_last" if hints else "",
+    )
 
 
 def int4_gemv(
@@ -138,8 +174,9 @@ def int4_gemv(
     group_size: int = GROUP_SIZE,
     block_k: int = BLOCK_K,
     rows: int = ROWS_PER_PROGRAM,
+    hints: bool = True,
 ) -> torch.Tensor:
     """Allocate the output and return the dequantized GEMV."""
     out = torch.empty(packed.shape[0], device=packed.device, dtype=torch.float32)
-    int4_gemv_into(packed, scales, x, out, group_size=group_size, block_k=block_k, rows=rows)
+    int4_gemv_into(packed, scales, x, out, group_size=group_size, block_k=block_k, rows=rows, hints=hints)
     return out

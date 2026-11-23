@@ -19,6 +19,7 @@ from vla_cu.bench_utils import (
     enforce_memory_budget,
     fraction_of_peak,
     time_call,
+    warm_gpu,
 )
 from vla_cu.quant import GROUP_SIZE, pack_int4
 
@@ -69,6 +70,43 @@ def int4_tuning_sweep(n_out: int, n_in: int) -> None:
             cells.append(f"{seconds * 1e3:>10.3f} {bandwidth_gb_s(n_bytes, seconds):>7.1f}")
         print(f"{rows:>5}  " + "  ".join(cells))
     print()
+
+
+def int4_ablation(n_out: int, n_in: int) -> None:
+    """Time int4 at one shape with the two changes this session added, one at a time.
+
+    Hospitality matters here: the same kernel, the same weights, only the eviction hint
+    and the scale width differ, so the columns attribute cost to one change each. Both
+    are checked against the fp32 matrix-vector product before being timed.
+    """
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    w = torch.randn((n_out, n_in), device="cuda", generator=generator) * 0.05
+    x = torch.randn(n_in, device="cuda", generator=generator)
+    out = torch.empty(n_out, device="cuda")
+    exact = torch.mv(w, x)
+    packed32, scales32 = pack_int4(w)
+    packed16, scales16 = pack_int4(w, scale_dtype=torch.float16)
+
+    cases = (
+        ("fp32 scales, no hint", scales32, False, n_out * n_in // 2 + 4 * n_out * n_in // GROUP_SIZE + 4 * n_in + 4 * n_out),
+        ("fp32 scales, hints", scales32, True, n_out * n_in // 2 + 4 * n_out * n_in // GROUP_SIZE + 4 * n_in + 4 * n_out),
+        ("fp16 scales, hints", scales16, True, n_out * n_in // 2 + 2 * n_out * n_in // GROUP_SIZE + 4 * n_in + 4 * n_out),
+    )
+
+    print(f"int4 ablations at {n_out} x {n_in}, one change per row")
+    print(f"{'configuration':>20}  {'MB':>7}  {'ms':>8}  {'GB/s':>8}  {'% DRAM':>7}  {'rel L2 err':>11}")
+    for label, scales, hints, n_bytes in cases:
+        int4_gemv_into(packed32, scales, x, out, hints=hints)
+        torch.cuda.synchronize()
+        error = relative_error(out.clone(), exact)
+        seconds = time_call(lambda: int4_gemv_into(packed32, scales, x, out, hints=hints), WARMUP, ITERATIONS)
+        gbs = bandwidth_gb_s(n_bytes, seconds)
+        print(
+            f"{label:>20}  {n_bytes / 1e6:>7.1f}  {seconds * 1e3:>8.3f}  {gbs:>8.1f}  "
+            f"{fraction_of_peak(gbs):>6.1%}  {error:>11.2e}"
+        )
+    print()
+    del w, x, out, exact, packed32, scales32, packed16, scales16
 
 
 def run_shape(n_out: int, n_in: int) -> list[tuple[str, int, float, float]]:
@@ -126,6 +164,7 @@ def run_shape(n_out: int, n_in: int) -> list[tuple[str, int, float, float]]:
 def main() -> int:
     """Print one row per format per shape, with GB/s and accuracy side by side."""
     enforce_memory_budget()
+    warm_gpu()
     l2_bytes = getattr(torch.cuda.get_device_properties(0), "L2_cache_size", 0)
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s | L2 {l2_bytes / 1e6:.1f} MB")
     print(f"warmup {WARMUP} | iterations {ITERATIONS} | group {GROUP_SIZE} | batch 1")
@@ -136,6 +175,7 @@ def main() -> int:
     )
 
     int4_tuning_sweep(*SIZES[-1])
+    int4_ablation(*SIZES[-1])
 
     for n_out, n_in in SIZES:
         rows = run_shape(n_out, n_in)

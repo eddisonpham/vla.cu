@@ -26,6 +26,22 @@ def enforce_memory_budget(gb: float = MEMORY_BUDGET_GB, device: int = 0) -> None
     torch.cuda.set_per_process_memory_fraction(fraction, device=device)
 
 
+def warm_gpu(iterations: int = 200) -> None:
+    """Keep the GPU at full memory bandwidth briefly before any path is timed.
+
+    A laptop part ramps its clocks and settles its power state in tens of milliseconds,
+    which is longer than a single kernel. Without this, whichever path a benchmark
+    times first pays the ramp and the comparison reflects the order of the table, not
+    the code (measured: the first path read 0.150 ms and the second 0.071 ms for the
+    same work, and the two swapped places between runs).
+    """
+    buffer = torch.empty(16 * 1024 * 1024, device="cuda")
+    for _ in range(iterations):
+        buffer.sum()
+    torch.cuda.synchronize()
+    del buffer
+
+
 def time_call(fn: Callable[[], None], warmup: int = 25, iterations: int = 100) -> float:
     """Return mean seconds per call of `fn`, timed with CUDA events after warmup.
 

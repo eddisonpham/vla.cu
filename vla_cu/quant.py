@@ -16,15 +16,22 @@ import torch
 GROUP_SIZE = 64
 NIBBLE_OFFSET = 8
 INT4_MAX = 7
+SCALE_DTYPES = (torch.float32, torch.float16)
 
 
-def pack_int4(w: torch.Tensor, group_size: int = GROUP_SIZE) -> tuple[torch.Tensor, torch.Tensor]:
+def pack_int4(
+    w: torch.Tensor,
+    group_size: int = GROUP_SIZE,
+    scale_dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize fp32 weights [N, K] into packed uint8 [N, K // 2] and scales [N, K // group].
 
     Assumptions: K is divisible by group_size and group_size is even, so every group
     is a whole number of bytes and no nibble straddles a group boundary. The scale is
     the group's largest absolute value over INT4_MAX, so the range is [-8, 7] and a
-    group of zeros gets scale 1 and dequantizes to zero.
+    group of zeros gets scale 1 and dequantizes to zero. Codes are chosen with fp32
+    scales and only the stored table is narrowed, so fp16 costs 5e-4 relative on the
+    scale and nothing on the codes.
     """
     if w.dim() != 2:
         raise ValueError(f"expected a 2D weight tensor, got {tuple(w.shape)}")
@@ -32,6 +39,8 @@ def pack_int4(w: torch.Tensor, group_size: int = GROUP_SIZE) -> tuple[torch.Tens
         raise ValueError(f"expected an even positive group size, got {group_size}")
     if w.shape[1] % group_size:
         raise ValueError(f"K {w.shape[1]} is not divisible by group size {group_size}")
+    if scale_dtype not in SCALE_DTYPES:
+        raise ValueError(f"expected fp32 or fp16 scales, got {scale_dtype}")
 
     n_rows, n_cols = w.shape
     n_groups = n_cols // group_size
@@ -45,7 +54,7 @@ def pack_int4(w: torch.Tensor, group_size: int = GROUP_SIZE) -> tuple[torch.Tens
     low = codes[:, 0::2].to(torch.int16)
     high = codes[:, 1::2].to(torch.int16)
     packed = (low | (high << 4)).to(torch.uint8)
-    return packed, scales.contiguous()
+    return packed, scales.to(scale_dtype).contiguous()
 
 
 def dequantize_int4(packed: torch.Tensor, scales: torch.Tensor, group_size: int = GROUP_SIZE) -> torch.Tensor:

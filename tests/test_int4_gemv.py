@@ -54,6 +54,30 @@ def test_rejects_scale_table_of_wrong_length() -> None:
         int4_gemv(packed, scales[:, :1], x)
 
 
+def test_fp16_scales_match_fp32_scales() -> None:
+    """Narrowing only the stored scale table must stay inside the quantization error."""
+    generator = torch.Generator(device="cuda").manual_seed(4)
+    w = torch.randn((64, 960), device="cuda", generator=generator) * 0.05
+    x = torch.randn(960, device="cuda", generator=generator)
+
+    packed, scales32 = pack_int4(w)
+    _, scales16 = pack_int4(w, scale_dtype=torch.float16)
+    out16 = int4_gemv(packed, scales16, x)
+
+    torch.testing.assert_close(out16, reference(packed, scales16, x), rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(out16, int4_gemv(packed, scales32, x), rtol=1e-3, atol=1e-3)
+
+
+def test_cache_hints_do_not_change_results() -> None:
+    """An eviction hint changes where a line lands, never what a load returns."""
+    generator = torch.Generator(device="cuda").manual_seed(5)
+    w = torch.randn((32, 512), device="cuda", generator=generator) * 0.05
+    x = torch.randn(512, device="cuda", generator=generator)
+
+    packed, scales = pack_int4(w)
+    assert torch.equal(int4_gemv(packed, scales, x, hints=True), int4_gemv(packed, scales, x, hints=False))
+
+
 def test_rejects_float_weights() -> None:
     """Handing fp32 weights to the int4 path would reinterpret bytes, not complain later."""
     packed = torch.zeros((4, 64), device="cuda", dtype=torch.float32)
