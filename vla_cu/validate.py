@@ -52,6 +52,31 @@ def check_int8_gemv(w: Tensor, scales: Tensor, x: Tensor, out: Tensor | None = N
     return n_rows, n_cols
 
 
+def check_int8_grouped(
+    w: Tensor,
+    scales: Tensor,
+    x: Tensor,
+    out: Tensor,
+    segment: Tensor,
+    x_base: Tensor,
+) -> tuple[int, int]:
+    """Validate a grouped int8 GEMV call and return (rows, K).
+
+    Assumes w int8 [R, K], scales fp32 [R], x fp32 [X], out fp32 [R], segment int32 [R],
+    x_base int32 [segments], with X large enough to hold every matrix's vector.
+    """
+    require(w.dim() == 2 and scales.dim() == 1 and x.dim() == 1 and out.dim() == 1, f"expected w [R, K], scales [R], x [X], out [R]; got {tuple(w.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
+    require(segment.dim() == 1 and x_base.dim() == 1, f"expected segment [R] and x_base [S]; got {tuple(segment.shape)}, {tuple(x_base.shape)}")
+    require(w.dtype == torch.int8, f"expected int8 weights, got {w.dtype}")
+    require(segment.dtype == torch.int32 and x_base.dtype == torch.int32, f"expected int32 segment tables; got {segment.dtype}, {x_base.dtype}")
+    require(scales.dtype == torch.float32 and x.dtype == torch.float32 and out.dtype == torch.float32, f"expected fp32 scales, x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
+    total_rows, n_cols = w.shape
+    require(scales.shape == (total_rows,) and out.shape == (total_rows,) and segment.shape == (total_rows,), f"expected one scale, output and segment entry per packed row, got {total_rows} rows")
+    require(x.shape[0] >= n_cols, f"expected an activation vector of at least {n_cols}, got {x.shape[0]}")
+    check_tensors(w, scales, x, out, segment, x_base)
+    return total_rows, n_cols
+
+
 def check_int4_gemv(
     packed: Tensor,
     scales: Tensor,

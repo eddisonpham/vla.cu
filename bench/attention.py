@@ -1,14 +1,11 @@
-"""A real attention block at batch 1, where q, k and v share one activation vector.
+"""A real attention block at batch 1, in int4 and int8, separate against grouped.
 
 Concept: at one token, attention is a matrix multiply, a softmax over a single row, and
 a second matrix multiply, and the softmax is the identity because the only visible key
-is itself. What is left is v = Wv x, and out = Wo v. The three projection matrices Wq,
-Wk and Wv all read the same x, so three launches carry one activation vector between
-them; a grouped launch concatenates their packed rows and reads x once.
-
-The grouped kernel needs every matrix's row count to be a multiple of the row tile, so
-960 rows of 960 weights fits without padding. The grouped path is int4 only: there is no
-int8 grouped kernel in the repo, which is why this block is measured in int4.
+is itself. The three projection matrices Wq, Wk and Wv all read the same x, so a grouped
+launch concatenates their rows and reads x once. Both precisions are measured because
+int4 is the byte floor while int8 is the accuracy floor, and this block is the first
+place the repo can price one against the other.
 
 Task: python -m vla_cu attn
 """
@@ -19,6 +16,8 @@ import torch
 
 from kernels.triton.int4_gemv import int4_gemv_into
 from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
+from kernels.triton.int8_gemv import int8_gemv_into
+from kernels.triton.int8_grouped_gemv import int8_grouped_gemv_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
     bandwidth_gb_s,
@@ -28,7 +27,7 @@ from vla_cu.bench_utils import (
     time_pair,
     warm_gpu,
 )
-from vla_cu.quant import GROUP_SIZE, pack_int4
+from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
 
 HIDDEN = 960
 MATRICES = 3
@@ -41,8 +40,17 @@ def cosine(approx: torch.Tensor, exact: torch.Tensor) -> float:
     return torch.nn.functional.cosine_similarity(approx, exact, dim=0).item()
 
 
+def low_bit_bytes() -> tuple[int, int]:
+    """Return the bytes the int4 and int8 versions of this block move."""
+    int4_qkv = MATRICES * (HIDDEN * HIDDEN // 2 + 4 * HIDDEN * HIDDEN // GROUP_SIZE)
+    int4_o = HIDDEN * HIDDEN // 2 + 4 * HIDDEN * HIDDEN // GROUP_SIZE
+    int8_qkv = MATRICES * (HIDDEN * HIDDEN + 4 * HIDDEN)
+    int8_o = HIDDEN * HIDDEN + 4 * HIDDEN
+    return int4_qkv + int4_o + 8 * HIDDEN, int8_qkv + int8_o + 8 * HIDDEN
+
+
 def main() -> int:
-    """Time four separate projections against a grouped qkv launch plus one for o."""
+    """Time separate, grouped and graphed qkv plus o at both precisions."""
     enforce_memory_budget()
     warm_gpu()
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -60,6 +68,12 @@ def main() -> int:
     packed_k, scales_k = pack_int4(wk)
     packed_v, scales_v = pack_int4(wv)
 
+    qkv8, scales_qkv8 = quantize_int8(qkv)
+    o8, scales_o8 = quantize_int8(wo)
+    q8, scales_q8 = quantize_int8(wq)
+    k8, scales_k8 = quantize_int8(wk)
+    v8, scales_v8 = quantize_int8(wv)
+
     total_rows = MATRICES * HIDDEN
     segment = torch.arange(MATRICES, device="cuda", dtype=torch.int32).repeat_interleave(HIDDEN)
     x_base = torch.zeros(MATRICES, device="cuda", dtype=torch.int32)
@@ -70,6 +84,10 @@ def main() -> int:
     separate_out = torch.empty(HIDDEN, device="cuda")
     grouped_qkv = torch.empty(total_rows, device="cuda")
     grouped_out = torch.empty(HIDDEN, device="cuda")
+    separate8_qkv = torch.empty(total_rows, device="cuda")
+    separate8_out = torch.empty(HIDDEN, device="cuda")
+    grouped8_qkv = torch.empty(total_rows, device="cuda")
+    grouped8_out = torch.empty(HIDDEN, device="cuda")
 
     def fp32_block() -> None:
         torch.mv(wq, x, out=fp32_qkv[:HIDDEN])
@@ -87,38 +105,58 @@ def main() -> int:
         int4_grouped_gemv_into(packed_qkv, scales_qkv, x, grouped_qkv, segment, x_base)
         int4_gemv_into(packed_o, scales_o, grouped_qkv[2 * HIDDEN :], grouped_out)
 
-    fp32_block()
-    separate_block()
-    grouped_block()
+    def separate8_block() -> None:
+        int8_gemv_into(q8, scales_q8, x, separate8_qkv[:HIDDEN])
+        int8_gemv_into(k8, scales_k8, x, separate8_qkv[HIDDEN : 2 * HIDDEN])
+        int8_gemv_into(v8, scales_v8, x, separate8_qkv[2 * HIDDEN :])
+        int8_gemv_into(o8, scales_o8, separate8_qkv[2 * HIDDEN :], separate8_out)
+
+    def grouped8_block() -> None:
+        int8_grouped_gemv_into(qkv8, scales_qkv8, x, grouped8_qkv, segment, x_base)
+        int8_gemv_into(o8, scales_o8, grouped8_qkv[2 * HIDDEN :], grouped8_out)
+
+    for path in (fp32_block, separate_block, grouped_block, separate8_block, grouped8_block):
+        path()
     torch.cuda.synchronize()
+
+    exact = fp32_out.clone()
     separate_snapshot = separate_out.clone()
     grouped_snapshot = grouped_out.clone()
+    separate8_snapshot = separate8_out.clone()
+    grouped8_snapshot = grouped8_out.clone()
 
-    grouped_graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(grouped_graph):
+    int4_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(int4_graph):
         grouped_block()
-    grouped_graph.replay()
+    int4_graph.replay()
+    int8_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(int8_graph):
+        grouped8_block()
+    int8_graph.replay()
     torch.cuda.synchronize()
-    grouped_graph_out = grouped_out.clone()
 
-    low_bit_bytes = MATRICES * (HIDDEN * HIDDEN // 2 + 4 * HIDDEN * HIDDEN // GROUP_SIZE) + HIDDEN * HIDDEN // 2 + 4 * HIDDEN * HIDDEN // GROUP_SIZE + 8 * HIDDEN
+    int4_graph_out = grouped_out.clone()
+    int8_graph_out = grouped8_out.clone()
+    int4_bytes, int8_bytes = low_bit_bytes()
     fp32_bytes = 4 * 4 * HIDDEN * HIDDEN + 8 * HIDDEN
 
     l2_bytes = getattr(torch.cuda.get_device_properties(0), "L2_cache_size", 0)
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s | L2 {l2_bytes / 1e6:.1f} MB")
     print(f"attention block at batch 1: q, k, v of {HIDDEN} x {HIDDEN}, then o of {HIDDEN} x {HIDDEN}")
     print(f"softmax over one visible key is the identity, so the block is v = Wv x, out = Wo v")
-    print(f"low-bit bytes {low_bit_bytes / 1e6:.2f} MB per block, fp32 {fp32_bytes / 1e6:.2f} MB")
-    print(f"warmup {WARMUP} | iterations {ITERATIONS} | group {GROUP_SIZE} | row tile 4")
+    print(f"bytes: fp32 {fp32_bytes / 1e6:.2f} MB, int4 {int4_bytes / 1e6:.2f} MB, int8 {int8_bytes / 1e6:.2f} MB")
+    print(f"warmup {WARMUP} | iterations {ITERATIONS} | int4 group {GROUP_SIZE} | row tile 4")
     print()
-    print(f"{'path':>12}  {'launches':>8}  {'ms':>8}  {'GB/s':>8}  {'% PEAK':>7}  {'cos':>8}")
+    print(f"{'path':>14}  {'launches':>8}  {'ms':>8}  {'GB/s':>8}  {'% PEAK':>7}  {'cos':>8}")
 
-    exact = fp32_out.clone()
     paths = (
         ("fp32", 4, fp32_block, fp32_bytes, fp32_out),
-        ("separate", 4, separate_block, low_bit_bytes, separate_out),
-        ("grouped", 2, grouped_block, low_bit_bytes, grouped_out),
-        ("grouped graph", 2, grouped_graph.replay, low_bit_bytes, grouped_graph_out),
+        ("int4 separate", 4, separate_block, int4_bytes, separate_out),
+        ("int4 grouped", 2, grouped_block, int4_bytes, grouped_out),
+        ("int4 graph", 2, int4_graph.replay, int4_bytes, int4_graph_out),
+        ("int8 separate", 4, separate8_block, int8_bytes, separate8_out),
+        ("int8 grouped", 2, grouped8_block, int8_bytes, grouped8_out),
+        ("int8 graph", 2, int8_graph.replay, int8_bytes, int8_graph_out),
     )
     timings = {}
     for name, launches, call, n_bytes, result in paths:
@@ -126,16 +164,23 @@ def main() -> int:
         timings[name] = seconds
         gbs = bandwidth_gb_s(n_bytes, seconds)
         print(
-            f"{name:>12}  {launches:>8}  {seconds * 1e3:>8.3f}  {gbs:>8.1f}  {fraction_of_peak(gbs):>6.1%}  "
+            f"{name:>14}  {launches:>8}  {seconds * 1e3:>8.3f}  {gbs:>8.1f}  {fraction_of_peak(gbs):>6.1%}  "
             f"{cosine(result, exact):>8.5f}"
         )
 
-    pairs = time_pair(fp32_block, grouped_graph.replay, ITERATIONS, 5)
+    int4_pairs = time_pair(fp32_block, int4_graph.replay, ITERATIONS, 5)
+    int8_pairs = time_pair(fp32_block, int8_graph.replay, ITERATIONS, 5)
+
     print()
-    print(f"grouped / separate {timings['separate'] / timings['grouped']:.2f}x | graph / separate {timings['separate'] / timings['grouped graph']:.2f}x")
-    print(f"grouped agrees with separate: {torch.allclose(separate_snapshot, grouped_snapshot, rtol=1e-4, atol=1e-3)}")
-    print(f"graph reproduces the eager grouped chain bit for bit: {torch.equal(grouped_graph_out, grouped_snapshot)}")
-    print(f"paired ratio fp32 / graph {pairs.ratio:.2f}x ({pairs.ratio_low:.2f} to {pairs.ratio_high:.2f}), fp32 {pairs.a * 1e3:.4f} ms")
+    print(f"int4 grouped / separate {timings['int4 separate'] / timings['int4 grouped']:.2f}x | graph / separate {timings['int4 separate'] / timings['int4 graph']:.2f}x")
+    print(f"int8 grouped / separate {timings['int8 separate'] / timings['int8 grouped']:.2f}x | graph / separate {timings['int8 separate'] / timings['int8 graph']:.2f}x")
+    print(f"int4 grouped agrees with separate: {torch.allclose(separate_snapshot, grouped_snapshot, rtol=1e-4, atol=1e-3)}")
+    print(f"int8 grouped agrees with separate: {torch.allclose(separate8_snapshot, grouped8_snapshot, rtol=1e-4, atol=1e-3)}")
+    print(f"int4 graph reproduces the eager chain bit for bit: {torch.equal(int4_graph_out, grouped_snapshot)}")
+    print(f"int8 graph reproduces the eager chain bit for bit: {torch.equal(int8_graph_out, grouped8_snapshot)}")
+    print(f"int8 costs {timings['int8 graph'] / timings['int4 graph']:.2f}x the int4 time for {(int8_bytes / int4_bytes):.2f}x the bytes")
+    print(f"paired ratio fp32 / int4 graph {int4_pairs.ratio:.2f}x ({int4_pairs.ratio_low:.2f} to {int4_pairs.ratio_high:.2f})")
+    print(f"paired ratio fp32 / int8 graph {int8_pairs.ratio:.2f}x ({int8_pairs.ratio_low:.2f} to {int8_pairs.ratio_high:.2f})")
     print()
     return 0
 

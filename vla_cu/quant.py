@@ -1,4 +1,4 @@
-"""4-bit packing with per-group scales, plus the reference dequantize.
+"""Weight quantization: 4-bit groups, int8 rows, and the reference dequantize.
 
 Concept: two weights share one byte. Element 2i lives in the low nibble, element
 2i+1 in the high nibble. A nibble is an unsigned 0..15 and the value is
@@ -79,3 +79,19 @@ def dequantize_int4(packed: torch.Tensor, scales: torch.Tensor, group_size: int 
     values = torch.stack((low, high), dim=2).reshape(n_rows, n_cols).to(torch.float32)
     per_element_scale = scales.repeat_interleave(group_size, dim=1)
     return values * per_element_scale
+
+
+def quantize_int8(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize fp32 weights [N, K] to int8 codes and one fp32 scale per output row.
+
+    The scale is the row's largest absolute value over 127, so no code clips, and an
+    all-zero row gets scale 1 and codes 0.
+    """
+    if w.dim() != 2:
+        raise ValueError(f"expected a 2D weight tensor, got {tuple(w.shape)}")
+    if w.dtype != torch.float32:
+        raise ValueError(f"expected fp32 weights, got {w.dtype}")
+    row_amax = w.abs().amax(dim=1)
+    scales = torch.where(row_amax > 0, row_amax / 127.0, torch.ones_like(row_amax))
+    codes = torch.round(w / scales[:, None]).clamp(-127, 127).to(torch.int8)
+    return codes.contiguous(), scales.contiguous()

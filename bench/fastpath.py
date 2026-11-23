@@ -40,7 +40,7 @@ from vla_cu.bench_utils import (
 )
 from vla_cu.cuda_int4 import int4_gemv_cuda_into
 from vla_cu.cuda_int8 import int8_gemv_cuda_into
-from vla_cu.quant import GROUP_SIZE, pack_int4
+from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
 from vla_cu.rotate import hadamard, rotate_rows, rotate_vector
 
 HIDDEN = 960
@@ -49,13 +49,6 @@ STACK_BLOCKS = 4
 ROTATION = 64
 WARMUP = 10
 ITERATIONS = 50
-
-
-def quantize_int8(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize [N, K] fp32 weights to int8 codes with one scale per output row."""
-    row_amax = w.abs().amax(dim=1)
-    scales = torch.where(row_amax > 0, row_amax / 127.0, torch.ones_like(row_amax))
-    return torch.round(w / scales[:, None]).clamp(-127, 127).to(torch.int8), scales
 
 
 def cosine(approx: torch.Tensor, exact: torch.Tensor) -> float:

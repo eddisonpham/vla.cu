@@ -9,9 +9,10 @@ from kernels.triton.int4_gemm import int4_gemm_into
 from kernels.triton.int4_gemv import int4_gemv_into
 from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
 from kernels.triton.int8_gemv import int8_gemv_into
+from kernels.triton.int8_grouped_gemv import int8_grouped_gemv_into
 from vla_cu.quant import GROUP_SIZE, pack_int4
 
-NAMES = ("int8_gemv", "int4_gemv", "int4_gemm", "int4_grouped")
+NAMES = ("int8_gemv", "int4_gemv", "int4_gemm", "int4_grouped", "int8_grouped")
 N_ROWS = 8
 N_COLS = 128
 
@@ -38,6 +39,8 @@ def call(name: str, t: dict[str, torch.Tensor], x: torch.Tensor) -> None:
         int4_gemv_into(t["packed"], t["scales"], x, t["out"])
     elif name == "int4_gemm":
         int4_gemm_into(t["packed"], t["scales"], x.reshape(1, -1), torch.empty((1, N_ROWS), device=x.device))
+    elif name == "int8_grouped":
+        int8_grouped_gemv_into(t["w"], t["s8"], x, t["out"], t["segment"], t["x_base"])
     else:
         int4_grouped_gemv_into(t["packed"], t["scales"], x, t["out"], t["segment"], t["x_base"])
 
