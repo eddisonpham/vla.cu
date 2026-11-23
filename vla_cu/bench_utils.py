@@ -7,7 +7,8 @@ so they time the actual work.
 
 from __future__ import annotations
 
-from typing import Callable
+import statistics
+from typing import Callable, NamedTuple
 
 import torch
 
@@ -62,6 +63,53 @@ def time_call(fn: Callable[[], None], warmup: int = 25, iterations: int = 100) -
     stop.synchronize()
 
     return start.elapsed_time(stop) / 1000.0 / iterations
+
+
+class PairTiming(NamedTuple):
+    """Median seconds of each call, plus the ratio of the two across paired repeats."""
+
+    a: float
+    b: float
+    ratio: float
+    ratio_low: float
+    ratio_high: float
+
+
+def time_pair(
+    fn_a: Callable[[], None],
+    fn_b: Callable[[], None],
+    iterations: int = 30,
+    repeats: int = 5,
+    warmup: int = 5,
+) -> PairTiming:
+    """Time two calls in alternating pairs and report the median ratio with its spread.
+
+    One clock state is shared by both halves of a pair, so a drift that moves both
+    cancels in the ratio; the spread across repeats is the honest error bar. Pairing is
+    what replaces pinned clocks, which this GPU denies to a non-administrator.
+    """
+    for _ in range(warmup):
+        fn_a()
+        fn_b()
+    torch.cuda.synchronize()
+
+    a_times: list[float] = []
+    b_times: list[float] = []
+    ratios: list[float] = []
+    for _ in range(repeats):
+        a_seconds = time_call(fn_a, 0, iterations)
+        b_seconds = time_call(fn_b, 0, iterations)
+        a_times.append(a_seconds)
+        b_times.append(b_seconds)
+        ratios.append(a_seconds / b_seconds)
+
+    return PairTiming(
+        a=statistics.median(a_times),
+        b=statistics.median(b_times),
+        ratio=statistics.median(ratios),
+        ratio_low=min(ratios),
+        ratio_high=max(ratios),
+    )
 
 
 def bandwidth_gb_s(n_bytes: int, seconds: float) -> float:

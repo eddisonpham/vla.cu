@@ -5,7 +5,8 @@ weight, so a single outlier forces every other weight in that group onto a coars
 Rotating the weight matrix by a block Hadamard transform spreads each weight across the
 group, which is the mechanism behind QuaRot and SpinQuant. The rotation is orthogonal,
 so an exact product is unchanged; only the quantization error changes. At batch 1 the
-transform is K log K work against K / 2 bytes, well under a percent of the kernel.
+transform is K log K work against K / 2 bytes, well under a percent of the kernel. The
+transform itself lives in `vla_cu/rotate.py` because the fast path uses it too.
 
 Two weight distributions are reported, because a rotation has little to do on Gaussian
 weights and a lot to do once outliers exist, and real transformer weights have outliers.
@@ -14,41 +15,17 @@ Task: python -m vla_cu rotate
 """
 from __future__ import annotations
 
-import math
-
 import torch
 
 from kernels.triton.int4_gemv import int4_gemv_into
 from vla_cu.bench_utils import enforce_memory_budget
 from vla_cu.quant import GROUP_SIZE, pack_int4
+from vla_cu.rotate import hadamard, rotate_rows, rotate_vector
 
 BLOCK = 64
 SHAPES = ((2560, 960), (1920, 768))
 OUTLIER_FRACTION = 1e-3
 OUTLIER_SCALE = 20.0
-
-
-def hadamard(size: int) -> torch.Tensor:
-    """Return a normalized Sylvester Hadamard matrix, which is orthogonal and symmetric."""
-    matrix = torch.ones((1, 1), device="cuda")
-    while matrix.shape[0] < size:
-        matrix = torch.cat(
-            (torch.cat((matrix, matrix), dim=1), torch.cat((matrix, -matrix), dim=1)), dim=0
-        )
-    return matrix / math.sqrt(size)
-
-
-def rotate_rows(weights: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
-    """Rotate [N, K] weights along K in blocks of the matrix size."""
-    n_rows, n_cols = weights.shape
-    blocks = weights.reshape(n_rows, n_cols // matrix.shape[0], matrix.shape[0])
-    return torch.matmul(blocks, matrix).reshape(n_rows, n_cols)
-
-
-def rotate_vector(vector: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
-    """Rotate a [K] activation vector in blocks of the matrix size."""
-    blocks = vector.reshape(vector.numel() // matrix.shape[0], matrix.shape[0])
-    return torch.matmul(blocks, matrix).reshape(-1)
 
 
 def cosine(approx: torch.Tensor, exact: torch.Tensor) -> float:

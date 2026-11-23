@@ -26,6 +26,8 @@ TASKS: dict[str, str] = {
     "m50": "bench.m50",
     "rotate": "bench.rotation",
     "fastpath": "bench.fastpath",
+    "crossover": "bench.crossover",
+    "attn": "bench.attention",
 }
 
 
