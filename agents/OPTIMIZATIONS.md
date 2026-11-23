@@ -316,3 +316,39 @@ What is left, in order:
 | 4 | per-layer bit widths and the rotation together | cosine is the binding constraint now, not time |
 
 The quality number to watch: the four-block stack is 0.975 on random Gaussian weights, which are the friendliest case for a rotation and the most isotropic case for quantization. Real weights with outliers would be worse without EXP-026's rotation, and better with it.
+---
+
+## 11. GEMM, attention block, rotation and clocks, brought up 2026-11-23
+
+Four questions, four answers, RTX 5060 Laptop.
+
+| Question | Answer | Evidence |
+|---|---|---|
+| Where does the GEMV stop winning? | at M = 2, and the GEMM is 25 to 51x ahead by M = 50 | EXP-029 |
+| Does rotation help inside the fast path? | no: 0.005 ms per block and cosine 0.97640 to 0.97449 on Gaussian weights | EXP-030 |
+| What does an attention block cost? | 0.011 ms graphed against fp32's 0.052, bit exact, cosine 0.98804 | EXP-031 |
+| Can clocks be pinned? | no, not without administrator rights; paired ratios instead, spread 5 percent | EXP-032 |
+
+The expert at its real M, one GEMM against M GEMV calls, milliseconds:
+
+| M | 1 | 4 | 16 | 32 | 50 | 64 |
+|---|---|---|---|---|---|---|
+| 1920 x 720, group 16 | 0.018 | 0.019 | 0.026 | 0.026 | 0.039 | 0.042 |
+| 720 x 1920, group 64 | 0.045 | 0.034 | 0.036 | 0.036 | 0.067 | 0.069 |
+| 2560 x 960, group 64 | 0.030 | 0.030 | 0.032 | 0.033 | 0.059 | 0.061 |
+
+Two things to fix in that table, both visible in it:
+
+- The GEMM has a padding cliff at every power of two of M. M = 50 pads to a 64-row tile, which is why 0.026 becomes 0.039 for 56 percent more work. A 48-row tile would pad M = 50 by 1.04x.
+- The GEMV column in EXP-029 is a loop of launches, so it measures dispatch. That is the honest comparison at batch 1, where dispatch is the work, but it is not a kernel comparison. The graph already removes it (EXP-028).
+
+What is left, in order:
+
+| Next | Item | Why |
+|---|---|---|
+| 1 | an int8 grouped kernel | the attention block reads 0.98804 and the MLP reads 0.99451, and the difference is one int8 projection |
+| 2 | a real checkpoint: three layers, cosine per layer, both with and without rotation | EXP-030 says the rotation is neutral on the weights this repo builds, and EXP-026 says it is worth 0.008 on weights with outliers; only a real stack settles it |
+| 3 | BLOCK_M = 48 and a CUDA GEMM | takes the expert from 0.039 to about 0.020 ms on the same bytes |
+| 4 | pin clocks from an elevated shell | turns every range in this file into a comparable number |
+
+The through-line: the fast path is no longer limited by the kernels. The MLP block is at 78 percent of the attainable bandwidth inside a graph, the attention block is at 51 percent with two launches, and what remains is either quality (int4 in attention, quantization group 64 against width 720) or the last few microseconds of dispatch.

@@ -25,7 +25,11 @@
 ## Next, ranked by the evidence (detail in `OPTIMIZATIONS.md` section 9)
 - [ ] Pin clocks with `nvidia-smi -lgc` (needs admin) and repeat EXP-017, EXP-020, EXP-021, EXP-022.
 - [x] Wire the measured wins into a default path. Done 2026-11-23, EXP-027 and EXP-028: native int8 and int4 streaming kernels, launched on the torch stream so they capture, one block 0.015 ms against fp32's 0.069, bit exact.
-- [ ] Grouped launch in the fast path: the four-block stack still issues one launch per matrix, and q, k, v of a real attention block share one activation vector.
+- [x] Grouped launch in a real attention block. Done 2026-11-23, EXP-031: two launches, 0.011 ms graphed against fp32's 0.052, bit exact, cosine 0.98804.
+- [ ] An int8 grouped kernel. The attention block is all int4 and reads 0.98804; the MLP's int8 up projection is what takes it to 0.99451.
+- [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
+- [ ] A real checkpoint: three layers, cosine per layer, with and without rotation, which is the only way to settle DEC-034.
+- [ ] Pin clocks from an elevated shell (`nvidia-smi -lgc 2000`) and re-run the inconclusive experiments (EXP-032).
 - [ ] A capture-safety check in the tests: assert `torch.equal` between a graph and the eager chain for any kernel added later (the rule in DEC-031).
 - [ ] Write an int4 GEMM that dequantizes into `tl.dot`, and sweep M from 1 to 64 for the GEMV crossover.
 - [ ] Decide group 16 against padding to 768 for the 720-wide expert (DEC-030).

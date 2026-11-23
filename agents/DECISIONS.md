@@ -252,3 +252,26 @@
 - Consequence: the repo now needs a vcvars shell for its fastest path, and Triton stays as the readable reference and the place where a new idea is tried first.
 - Revisit if: Triton's launcher gets cheap enough that the gap closes, or a model integration cannot capture.
 - Status: active
+## DEC-033: the GEMM step width is set by shared memory, not by taste  (2026-11-23)
+- Context: EXP-029. A 512-wide step at 3 stages asked for 224 KB of shared memory against a 101 KB limit and the kernel refused to launch.
+- Options considered: (a) smaller tiles, (b) one stage, (c) a smaller BLOCK_N only, (d) keep 512 and drop to 2 stages.
+- Chosen and why: BLOCK_K = 64 with two stages, which is 56 KB at a 64-row tile and leaves room for a 128-row tile later. Two stages still software-pipelines one step ahead, which is what a memory-bound kernel needs; a 512-wide step at one stage would have no overlap at all.
+- Consequence: K is walked in 64-element steps, so a 720-wide expert pays 12 steps, the last one masked. That is the cost of fitting, and it is under a percent.
+- Revisit if: BLOCK_N drops to 32, at which point a 128-wide step fits at two stages.
+- Status: active
+
+## DEC-034: rotation stays opt-in, not in the default fast path  (2026-11-23)
+- Context: EXP-030. Inside the fast path the rotation costs 0.005 ms per block and moves cosine through four blocks from 0.97640 to 0.97449 on Gaussian weights.
+- Options considered: (a) rotate everything, (b) rotate nothing, (c) keep it as an opt-in path and decide on real weights.
+- Chosen and why: (c). EXP-026 measured a real gain on weights with outliers, and EXP-030 measured no gain and a real cost on the weights the benchmark actually builds. Both are true, so the answer depends on a distribution this repo has not loaded yet.
+- Consequence: the fast path's default is unrotated, and `stack rot` stays in the table so a checkpoint result can be read against it in one command.
+- Revisit if: a real SmolVLA layer stack shows the EXP-026 gain, in which case the transform wants its own fused kernel rather than two matmuls per block.
+- Status: active
+
+## DEC-035: paired alternation replaces pinned clocks  (2026-11-23)
+- Context: EXP-032. `nvidia-smi -lgc` is refused without administrator rights, and the GPU idles at 870 MHz of a 3090 MHz ceiling, which is why the same table moved 2.72x and 6.57x in consecutive runs.
+- Options considered: (a) elevated shell and pin, (b) longer warmup, (c) alternate the two calls in pairs and report the ratio with its spread, (d) report minima instead of means.
+- Chosen and why: (c), with (a) recorded as the thing to do if administrator rights appear. A pair shares one clock state, so common drift cancels in the ratio; the spread across five pairs is the error bar the table was missing. Longest warmup alone does not help, because drift happens during measurement, not before it.
+- Consequence: every head-to-head number now carries a range, and absolute milliseconds are treated as comparable within a run only. The 6 percent floor from DEC-029 stays.
+- Revisit if: clocks get pinned, after which medians of many runs are enough and the ranges should tighten to a few percent.
+- Status: active

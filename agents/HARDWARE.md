@@ -59,3 +59,14 @@ peak", not as an expectation for any single run.
 - 2026-11-18: recorded that both Visual Studio installs sit under `Program Files (x86)`, and that ninja appears only in a vcvars shell. Added the `cuda-check` task (EXP-005).
 - 2026-11-23: installed `ninja 1.13.2` into the venv (it is now in `requirements.txt`). A `torch.utils.cpp_extension` build still needs `cl.exe`, so builds and every `cuda` task run happen inside `vcvars64.bat`; outside it, torch invalidates the cached build and fails on ninja. First successful extension build and load: EXP-016.
 - 2026-11-23: `compute-sanitizer` 2025.2.1 cannot instrument this extension's launch (`CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction`), so the CUDA kernel has no sanitizer pass. Triton kernels remain clean (EXP-016).
+## Clock control (2026-11-23)
+
+| Fact | Value |
+|---|---|
+| `nvidia-smi -lgc 2000` | refused, exit 4, needs administrator |
+| clocks.current.sm at idle | 870 MHz |
+| clocks.max.sm | 3090 MHz |
+| Consequence | a benchmark starts at 28 percent of the ceiling |
+| Workaround | paired alternation, `time_pair` in `vla_cu/bench_utils.py` (DEC-035) |
+
+To pin clocks, run an elevated shell once: `nvidia-smi -pm 1` then `nvidia-smi -lgc 2000`, and reset with `nvidia-smi -rgc`. Nothing in the repo can do this without administrator rights.

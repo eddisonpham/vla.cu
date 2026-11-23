@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn` |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -74,6 +74,10 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Action expert at M = 50 | 50 GEMV calls 2.588 ms against one bf16 GEMM 0.018 ms, so the expert needs a GEMM (EXP-023) |
 | Fast path: native kernels plus a graph | one block 0.015 ms against fp32's 0.069, 4.6x, bit exact; four blocks 2.72 to 6.57x (EXP-028) |
 | CUDA int8 kernel | warp per row, 16 weights per lane, streaming loads, capturable (EXP-027) |
+| int4 GEMM with `tl.dot` | one launch beats M GEMV calls from M = 2, 25 to 51x at M = 50, cosine 1.00000 against fp32 (EXP-029) |
+| Attention block, grouped qkv | two launches, 0.011 ms graphed against fp32's 0.052, bit exact (EXP-031) |
+| Rotation inside the fast path | neutral on Gaussian weights and 38 percent slower per block, so opt-in (EXP-030) |
+| Clock pinning | refused without administrator rights, paired ratios instead (EXP-032) |
 | Two GEMV kernels chained in a CUDA graph | done, 0.031 ms plain against 0.012 ms graphed, bit exact |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -111,6 +115,8 @@ python -m vla_cu grouped
 python -m vla_cu m50
 python -m vla_cu rotate
 python -m vla_cu fastpath
+python -m vla_cu crossover
+python -m vla_cu attn
 ```
 
 The `cuda` task compiles `csrc/int4_gemv.cu` on first use, so it needs `cl.exe` and

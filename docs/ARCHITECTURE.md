@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -103,6 +103,9 @@ kernels, so they are used as references and as performance baselines.
 | 13 | M = 50 probe | 50 GEMV calls against one GEMM on the expert shape | `bench/m50.py` | done, the expert needs a GEMM, 33 to 148x |
 | 14 | rotation | block Hadamard before packing, accuracy not speed | `bench/rotation.py` | done, outlier cosine 0.98788 to 0.99586 |
 | 15 | fast path | native streaming kernels for int8 and int4, captured in a graph | `bench/fastpath.py`, `csrc/int8_gemv.cu` | done, 0.015 ms per block against 0.069 fp32, bit exact |
+| 16 | int4 GEMM | dequantize into `tl.dot`, sweep M from 1 to 64 | `kernels/triton/int4_gemm.py`, `bench/crossover.py` | done, GEMM wins from M = 2, 25 to 51x at M = 50 |
+| 17 | attention block | q, k, v on one activation vector through the grouped launch | `bench/attention.py` | done, 0.011 ms graphed against 0.052 fp32, cosine 0.98804 |
+| 18 | rotation in the fast path | block Hadamard at pack time plus a per-block activation rotate | `vla_cu/rotate.py`, `bench/fastpath.py` | done, neutral on Gaussian weights, 0.005 ms per block, opt-in |
 
 ## 7. Measurement protocol
 

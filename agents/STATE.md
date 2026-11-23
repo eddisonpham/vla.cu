@@ -18,11 +18,19 @@
   attempt, cache hints, fp16 scales, CUDA variants, M = 50 bake-off, grouped launch, rotation.
 - **Fast path brought up (EXP-027, EXP-028)**: CUDA int8 streaming kernel, both kernels launched
   on the torch stream so they capture, one block at 0.015 ms against fp32's 0.069.
+- **GEMM, attention, rotation, clocks (EXP-029 to EXP-032)**: int4 GEMM with `tl.dot` wins from
+  M = 2 and is 25 to 51x ahead at M = 50; grouped attention block 0.011 ms graphed; rotation is
+  neutral on Gaussian weights and 38 percent slower, so opt-in; clock pinning refused, paired
+  ratios instead (spread 5 percent against a 2.4x swing between runs).
 
 ## What works
 - Tasks: `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`,
-  `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`.
-- `pytest -q`: 68 passed, inside a vcvars shell. Triton tests pass without it.
+  `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`.
+- `pytest -q`: 79 passed, inside a vcvars shell. Triton tests pass without it.
+- int4 GEMM: one launch wins from M = 2, 25 to 51x against M GEMV calls at M = 50, cosine 1.00000
+  against the fp32 answer on every shape including a 17 x 128 tail (EXP-029).
+- Attention block: grouped qkv plus o in two launches, 0.011 ms graphed against fp32's 0.052,
+  bit exact, cosine 0.98804 because every matrix there is int4 (EXP-031).
 - Fast path: one block 0.015 ms (4.6x fp32), four-block stack 0.054 and 0.134 ms (6.57x and 2.72x),
   bit exact against the eager chain, cosine 0.99393 per block (EXP-028).
 - Fastest int4 GEMV: the CUDA streaming variant, 0.198 to 0.220 ms at 8192 x 16384 (89 to 99 percent
@@ -55,7 +63,8 @@ None in progress. The session that produced this file finished EXP-017 to EXP-02
 - Is a SmolVLA checkpoint download acceptable in a future session? EXP-023 in particular is only
   half answered without it.
 
-## Suggested next options (see `agents/OPTIMIZATIONS.md` section 10)
-1. Write the int4 GEMM at M = 50 with `tl.dot` and sweep M from 1 to 64 for the crossover.
-2. Pin clocks, then repeat the four inconclusive experiments (admin rights needed).
-3. Run the fast path on a real layer stack from a checkpoint, with cosine per layer.
+## Suggested next options (see `agents/OPTIMIZATIONS.md` section 11)
+1. An int8 grouped kernel: the attention block reads 0.98804 against the MLP's 0.99451, and the
+   difference is one int8 projection.
+2. A real checkpoint: three layers, cosine per layer, with and without rotation.
+3. BLOCK_M = 48 for the GEMM plus a CUDA port, which takes the expert from 0.039 to about 0.020 ms.

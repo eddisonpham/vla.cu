@@ -480,3 +480,74 @@
 - Verdict: worked. This is the default path for the block, and the first time a quantized stack in this repo is faster than fp32 by a wide margin at layer scale.
 - Caveats: cosine through four stacked blocks is 0.975, below the 0.98 gate the project targets, on random weights with no rotation and no per-layer bit choice. That is a quality question, not a speed one.
 - Follow-ups: the M = 50 GEMM (DEC-028), the rotation on real weights, and per-layer bit widths.
+## EXP-029: int4 GEMM with tl.dot, and where the GEMV stops winning  (2026-11-23)
+- Goal / question: the action expert sees M = 50 tokens, and 50 GEMV calls read the weights 50 times (EXP-023). Write the GEMM that dequantizes into the tensor core and find the M where it beats the GEMV.
+- Change (one thing): added `kernels/triton/int4_gemm.py`. A step loads a [BLOCK_N, BLOCK_K // 2] byte tile on whole groups, splits low and high nibbles, expands the group scale to one value per weight, dequantizes in fp32, rounds once to fp16, and issues two dots against the even and odd halves of the activation tile. Added `bench/crossover.py` (task `crossover`) and `tests/test_int4_gemm.py`.
+- Prediction: agent, from the GEMV loop in EXP-023 and one launch costing about 0.02 ms: the GEMM should win by M = 4 to 8. No human prediction this session.
+- Command: `python -m vla_cu crossover`, and `pytest -q tests/test_int4_gemm.py`.
+- Bug found on the first build: `OutOfResources: shared memory, Required: 229376, limit 101376`. A 512-wide step is two 64-wide fp16 tiles per stage, and 3 stages of that does not fit. Fixed by setting BLOCK_K = 64 and `num_stages = 2`, which is 56 KB at BLOCK_M = 64.
+- Result (measured), milliseconds, M GEMV calls against one GEMM, cosine for both against the fp32 answer:
+
+| shape | M = 1 | M = 4 | M = 16 | M = 50 | M = 64 | first GEMM win | ratio at M = 50 |
+|---|---|---|---|---|---|---|---|
+| 1920 x 720, group 16 | 0.029 / 0.018 | 0.095 / 0.019 | 0.517 / 0.026 | 1.627 / 0.039 | 2.136 / 0.042 | M = 1 | 41.9x |
+| 720 x 1920, group 64 | 0.036 / 0.045 | 0.145 / 0.034 | 0.587 / 0.036 | 1.727 / 0.067 | 2.210 / 0.069 | M = 2 | 25.8x |
+| 2560 x 960, group 64 | 0.035 / 0.030 | 0.134 / 0.030 | 0.535 / 0.032 | 1.652 / 0.059 | 2.184 / 0.061 | M = 1 | 27.8x |
+
+- Result (measured): every cosine reads 1.00000 at five decimals on both paths, including the awkward 17 x 128 with group 16 and the fp16 rounding of the dot. 11 tests pass.
+- Explanation / hypothesis: the GEMV loop grows linearly with M because it is M launches, not M times the arithmetic, so the crossing is set by dispatch and not by flops. That is why the GEMM wins at M = 1 on two of three shapes: one launch against one launch, and the GEMM reads the same bytes with fewer programs. The one place the GEMV wins is M = 1 at 720 x 1920, where the GEMM's 64-row tile wastes 63 rows of tensor core work on a matrix too small to fill the machine.
+- Second finding: the GEMM time jumps from 0.026 to 0.039 ms between M = 32 and M = 50 while the work only grows 56 percent. M = 50 rounds up to a 64-row tile and doubles the padded rows, so the sweep has a step at every power of two. A real expert at M = 50 pays a 2x padding tax.
+- Verdict: worked. The GEMM is the right kernel for the expert at any M at or above 2, and the answer to the question is that the GEMV only ever wins at a single token on a small matrix. EXP-023's 2.588 ms against 0.018 ms was measuring 50 launches, which this sweep now separates into its two causes.
+- Caveats: the GEMM path has no CUDA port, so 0.039 ms is a Triton launch and would fall with the same treatment the GEMV got in EXP-027. Not attempted.
+- Follow-ups: BLOCK_M = 48 so M = 50 pads to 1.04x instead of 2x; a CUDA GEMM; the expert's 720 width still needs a group decision (DEC-030).
+
+## EXP-030: rotation inside the fast path, and it does not pay  (2026-11-23)
+- Goal / question: EXP-026 measured a rotation lifting cosine from 0.98788 to 0.99586 on weights with outliers. Does that survive inside the fast path, through a four-block stack, and what does the transform cost there?
+- Change (one thing): `vla_cu/rotate.py` now holds `hadamard`, `rotate_rows`, `rotate_vector`, shared by `bench/rotation.py` and `bench/fastpath.py`. The fast path gained `cuda rot` and `stack rot` paths that rotate weights at pack time and rotate each block's activation on the way in.
+- Prediction: agent: the rotation should cost one or two microseconds per block inside a graph and should not move Gaussian cosine at all, since EXP-026's gain came from outliers. No human prediction this session.
+- Command: `python -m vla_cu fastpath`, inside a vcvars shell.
+- Result (measured), milliseconds and cosine:
+
+| path | ms | ms per block | cos, one block | cos, 4 blocks |
+|---|---|---|---|---|
+| fp32 | 0.072 | 0.072 | 1.00000 | 1.00000 |
+| cuda raw | 0.028 | 0.028 | 0.99451 | |
+| cuda graph | 0.015 | 0.015 | 0.99451 | |
+| cuda rot | 0.057 | 0.057 | 0.99441 | |
+| stack graph | 0.051 | 0.013 | | 0.97640 |
+| stack rot | 0.072 | 0.018 | | 0.97449 |
+
+- Result (measured): both stacks are bit exact against their eager chains. The rotated stack costs 0.005 ms more per block and its cosine through four blocks is 0.97449 against 0.97640, so it is 38 percent slower and 0.002 lower on these weights.
+- Explanation / hypothesis: the transform is correct, since a wrong rotation would land near 0.7 rather than 0.99441, and the difference is quantization noise on Gaussian weights where a rotation has nothing to flatten. The 0.002 does not establish a regression; it does establish no gain. The cost is pure dispatch: two fp32 matmuls of [15, 64] and [40, 64] per block, which is 0.029 ms eagerly and 0.005 ms inside a graph.
+- Verdict: negative for the default path, kept as an opt-in. Rotation stays where EXP-026 put it, a quality lever for checkpoints with outliers, and the fast path does not apply it.
+- Follow-ups: measure both paths on real SmolVLA weights, where the outliers the rotation exists for are present. If the gain appears there, the transform wants a fused kernel, since 2 launches per block is more than the arithmetic deserves.
+
+## EXP-031: a real attention block, q and k and v on one activation vector  (2026-11-23)
+- Goal / question: the fast path was an MLP. The layer's other half is attention, where three projections read the same activation vector, which is the case the grouped launch from EXP-024 was built for.
+- Change (one thing): added `bench/attention.py` (task `attn`). At one token the softmax is the identity, so the block is v = Wv x then out = Wo v. Four paths: four torch.mv, four separate int4 launches, one grouped int4 launch for q and k and v plus one for o, and the same two launches captured in a graph.
+- Prediction: agent: the grouped path should save about one launch per block, and the graph should dominate everything, as in EXP-028. No human prediction this session.
+- Command: `python -m vla_cu attn`.
+- Result (measured), 960 x 960 four ways at batch 1:
+
+| path | launches | ms | GB/s | % peak | cos |
+|---|---|---|---|---|---|
+| fp32 | 4 | 0.052 | 283.9 | 73.9% | 1.00000 |
+| separate int4 | 4 | 0.086 | 24.1 | 6.3% | 0.98804 |
+| grouped int4 | 2 | 0.039 | 53.1 | 13.8% | 0.98804 |
+| grouped graph | 2 | 0.011 | 194.6 | 50.7% | 0.98804 |
+
+- Result (measured): grouped agrees with separate to fp32 rounding, the graph is bit exact against the eager grouped chain, grouped is 2.20x separate, and the graph is 8.08x separate and 3.81x fp32 in paired repeats (3.74 to 4.23).
+- Explanation / hypothesis: 2.08 MB of low-bit weights per block, so 0.011 ms is 194.6 GB/s and the rest is dispatch. The grouped launch saves one dispatch out of four, which is the 2.20x only because the eager path is entirely dispatch: four launches at about 0.02 ms each against two.
+- Finding worth keeping: cosine is 0.98804, below the 0.98 gate, because every matrix here is int4 and there is no int8 grouped kernel. The MLP block reaches 0.99451 because its up projection is int8. So the gate is met by the MLP and missed by attention on random Gaussian weights.
+- Verdict: worked, and it is the first attention block in the repo measured end to end at batch 1.
+- Follow-ups: an int8 grouped kernel, which would lift this block above the gate on the same evidence as the MLP; heads at 12 x 64 rather than one 960-wide projection.
+
+## EXP-032: clock pinning is refused, paired alternation instead  (2026-11-23)
+- Goal / question: the fast-path tables moved 2.72x to 6.57x between runs with no code change (EXP-028). Can the clocks be pinned, and if not, what does the measurement protocol need?
+- Change (one thing): tried `nvidia-smi -lgc 2000`, then added `time_pair` to `vla_cu/bench_utils.py`: alternate the two calls, repeat five times, report the median ratio with its min and max. Used in `fastpath` and `attn`.
+- Command: `nvidia-smi -lgc 2000`, then `python -m vla_cu fastpath`.
+- Result (measured): `nvidia-smi` exits 4 with "The current user does not have permission to change clocks for GPU 00000000:01:00.0". At idle, clocks.current.sm reads 870 MHz against clocks.max.sm 3090 MHz, so a benchmark starts at 28 percent of the ceiling.
+- Result (measured), with pairing: fp32 over graph through four blocks is 5.57x with a spread of 5.46 to 5.76 across five pairs, and the rotated stack is 4.00x with 3.59 to 4.71. The same comparison unpaired in the same run gave 5.60x, and in EXP-028 it gave 2.72x and 6.57x on two consecutive runs.
+- Explanation / hypothesis: the spread collapses from a factor of 2.4 between runs to 5 percent within a run when both paths share a clock state, because the drift is common to the pair and cancels in the ratio. Pinning would still be better: it makes absolute milliseconds comparable across sessions, which pairing cannot do.
+- Verdict: blocked on administrator rights, worked around. Absolute milliseconds in this repo are only comparable within one run; ratios with a spread are the number to trust.
+- Follow-ups: pin clocks from an elevated shell once and re-run EXP-017, EXP-020, EXP-021, EXP-022 and the two-hundred-series sweeps.
