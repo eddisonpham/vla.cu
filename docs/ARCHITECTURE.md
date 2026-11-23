@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -102,6 +102,7 @@ kernels, so they are used as references and as performance baselines.
 | 12 | attainable ceiling | read-only streaming probe, repeated and interleaved | `bench/bandwidth_probe.py` | done, 346 to 360 GB/s, spread up to 2x |
 | 13 | M = 50 probe | 50 GEMV calls against one GEMM on the expert shape | `bench/m50.py` | done, the expert needs a GEMM, 33 to 148x |
 | 14 | rotation | block Hadamard before packing, accuracy not speed | `bench/rotation.py` | done, outlier cosine 0.98788 to 0.99586 |
+| 15 | fast path | native streaming kernels for int8 and int4, captured in a graph | `bench/fastpath.py`, `csrc/int8_gemv.cu` | done, 0.015 ms per block against 0.069 fp32, bit exact |
 
 ## 7. Measurement protocol
 

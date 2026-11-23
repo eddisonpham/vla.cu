@@ -24,7 +24,9 @@
 
 ## Next, ranked by the evidence (detail in `OPTIMIZATIONS.md` section 9)
 - [ ] Pin clocks with `nvidia-smi -lgc` (needs admin) and repeat EXP-017, EXP-020, EXP-021, EXP-022.
-- [ ] Wire the three measured wins into a default path: CUDA streaming kernel, grouped launch, block graph.
+- [x] Wire the measured wins into a default path. Done 2026-11-23, EXP-027 and EXP-028: native int8 and int4 streaming kernels, launched on the torch stream so they capture, one block 0.015 ms against fp32's 0.069, bit exact.
+- [ ] Grouped launch in the fast path: the four-block stack still issues one launch per matrix, and q, k, v of a real attention block share one activation vector.
+- [ ] A capture-safety check in the tests: assert `torch.equal` between a graph and the eager chain for any kernel added later (the rule in DEC-031).
 - [ ] Write an int4 GEMM that dequantizes into `tl.dot`, and sweep M from 1 to 64 for the GEMV crossover.
 - [ ] Decide group 16 against padding to 768 for the 720-wide expert (DEC-030).
 - [ ] Download `lerobot/smolvla_base` config and index, then re-run EXP-023 and EXP-026 on real weights.

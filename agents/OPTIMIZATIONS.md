@@ -290,3 +290,29 @@ Revised queue, in the order the evidence now supports:
 | 3 | an int4 GEMM that dequantizes into `tl.dot`, swept over M from 1 to 64 | H9 says the expert needs it, and the crossover M is unknown |
 | 4 | decide group 16 against padding to 768 for the expert | blocks packing real checkpoint weights |
 | 5 | run EXP-026 on real checkpoint weights | the rotation result only means something on weights that have outliers |
+---
+
+## 10. Fast path, brought up 2026-11-23
+
+The three measured wins are now one path: native streaming kernels for both precisions, captured in a CUDA graph. One block, 960 to 2560 to 960, batch 1, RTX 5060 Laptop:
+
+| path | ms | ms per block | GB/s | cos |
+|---|---|---|---|---|
+| fp32 | 0.069 | 0.069 | 284.6 | 1.00000 |
+| Triton raw | 0.081 | 0.081 | 47.7 | 0.99393 |
+| native raw | 0.031 to 0.033 | 0.031 | 118.4 | 0.99393 |
+| native graph | 0.015 | 0.015 | 249.9 | 0.99393 |
+| native graph, 4 blocks | 0.054 to 0.134 | 0.014 to 0.033 | 284.6 | 0.975 to 0.977 |
+
+Four-block stack against the fp32 stack: 6.57x in run 1, 2.72x in run 2, both bit exact against the eager chain. The spread between the two runs is the part, not the code (EXP-017, DEC-029).
+
+What is left, in order:
+
+| Next | Item | Why |
+|---|---|---|
+| 1 | int4 GEMM at M = 50 with `tl.dot`, swept over M from 1 to 64 | the expert is 74 percent of the derived model floor and the GEMV is the wrong kernel there (DEC-028) |
+| 2 | a real layer stack from a checkpoint, graphed, with cosine per layer | four random blocks give cosine 0.975, under the 0.98 gate, and nobody knows what real weights do |
+| 3 | pin clocks and repeat the four inconclusive experiments | still the cheapest way to turn inference into measurement |
+| 4 | per-layer bit widths and the rotation together | cosine is the binding constraint now, not time |
+
+The quality number to watch: the four-block stack is 0.975 on random Gaussian weights, which are the friendliest case for a rotation and the most isotropic case for quantization. Real weights with outliers would be worse without EXP-026's rotation, and better with it.

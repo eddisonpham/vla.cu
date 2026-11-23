@@ -446,3 +446,37 @@
 - Explanation / hypothesis: the rotation does nothing on Gaussian weights, as expected since they are already incoherent, and it repairs most of the outlier damage: cosine 0.98788 to 0.99586 and relative error down 41 percent. The mechanism is that one outlier no longer sets the scale for 63 well behaved weights.
 - Verdict: worked, H11 confirmed. Whether it matters depends on real checkpoint weights, which the repo does not have yet.
 - Follow-ups: run this on extracted SmolVLA weights before claiming a quality win. Fusing the rotation into the kernel is a later chunk; for now it is a pack-time change plus one small kernel.
+## EXP-027: a CUDA int8 kernel, and two bugs it exposed  (2026-11-23, commit pending)
+- Goal / question: the block's up projection is int8 and only existed in Triton. Could it become a native streaming kernel so that a whole block runs without the Triton launcher, and can that block then be captured in a graph?
+- Change (one thing): added `csrc/int8_gemv.cu` (warp per row, one uint4 load per lane is 16 weights, `__ldcs`, guarded scalar tail for K not divisible by 512), `vla_cu/cuda_int8.py`, and `tests/test_cuda_int8_gemv.py`.
+- Prediction: agent: the raw path should land near the Triton int8 time and the graph should then behave like EXP-018. No human prediction this session.
+- Command: `python -m pytest -q` inside a vcvars shell, then `python -m vla_cu fastpath`.
+- Result (measured), first attempt: 57 tests failed with a `torch.AcceleratorError` and the fast path's graph rows read cosine 0.83733 against 0.99468 for the eager chain, and the four-block graph was not bit exact.
+- Bug 1: the 16-byte weight load requires every row base to be 16-byte aligned, and K = 1025 gives row starts at odd 16-byte boundaries. The misaligned load faulted, which poisoned the CUDA context and made every later test fail. Fixed with a host check that K is a multiple of 16, plus a test that asserts the rejection, and the awkward-width test moved to K = 1040.
+- Bug 2, the interesting one: both CUDA kernels launched with `<<<blocks, threads>>>`, which is the legacy default stream. A launch on that stream is invisible to stream capture, so the graph recorded the silu kernel and nothing else. That is why the graph output looked like a stale intermediate rather than like noise. Fixed by launching on `at::cuda::getCurrentCUDAStream()` in both `.cu` files. Recorded as DEC-031.
+- Result (measured), after both fixes: 68 tests pass. Block on native kernels: cuda raw 0.031 to 0.033 ms, cuda graph 0.015 ms, cosine 0.99393, and the graph reproduces the eager chain bit for bit (`torch.equal` True).
+- Explanation / hypothesis: the capture bug also means the int4 kernels in EXP-016 and EXP-022 were never capturable. Their numbers stand, since they were never inside a graph, but no CUDA graph of a torch op could have worked before today.
+- Verdict: worked, after two genuine defects were found and fixed. The kernel itself needed no tuning: 0.031 ms for 3.85 MB of low-bit weights is 124 GB/s, which is dispatch and not bandwidth on an L2-resident block.
+- Follow-ups: the same stream rule has to be checked in every future extension, so the file header now states it.
+
+## EXP-028: the fast path, one block and a four-block stack  (2026-11-23, commit pending)
+- Goal / question: put the measured wins together, native streaming kernels plus a graph, and answer the question a model actually asks: what does a block cost, and what does a stack of blocks cost?
+- Change (one thing): added `bench/fastpath.py` (task `fastpath`), five paths on the same weights and input, and a stack of four different blocks.
+- Prediction: agent, from EXP-018 and EXP-022: about 0.015 to 0.020 ms per block, so 4 to 5x the fp32 block. No human prediction this session.
+- Command: `python -m vla_cu fastpath`, twice.
+- Result (measured), milliseconds:
+
+| path | blocks | run 1 ms | run 2 ms | ms per block | GB/s run 1 | cos |
+|---|---|---|---|---|---|---|
+| fp32 | 1 | 0.069 | 0.069 | 0.069 | 284.6 | 1.00000 |
+| triton raw | 1 | 0.081 | 0.083 | 0.081 | 47.7 | 0.99393 |
+| cuda raw | 1 | 0.033 | 0.031 | 0.033 | 118.4 | 0.99393 |
+| cuda graph | 1 | 0.015 | 0.015 | 0.015 | 249.9 | 0.99393 |
+| stack graph | 4 | 0.054 | 0.134 | 0.014 to 0.033 | 284.6 | 0.9747 to 0.9766 |
+
+- Result (measured): the stack graph reproduces the eager chain bit for bit in both runs. fp32 stack of four blocks: 0.356 and 0.364 ms, so the graph is 6.57x in run 1 and 2.72x in run 2.
+- Explanation / hypothesis: fp32 was stable at 0.069 ms in both runs, which the harness now manages to do, but the four-block graph moved 2.5x between runs with no code change, which is the same instability EXP-017 measured. The one-block graph was stable at 0.015. Per block, the graph is 4.6x faster than the fp32 block and 2.2x faster than the same kernels launched eagerly, and the gap is dispatch: 4 kernels at about 8 us of launch plus Python against 4 graph nodes at 0.63 us.
+- Derived, not measured: sixteen blocks of this size at the best sample would be about 0.22 ms. It will not scale like that, because sixteen blocks are 62 MB of low-bit weights against a 33.6 MB L2, so a real stack streams from DRAM and the per-block floor becomes 3.85 MB divided by the 346 to 360 GB/s attainable rate, about 0.011 ms per block.
+- Verdict: worked. This is the default path for the block, and the first time a quantized stack in this repo is faster than fp32 by a wide margin at layer scale.
+- Caveats: cosine through four stacked blocks is 0.975, below the 0.98 gate the project targets, on random weights with no rotation and no per-layer bit choice. That is a quality question, not a speed one.
+- Follow-ups: the M = 50 GEMM (DEC-028), the rotation on real weights, and per-layer bit widths.

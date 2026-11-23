@@ -236,3 +236,19 @@
 - Consequence: `bench/m50.py` uses group 16 for the 720 shapes and says so in its output. No other benchmark is affected, since 960, 2560, 1920 and 768 all divide by 64.
 - Revisit if: the checkpoint shows a different expert width, or the rotation in EXP-026 makes a coarser group affordable.
 - Status: active
+## DEC-031: extension kernels launch on the current torch stream, always  (2026-11-23)
+- Context: EXP-027. Both CUDA kernels used `<<<blocks, threads>>>`, the legacy default stream. A CUDA graph recorded the silu kernel and silently skipped every extension launch, so the replay produced a stale intermediate and a cosine of 0.83733 where the eager chain gave 0.99468.
+- Options considered: (a) legacy default stream, the form in every CUDA sample; (b) the current torch stream via `at::cuda::getCurrentCUDAStream()`; (c) a stream passed in as an argument by the caller.
+- Chosen and why: (b). It is one argument in the launch configuration, it makes the kernel capture safe, and it also stops the kernel from implicitly synchronizing with torch's own streams, which the legacy stream does. (c) pushes a detail onto every caller for no benefit yet.
+- Consequence: every kernel on the speed path is capturable, which DEC-018 already required and which was quietly false for the CUDA port until now. The rule is stated in both `.cu` headers so the next kernel inherits it.
+- Verification: the fast path reports `torch.equal` True between a four-block graph and the same chain launched eagerly. That equality is the regression test for this rule.
+- Revisit if: a kernel needs to run on its own stream, in which case (c) comes back with a reason.
+- Status: active
+
+## DEC-032: the fast path is the default way to run a block  (2026-11-23)
+- Context: EXP-028. Native streaming kernels plus a graph give 0.015 ms per block against 0.069 for fp32, 0.033 for the same kernels launched eagerly, and 0.081 for Triton.
+- Options considered: (a) Triton raw launches, the current teaching default; (b) native kernels, eager; (c) native kernels in a graph.
+- Chosen and why: (c) as the default, with (b) as the fallback when a graph is inconvenient, for instance in a test where an error must point at a line. Measured, on one block: 0.015 (c), 0.033 (b), 0.081 (a), 0.069 fp32.
+- Consequence: the repo now needs a vcvars shell for its fastest path, and Triton stays as the readable reference and the place where a new idea is tried first.
+- Revisit if: Triton's launcher gets cheap enough that the gap closes, or a model integration cannot capture.
+- Status: active
