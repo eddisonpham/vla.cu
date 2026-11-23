@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -93,8 +93,9 @@ kernels, so they are used as references and as performance baselines.
 | 3 | reduction | shared memory, warp shuffles | undecided | backlog |
 | 4 | naive matmul | tiling by block | undecided | backlog |
 | 5 | packed 4-bit weights | group scales, unpacking | `vla_cu/quant.py` | done, layout and reference dequantize |
-| 6 | fused dequant GEMV | read packed bytes once, unpack in registers | `kernels/triton/int4_gemv.py` | done, 0.263 ms at 8192 x 16384 |
-| 7 | CUDA C++ port | explicit shared memory, vectorized loads | `csrc/` | backlog, toolkit ready |
+| 6 | fused dequant GEMV | group-major reduction, scale per group not per byte | `kernels/triton/int4_gemv.py` | done, 0.230 ms, 85.5% of peak at 8192 x 16384 |
+| 7 | CUDA C++ port | warp per row, uint32 weight loads, shuffle reduction | `csrc/int4_gemv.cu` | done, 0.240 ms, agrees with Triton on every shape |
+| 8 | custom op | `torch.library.custom_op` plus a fake kernel | `vla_cu/ops.py` | done, one MLP block end to end |
 
 ## 7. Measurement protocol
 

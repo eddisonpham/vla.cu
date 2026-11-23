@@ -19,6 +19,8 @@ TASKS: dict[str, str] = {
     "graph": "bench.graph_chain",
     "tune": "bench.int8_gemv_tune",
     "matrix": "bench.matrix",
+    "layer": "bench.layer",
+    "cuda": "bench.cuda_compare",
 }
 
 

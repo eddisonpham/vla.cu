@@ -45,15 +45,16 @@ Details and sources: `agents/HARDWARE.md`.
 ## Status
 
 The ladder is measured end to end. On 8192 x 16384 weights, batch 1, the fused 4-bit
-dequant GEMV runs in 0.263 ms against 1.614 ms for the fp32 path, a 6.15x speedup at
-an L2 relative error of 1.07e-1. The int8 rung is at 93.2 percent of DRAM peak.
+dequant GEMV runs in 0.230 ms against 1.587 ms for the fp32 path, a 6.89x speedup at
+85.5 percent of DRAM peak and a relative L2 error of 1.07e-1. The same kernel exists
+twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 
 | Piece | State |
 |---|---|
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda` |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -61,8 +62,11 @@ an L2 relative error of 1.07e-1. The int8 rung is at 93.2 percent of DRAM peak.
 | int8 GEMV with per-channel scales | done, 354.7 GB/s, 92.4 percent of 384, at 8192 x 16384 |
 | Split-K and block size sweep | done, split-K 6.53x at 16 rows, neutral above 256 rows |
 | 4-bit packing and reference dequantize | done, low nibble first, one scale per 64 weights |
-| Fused 4-bit dequant GEMV | done, 0.263 ms at 8192 x 16384, 6.15x the fp32 path |
+| Fused 4-bit dequant GEMV | done, 0.230 ms at 8192 x 16384, 6.89x the fp32 path, 85.5 percent of peak |
 | Full ladder matrix, fp32 to int4 | done, one table on identical weights and activations |
+| Torch custom ops for both GEMVs | done, `vla_cu/ops.py`, opcheck clean, no GPU memory for the fake |
+| SmolVLA-shaped MLP block end to end | done, 960 to 2560 to 960, cos 0.9935 against fp32 |
+| CUDA C++ port of the int4 GEMV | done, 0.240 ms at 8192 x 16384, beats Triton on small shapes only |
 | Two GEMV kernels chained in a CUDA graph | done, 0.031 ms plain against 0.012 ms graphed, bit exact |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -93,7 +97,12 @@ python -m vla_cu gemv
 python -m vla_cu graph
 python -m vla_cu tune
 python -m vla_cu matrix
+python -m vla_cu layer
+python -m vla_cu cuda
 ```
+
+The `cuda` task compiles `csrc/int4_gemv.cu` on first use, so it needs `cl.exe` and
+ninja on PATH: run it from a shell where `vcvars64.bat` has been called (EXP-004).
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both
 tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.

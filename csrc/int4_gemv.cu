@@ -1,0 +1,120 @@
+// Fused 4-bit dequantize and GEMV for batch 1, one warp per output row.
+//
+// Thread to data mapping: a warp owns one output row. Each lane loads four packed
+// bytes (a uint32) per step, which is eight weights, and the eight lanes of a warp
+// segment share one 64-weight group, so the group scale is a broadcast load instead
+// of a per-byte gather. The warp reduces with shuffles and lane 0 writes the output,
+// so no shared memory and no block-wide barrier are needed.
+//
+// Memory access: packed bytes are read four at a time per lane, 128 contiguous bytes
+// per warp instruction, and each lane reads its eight activations with two float4
+// loads. Weights are read once, activations once per row that is resident in cache.
+// Expected bottleneck: memory, weights only, N * K / 2 bytes.
+//
+// Preconditions enforced by the host wrapper: group size 64, K divisible by 64, all
+// tensors fp32 or uint8, contiguous, and 16-byte aligned activations.
+
+#include <torch/extension.h>
+#include <c10/cuda/CUDAException.h>
+#include <cuda_runtime.h>
+
+namespace {
+
+constexpr int GROUP = 64;
+constexpr int WARPS_PER_BLOCK = 4;
+constexpr int THREADS = WARPS_PER_BLOCK * 32;
+constexpr int WEIGHTS_PER_LANE = 8;
+constexpr int WEIGHTS_PER_STEP = 32 * WEIGHTS_PER_LANE;
+
+__global__ void int4_gemv_kernel(const unsigned char* __restrict__ packed,
+                                 const float* __restrict__ scales,
+                                 const float* __restrict__ x,
+                                 float* __restrict__ out,
+                                 int n_rows,
+                                 int n_cols) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * WARPS_PER_BLOCK + warp;
+    if (row >= n_rows) {
+        return;
+    }
+
+    const int n_groups = n_cols / GROUP;
+    const unsigned char* row_bytes = packed + static_cast<long>(row) * (n_cols / 2);
+    const float* row_scales = scales + static_cast<long>(row) * n_groups;
+
+    float acc = 0.0f;
+    for (int base = 0; base < n_cols; base += WEIGHTS_PER_STEP) {
+        const int weight = base + lane * WEIGHTS_PER_LANE;
+        if (weight >= n_cols) {
+            continue;
+        }
+
+        const unsigned int word = *reinterpret_cast<const unsigned int*>(row_bytes + weight / 2);
+        const float4 act_lo = *reinterpret_cast<const float4*>(x + weight);
+        const float4 act_hi = *reinterpret_cast<const float4*>(x + weight + 4);
+
+        float local = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float low = static_cast<float>((word >> (8 * j)) & 0x0F) - 8.0f;
+            const float high = static_cast<float>((word >> (8 * j + 4)) & 0x0F) - 8.0f;
+            if (j == 0) {
+                local += low * act_lo.x + high * act_lo.y;
+            } else if (j == 1) {
+                local += low * act_lo.z + high * act_lo.w;
+            } else if (j == 2) {
+                local += low * act_hi.x + high * act_hi.y;
+            } else {
+                local += low * act_hi.z + high * act_hi.w;
+            }
+        }
+
+        acc += local * row_scales[weight / GROUP];
+    }
+
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xFFFFFFFFu, acc, offset);
+    }
+    if (lane == 0) {
+        out[row] = acc;
+    }
+}
+
+}  // namespace
+
+void int4_gemv_launch(torch::Tensor packed, torch::Tensor scales, torch::Tensor x, torch::Tensor out) {
+    TORCH_CHECK(packed.is_cuda() && scales.is_cuda() && x.is_cuda() && out.is_cuda(), "expected CUDA tensors");
+    TORCH_CHECK(packed.scalar_type() == torch::kUInt8, "expected uint8 packed weights");
+    TORCH_CHECK(scales.scalar_type() == torch::kFloat32 && x.scalar_type() == torch::kFloat32 && out.scalar_type() == torch::kFloat32,
+                "expected fp32 scales, activations and output");
+    TORCH_CHECK(packed.is_contiguous() && scales.is_contiguous() && x.is_contiguous() && out.is_contiguous(),
+                "expected contiguous tensors");
+    TORCH_CHECK(packed.dim() == 2 && scales.dim() == 2 && x.dim() == 1 && out.dim() == 1,
+                "expected packed [N, K / 2], scales [N, K / 64], x [K], out [N]");
+
+    const int n_rows = static_cast<int>(packed.size(0));
+    const int n_cols = static_cast<int>(packed.size(1) * 2);
+    TORCH_CHECK(n_cols % GROUP == 0, "K must be divisible by 64");
+    TORCH_CHECK(x.size(0) == n_cols && out.size(0) == n_rows, "shape mismatch between packed, x and out");
+    TORCH_CHECK(scales.size(0) == n_rows && scales.size(1) == n_cols / GROUP, "scale table shape mismatch");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "activations must be 16-byte aligned");
+    if (n_rows == 0) {
+        return;
+    }
+
+    const int blocks = (n_rows + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    int4_gemv_kernel<<<blocks, THREADS>>>(
+        reinterpret_cast<const unsigned char*>(packed.data_ptr()),
+        scales.data_ptr<float>(),
+        x.data_ptr<float>(),
+        out.data_ptr<float>(),
+        n_rows,
+        n_cols);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("int4_gemv_launch", &int4_gemv_launch, "fused 4-bit dequantize and GEMV (one warp per row)");
+}
