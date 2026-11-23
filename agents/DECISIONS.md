@@ -291,3 +291,10 @@
 - Cost accepted: net +82 lines, because the module documents each format once. The six wrappers are 62 lines shorter. The win is consistency and four new checks, not size.
 - Revisit if: a wrapper needs a check that does not belong to the format, such as a block size or an alignment. Those stay in that wrapper.
 - Status: active
+
+## DEC-038: attention projections default to int8, int4 stays the byte floor  (2026-11-23)
+- Context: EXP-035. At 960 width, int8 attention reads 1.78x the bytes and costs 1.54x the graphed time (0.019 against 0.012 ms), while cosine moves from 0.98804 to 0.99994.
+- Options considered: (a) int4 only; (b) int8 only; (c) both, int8 for attention and int4 wherever the accuracy budget allows.
+- Chosen and why: (c). Seven microseconds buys two and a half digits of cosine. int4 stays the byte floor and the interesting kernel, int8 becomes the quality path.
+- Revisit if: a stacked block shows int4 attention holding the 0.98 gate on real weights, or the 7 us matters at model level.
+- Status: active

@@ -573,3 +573,14 @@
 - Explanation / hypothesis: the duplicated checks were only 62 lines, so a shared module cannot pay for itself in size. Its value is one description of each format and one exception type. The prediction on net size was wrong.
 - Verdict: worked on consistency, failed on size.
 - Follow-ups: a new kernel must be added to `tests/test_validation.py` in the same commit that adds it. The native suite needs the vcvars environment, which this shell cannot build directly, so `/tmp/vc_test.py` is the working form.
+
+## EXP-035: the attention block in int8 against int4  (2026-11-23, commit 7d20477)
+- Goal / question: what does one extra bit buy in attention, and what does a grouped launch buy at each precision?
+- Change (one thing): added `kernels/triton/int8_grouped_gemv.py`; `bench/attention.py` now times int4 and int8 on the same weights.
+- Prediction (agent's, labelled): int8 cosine at least 0.994 and int8 graphed time 1.6x to 2.2x int4, because it reads 1.78x the bytes.
+- Command: `python -m vla_cu attn`
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, 33.6 MB L2, torch 2.8.0+cu129.
+- Result (measured): fp32 0.049 ms; int4 separate 0.110, grouped 0.056, graph 0.012, cosine 0.98804; int8 separate 0.095, grouped 0.048, graph 0.019, cosine 0.99994. Grouped is 1.97x over separate at int4 and 2.00x at int8. The graph is 9.09x and 5.11x over separate. int8 costs 1.54x the int4 time for 1.78x the bytes and reaches 51.8 percent of peak against 44.8. Grouped agrees with separate and both graphs reproduce their eager chains bit for bit.
+- Explanation / hypothesis: at 2 MB the block is launch bound, which is why grouping halves it. int8 lands under the byte ratio because its outer loop does less per byte and the wider tile keeps more loads in flight.
+- Verdict: worked, both predictions held.
+- Follow-ups: int8 attention is the better default when 7 us is affordable. Test what it does to a stacked block in cycle 3.
