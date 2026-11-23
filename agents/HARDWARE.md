@@ -39,6 +39,7 @@ peak", not as an expectation for any single run.
 | 2026-11-18 | env check (no kernel) | sm_120, 26 SM, 7.9 GB, torch 2.8.0+cu129 | `.venv/Scripts/python.exe scripts/env_check.py` | 9b5dee6 |
 | 2026-11-22 | vector add, torch against Triton, 16M fp32, 201 MB moved | torch 309.7 GB/s, Triton 330.9 GB/s (86.2 percent of 384) | `python -m vla_cu bench` | EXP-008 |
 | 2026-11-22 | vector add, 1M fp32, 12.6 MB, cache resident | torch 1186.7 GB/s, Triton 966.0 GB/s, above DRAM peak so it measures L2 | `python -m vla_cu bench` | EXP-008 |
+| 2026-11-22 | launch overhead, 1-element Triton kernel, 1000 launches | 16.71 us per launch from Python, 0.63 us per graph node, 26 times cheaper | `python -m vla_cu launch` | EXP-009 |
 
 ## Environment change log
 - 2026-11-18: file created, nothing detected yet.

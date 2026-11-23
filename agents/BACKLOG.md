@@ -6,7 +6,7 @@
 
 ## Next up (starter chunks, see `agents/STARTER.md`)
 - [x] Chunk 0: environment check (`scripts/env_check.py`) - done 2026-11-18, EXP-001
-- [ ] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`) - unblocked, any time
+- [x] Chunk 1: timing and memory-budget utilities (`vla_cu/bench_utils.py`) - done 2026-11-22, EXP-008
 - [x] Chunk 2: first Triton kernel, vector add - done 2026-11-22, `kernels/triton/vector_add.py`, EXP-007
 - [x] Chunk 3: correctness test and bandwidth benchmark - done 2026-11-22, EXP-008: 86.2% of peak at 16M elements
 
@@ -43,8 +43,8 @@ on purpose, not forgotten.
 ## Infrastructure
 - [ ] `bench` with a kernel argument, JSON output and a small HTML report (vector add only so far)
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
-- [ ] Launch-overhead experiment: time one tiny kernel against 1000 launched in a loop, to size the CUDA graph win before building one
-- [ ] CUDA graph capture of the GEMV: batch 1 has static shapes, so capture and replay is a natural fit
+- [x] Launch-overhead experiment - done 2026-11-22, EXP-009: 16.71 us from Python, 0.63 us per graph node
+- [ ] CUDA graph capture of the GEMV: batch 1 has static shapes, so capture and replay is a natural fit. Justified by EXP-009, not yet built (DEC-018)
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 

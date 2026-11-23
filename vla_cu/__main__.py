@@ -14,6 +14,7 @@ TASKS: dict[str, str] = {
     "probe": "scripts.triton_probe",
     "cuda-check": "scripts.cuda_check",
     "bench": "bench.vector_add_bench",
+    "launch": "bench.launch_overhead",
 }
 
 

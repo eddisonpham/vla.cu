@@ -132,3 +132,12 @@
 - Chosen and why: (b), with 25 warmup calls, 100 timed iterations and CUDA events. Allocation inside the loop would measure the caching allocator, and wall clock would measure launches and queue depth. Byte counts are a fixed 12 per element, identical for both paths, so GB/s is comparable across kernels and sizes.
 - Consequences: `vector_add_into` exists next to `vector_add` only to keep the comparison allocation-free, and the benchmark prints three sizes on purpose: launch-bound at 4K, cache-resident at 1M, memory-bound at 16M. The cache row is reported and labelled instead of being hidden, because a 251 percent of peak reading is the clearest evidence that a benchmark is measuring the wrong thing.
 - Revisit if: kernels start allocating internal workspace, which must then be counted as traffic, or if a size is found where the three regimes disagree with these labels.
+- Status: active
+
+## DEC-018: CUDA graphs belong in the batch-1 design, tests stay plain  (2026-11-22)
+- Context: EXP-009 measured 16.71 us per launch from Python against 0.63 us per graph node for the same 1-element kernel, a 26 times difference that is submission cost, not kernel cost.
+- Options considered: (a) ignore launch cost and optimize kernels only; (b) capture everywhere, tests included; (c) keep plain launches for correctness, capture the benchmark and the inference path.
+- Chosen and why: (c). A graph hides errors until replay, which makes a failing test point at the wrong line, so correctness runs stay plain. The saving also scales with chain length: a 450M parameter policy at batch 1 is hundreds of small kernels, where 16 us each is milliseconds of the forward pass.
+- Consequences: every benchmark of a multi-kernel chain reports a plain column and a graphed column, and any kernel on the speed path must be capture safe, meaning no host synchronization and no allocation inside capture.
+- Revisit if: a kernel needs a host-side value between launches in a way that breaks capture, or the real model turns out to be a few large kernels rather than many small ones.
+- Status: active
