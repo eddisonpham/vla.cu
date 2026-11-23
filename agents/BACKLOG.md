@@ -82,6 +82,7 @@ on purpose, not forgotten.
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
+- [ ] Close the two input gaps left in EXP-033: check `block_n` for a power of two, and prove the grouped segment-run invariant without a per-call sync.
 
 ## Open questions
 - ~~Which GPU, and what is its peak bandwidth?~~ Answered in `HARDWARE.md`: RTX 5060 Laptop, 384 GB/s.
@@ -90,5 +91,6 @@ on purpose, not forgotten.
 - Which SmolVLA layer shapes do we target first (hidden size, intermediate size) once we leave toy tensors?
 
 ## Done / dropped
+- [x] Bug-fix pass (2026-11-23, EXP-033): rotation order guard, grouped wrapper validation, power-of-two block size, cuda test gate on `cl`, `CalledProcessError` wrapping, bf16 byte count.
 - [x] STARTER.md Part A: repo skeleton, venv, first commit (2026-11-18, commit 9b5dee6).
 - [x] STARTER.md Chunk 0: environment check (2026-11-18, EXP-001).

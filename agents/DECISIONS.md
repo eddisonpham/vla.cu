@@ -275,3 +275,11 @@
 - Consequence: every head-to-head number now carries a range, and absolute milliseconds are treated as comparable within a run only. The 6 percent floor from DEC-029 stays.
 - Revisit if: clocks get pinned, after which medians of many runs are enough and the ranges should tighten to a few percent.
 - Status: active
+
+## DEC-036: validate at the wrapper boundary, skip when the toolchain is absent  (2026-11-23)
+- Context: EXP-033. Three guards were missing or wrong: `hadamard` silently returned the next power of two, the grouped wrapper launched on any shapes, and the cuda tests failed outside vcvars because they checked `nvcc` but not the host compiler.
+- Options considered: (a) document the assumptions and leave the code, (b) check every input on the host in Python, (c) check only what would corrupt memory or launch the wrong kernel.
+- Chosen and why: (c), matching the other kernels. dtype, shape, contiguity, device and the power-of-two tile are checked before the launch. The segment-run invariant stays documented because proving it needs a device sync on every call.
+- Consequence: no silent out-of-bounds read from a grouped launch, and `pytest -q` is green in the default shell with the cuda tests skipped rather than failed. Kernel arithmetic is untouched.
+- Revisit if: the grouped kernel becomes the default path and its per-call Python checks show up in a profile.
+- Status: active

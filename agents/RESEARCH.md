@@ -147,3 +147,10 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local measurements this session (EXP-017, EXP-018); no vendor document read on the boost algorithm.
 - Confidence: high for the measurement, medium for the explanation, since no clock counter could be read without administrator rights.
 - Relevance to vla.cu: sets the reporting rule in DEC-029. Effects below about 6 percent cannot be claimed on this machine today, and a single table is a sample of a distribution whose tail is 2x.
+
+## `torch.utils.cpp_extension.load` failure type on a missing host compiler  (2026-11-23)
+- Question: why did the documented build message never appear outside vcvars, and what must a test gate check?
+- Finding: with `nvcc` on PATH and `cl` absent, `load` runs `subprocess.run(["where", "cl"])` and raises `subprocess.CalledProcessError`, which is not a `RuntimeError`, so the `except RuntimeError` in both loaders never ran. Separately, `shutil.which("clang")` finds LLVM's `clang.exe` outside vcvars, but nvcc 12.9 on Windows still needs MSVC `cl`, so the gate must check `cl` specifically there.
+- Source: the traceback from `python -m pytest -q` on this machine, torch 2.8.0 `torch/utils/cpp_extension.py` line 577 raising `CalledProcessError`, and `shutil.which` output from the same shell (2026-11-23). No vendor document read.
+- Confidence: high, reproduced in both shells.
+- Relevance to vla.cu: DEC-036. The loaders wrap both types, and the cuda tests skip when `cl` is missing on Windows.

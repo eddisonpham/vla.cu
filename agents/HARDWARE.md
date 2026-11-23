@@ -70,3 +70,12 @@ peak", not as an expectation for any single run.
 | Workaround | paired alternation, `time_pair` in `vla_cu/bench_utils.py` (DEC-035) |
 
 To pin clocks, run an elevated shell once: `nvidia-smi -pm 1` then `nvidia-smi -lgc 2000`, and reset with `nvidia-smi -rgc`. Nothing in the repo can do this without administrator rights.
+
+## Host compiler on PATH (2026-11-23)
+
+| Fact | Value |
+|---|---|
+| `cl` outside a vcvars shell | absent |
+| `clang` outside a vcvars shell | `C:\Program Files\LLVM\bin\clang.EXE` |
+| nvcc 12.9 with that clang | not a supported host compiler on Windows |
+| Consequence | the cuda tests skip when `cl` is absent (DEC-036); a vcvars shell is still required to build |
