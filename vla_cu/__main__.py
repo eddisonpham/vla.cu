@@ -15,6 +15,8 @@ TASKS: dict[str, str] = {
     "cuda-check": "scripts.cuda_check",
     "bench": "bench.vector_add_bench",
     "launch": "bench.launch_overhead",
+    "gemv": "bench.int8_gemv_bench",
+    "graph": "bench.graph_chain",
 }
 
 
