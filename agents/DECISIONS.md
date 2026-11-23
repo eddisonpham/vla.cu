@@ -306,3 +306,11 @@
 - Cost accepted: 34.5 MB per four blocks against 23.7 for int4, and 1.4x the time of int4. It is still 3.94x faster than fp32.
 - Revisit if: a real checkpoint shows int4 down holding the gate, or the gate moves.
 - Status: active
+
+## DEC-040: the weight bundle is torch.save plus a JSON manifest, loaded to CPU  (2026-11-23)
+- Context: EXP-038. Packed weights need a file format before a real checkpoint can be converted, and no serialization dependency exists in the repo.
+- Options considered: (a) torch.save of a bare dict; (b) torch.save with a versioned manifest and per-matrix shapes, read with weights_only=True; (c) safetensors.
+- Chosen and why: (b). It adds no dependency, it refuses a future version instead of decoding it, it cannot execute code on load, and the shape declaration is checked on both sides. (c) would be the right pick for a public release with untrusted files, and it is one adapter away.
+- Consequence: load returns CPU tensors on purpose, so a caller moves them to a device before a launch. The bundle is 5.93 MB per int4 block against 34.4 MB of fp32 weights.
+- Revisit if: untrusted bundles are ever accepted, or a host tool needs random access without loading the whole file.
+- Status: active

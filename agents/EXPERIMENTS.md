@@ -607,3 +607,14 @@
 - Explanation / hypothesis: the fixed tests cover the shapes a person chose; the sweep covers K values that break block sizes (83, 129, 249, 3401) and row counts that break tiles.
 - Verdict: worked.
 - Follow-ups: run the task in CI once a GPU runner exists, and add the block objects to it.
+
+## EXP-038: a versioned bundle for packed weights  (2026-11-23, commit 340367c)
+- Goal / question: can packed weights be saved and loaded without the fp32 source, and what does that cost on disk?
+- Change (one thing): added `vla_cu/bundle.py` (PackedMatrix, Bundle, pack_matrix, save_bundle, load_bundle) and `bench/bundle_bench.py` (task `bundle`).
+- Prediction (agent's, labelled): a per-block int4 bundle near 4.8 MB, a bit-exact round trip, and a load under 50 ms.
+- Command: `python -m vla_cu bundle`
+- GPU / environment: RTX 5060 Laptop, torch 2.8.0+cu129, files in `bench/results`, best of 5 wall-clock loads.
+- Result (measured): four blocks at int4 attention and int4 down: 23.71 MB, 5.81x smaller than fp32 and 2.90x than fp16, save 31.87 ms, load 5.68 ms. Four blocks at int8: 34.54 MB, 3.99x and 1.99x, save 26.24 ms, load 7.90 ms. Both archives round trip codes and scales bit exactly, and a GEMV from the loaded up matrix is bit exact against the original. Load validates the version, bit width, group size and every shape.
+- Explanation / hypothesis: 23.71 MB is 5.93 MB per block against a 4.84 MB estimate, because the MLP up projection stays int8 in both mixes. The prediction was per block and the table is four blocks, so the arithmetic agrees once the up projection is counted.
+- Verdict: worked.
+- Follow-ups: load straight into a device buffer if load time ever matters. A real checkpoint conversion is the next user of this format.
