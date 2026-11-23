@@ -25,10 +25,10 @@
 - [ ] Naive matmul, then coalesced, then shared-memory tiled
 
 ## Toward the project
-- [ ] Pack 4-bit weights with per-group scales plus a PyTorch reference dequantize
+- [x] Pack 4-bit weights with per-group scales plus a PyTorch reference dequantize - done 2026-11-22, `vla_cu/quant.py`, EXP-013
 - [x] int8 path: one scale per output channel, one value per byte, no bit surgery - done 2026-11-22, `kernels/triton/int8_gemv.py`, EXP-010: 92.4% of peak at 8192 x 16384
-- [ ] One benchmark table across the ladder: fp32, bf16, int8, int4 on identical shapes
-- [ ] Fused dequantize + GEMV (batch 1), Triton first, then CUDA C++
+- [x] One benchmark table across the ladder: fp32, bf16, int8, int4 on identical shapes - done 2026-11-22, `python -m vla_cu matrix`, EXP-013
+- [x] Fused dequantize + GEMV (batch 1) in Triton - done 2026-11-22, `kernels/triton/int4_gemv.py`, EXP-013. The CUDA C++ port is still open
 - [ ] Extract real layer shapes from SmolVLA for benchmarks
 - [ ] Compare against bitsandbytes and torchao on the same shapes
 - [ ] Roofline plot: achieved GB/s vs peak, per kernel version
@@ -45,7 +45,7 @@ on purpose, not forgotten.
 - [ ] GitHub Actions for lint and CPU-only tests (no GPU runner; state this in the README)
 - [x] Launch-overhead experiment - done 2026-11-22, EXP-009: 16.71 us from Python, 0.63 us per graph node
 - [x] CUDA graph capture of a two-kernel GEMV chain - done 2026-11-22, EXP-011: 0.031 ms plain against 0.012 ms graphed, exact. A whole layer stack is still open
-- [ ] BLOCK_K sweep for the int8 GEMV, and split-K for layers with few output rows (DEC-019)
+- [x] BLOCK_K sweep and split-K for the int8 GEMV - done 2026-11-22, EXP-012: 256 to 1024 within 0.2 percent, split-K 6.53x below 32 rows and a loss above 256. Hoisting the int4 group scale out of the inner loop is still open
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).
 

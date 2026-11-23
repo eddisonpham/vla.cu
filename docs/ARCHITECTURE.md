@@ -92,8 +92,8 @@ kernels, so they are used as references and as performance baselines.
 | 2 | int8 GEMV | one program per row, reduction, per-channel scale | `kernels/triton/int8_gemv.py` | done, 92.4% of peak at 8192 x 16384 |
 | 3 | reduction | shared memory, warp shuffles | undecided | backlog |
 | 4 | naive matmul | tiling by block | undecided | backlog |
-| 5 | packed 4-bit weights | group scales, unpacking | undecided | backlog |
-| 6 | fused dequant GEMV | read packed bytes once, unpack in registers | undecided | backlog |
+| 5 | packed 4-bit weights | group scales, unpacking | `vla_cu/quant.py` | done, layout and reference dequantize |
+| 6 | fused dequant GEMV | read packed bytes once, unpack in registers | `kernels/triton/int4_gemv.py` | done, 0.263 ms at 8192 x 16384 |
 | 7 | CUDA C++ port | explicit shared memory, vectorized loads | `csrc/` | backlog, toolkit ready |
 
 ## 7. Measurement protocol

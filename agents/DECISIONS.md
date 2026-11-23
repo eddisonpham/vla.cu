@@ -149,3 +149,11 @@
 - Consequences: the grid is N, so a layer with fewer rows than SMs underuses the GPU, a known limit to revisit with real SmolVLA shapes. Every program re-reads x, which is free only while K floats stay in cache.
 - Revisit if: a target layer has N below about 64, or K grows until x stops fitting in L2.
 - Status: active
+
+## DEC-020: The 4-bit format is low nibble even, zero point 8, one scale per 64 weights  (2026-11-22)
+- Context: the packing had to be pinned once, in the form the kernel reads, before any kernel could be written against it.
+- Options considered: (a) low nibble for element 2i with symmetric (q - 8) * scale and scale = amax / 7; (b) high nibble first; (c) unsigned codes with a separate zero point per group; (d) a codebook format.
+- Chosen and why: (a). Symmetric codes need no zero-point tensor, amax / 7 keeps every weight inside [-8, 7] with no clipping, and one scale per 64 weights makes the scale table 1/16 of the weight count. (d) is out of scope by DEC-016.
+- Consequences: K must divide by 64, which 960 and 2560 do, both nibbles of a byte always share one scale while the group is even, and an all-zero group stores scale 1 with codes 8 so it dequantizes to exactly zero. The kernel gathers the scale per byte; that gather is the next thing to hoist (EXP-013 shows it costs bandwidth).
+- Revisit if: a real layer has K not divisible by 64, or accuracy needs groups of 32 or 16 with a larger scale table.
+- Status: active

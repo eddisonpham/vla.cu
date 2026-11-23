@@ -173,3 +173,54 @@
 - Caveat: the graphed 1M row reads 2,160 GB/s, above DRAM peak, because the buffers are L2 resident. That row is a cache measurement and is not a result.
 - Verdict: graphs pay for many small kernels and buy nothing for few large ones. Capture was exact, `torch.equal` against the plain chain output.
 - Follow-ups: graph a layer stack once SmolVLA shapes are known; keep graphs out of the test suite (DEC-018).
+
+## EXP-012: BLOCK_K sweep and split-K for the int8 GEMV  (2026-11-22)
+- Goal / question: which block size streams weights fastest, and which shapes are too narrow for one program per row?
+- Change (one thing): K became a runtime argument so one binary serves every K; `block_k` and `split` became wrapper parameters; added `int8_gemv_split_kernel` (interleaved parts, atomic add) and `bench/int8_gemv_tune.py` with task `tune`.
+- Prediction: none recorded.
+- Command: `python -m vla_cu tune`.
+- Result, block size sweep at 8192 x 16384, 134.3 MB moved, split 1 (measured):
+
+| BLOCK_K | ms | GB/s | % of 384 |
+|---|---|---|---|
+| 128 | 0.460 | 292.4 | 76.1 |
+| 256 | 0.400 | 335.7 | 87.4 |
+| 512 | 0.400 | 336.2 | 87.6 |
+| 1024 | 0.399 | 336.7 | 87.7 |
+| 2048 | 0.415 | 323.4 | 84.2 |
+| 4096 | 0.416 | 323.1 | 84.1 |
+
+- Result, split-K with a constant 134 MB of weights per shape (measured):
+
+| N x K | split 1 | split 2 | split 4 | split 8 | programs at 8 |
+|---|---|---|---|---|---|
+| 16 x 8388608 | 3.430 ms | 1.712 | 0.881 | 0.525 | 128 |
+| 64 x 2097152 | 0.921 | 0.521 | 0.419 | 0.405 | 512 |
+| 256 x 524288 | 0.380 | 0.392 | 0.411 | 0.388 | 2048 |
+| 1024 x 131072 | 0.422 | 0.386 | 0.387 | 0.404 | 8192 |
+| 4096 x 32768 | 0.380 | 0.385 | 0.410 | 0.417 | 32768 |
+
+- Explanation / hypothesis: split-K fixes latency, not bandwidth. With 16 rows there are 16 programs on 26 SMs, so 10 SMs idle and each program streams an 8 MB row alone; eight parts per row gives 128 programs and 6.53x. From 256 rows upward the grid already fills the GPU, so splitting only adds atomic traffic plus a zero fill, which is neutral at 256 and a few percent slower at 4096. The rule of thumb this gives: split when N is below roughly twice the SM count.
+- Cost: atomic order is non-deterministic, so results differ in the last bits, up to 5.7e-3 relative at 4096 x 32768. Tests use tolerances for that reason, and `compute-sanitizer --tool racecheck` reports 0 hazards.
+- Block size: 256 to 1024 are within 0.2 percent of each other, 128 loses 13 percent to too few lanes in flight, and 2048 to 4096 lose 4 percent to occupancy. 1024 stays the default, now with evidence.
+- Follow-ups: split ratios between 4 and 8 for the 16-row case; a two-stage reduction instead of atomics if determinism is ever needed.
+
+## EXP-013: 4-bit packing, fused dequant GEMV, and the ladder matrix  (2026-11-22)
+- Goal / question: does halving weight bytes again pay off, and what does the whole ladder look like on identical weights at batch 1?
+- Change (one thing): `vla_cu/quant.py` (pack and reference dequantize), `kernels/triton/int4_gemv.py` (tiled, ROWS rows per program), `tests/test_quant.py`, `tests/test_int4_gemv.py`, `bench/matrix.py` with task `matrix`.
+- Prediction: none recorded.
+- Correctness: 49 tests pass in 7.03 s, with the int4 GEMV compared against float64 dequantize-then-matmul at 5 shapes including K=320, packing error bounded by half a quantization step, and 4 rejection tests. `compute-sanitizer` on the tiled int4 kernel: 0 errors. On the split int8 kernel: 0 errors, 0 race hazards.
+- Result, ladder at 8192 x 16384, batch 1 (measured):
+
+| format | MB | ms | GB/s | % of 384 | x fp32 | rel L2 err |
+|---|---|---|---|---|---|---|
+| fp32 | 537.0 | 1.614 | 332.7 | 86.6 | 1.00 | 0 |
+| bf16 | 268.5 | 0.803 | 334.5 | 87.1 | 2.01 | 2.88e-3 |
+| int8 | 134.3 | 0.375 | 358.0 | 93.2 | 4.30 | 9.37e-3 |
+| int4 | 75.6 | 0.263 | 287.8 | 75.0 | 6.15 | 1.07e-1 |
+
+- Result, int4 row tile sweep at the same shape (measured): rows 1 = 0.401 ms, 2 = 0.290, 4 = 0.236, 8 = 0.231. Tiling rows per program is worth 1.7x because every program otherwise re-reads the whole 64 KB activation vector, and there are 8192 of them.
+- Explanation / hypothesis: int4 moves 56 percent of the bytes int8 does (75.6 against 134.3 MB) but is only 1.43x faster, so its effective streaming rate is 287.8 against 358.0 GB/s. The unpack costs real time: two nibble extractions, one conversion and one scale gather per byte. The precision bill is 1.07e-1 relative L2 against 9.37e-3 for int8, which is what buying half the bytes with 16 levels costs.
+- Small shapes: at 1024 x 1024 every format lands between 0.016 and 0.027 ms, dispatch dominated, and the ladder says nothing there. At 4096 x 2048 the fp32 row reads 1265.8 GB/s because 33.6 MB fits L2, so only the 8192 x 16384 block is a DRAM result.
+- Caveats: the matrix first reported nonsense errors because elementwise relative error explodes near zero outputs; it now reports relative L2 norm, which is the right measure for a quantization comparison but still not a quality measure. Cosine similarity against fp32 is the gate for a real model.
+- Follow-ups: hoist the group scale out of the inner loop (64 weights share one value); try 8 rows with a shared-memory x tile; compare against torchao and bitsandbytes on the same shapes.

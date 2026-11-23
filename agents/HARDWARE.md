@@ -44,6 +44,9 @@ peak", not as an expectation for any single run.
 | 2026-11-22 | int8 GEMV fused, 8192 x 16384, 134 MB weights, DRAM bound | 354.7 GB/s, 92.4 percent of peak, 0.379 ms; naive path 7.046 ms | `python -m vla_cu gemv` | EXP-010 |
 | 2026-11-22 | int8 GEMV fused, 4096 x 8192, weights equal L2 | 806.2 GB/s, which is L2 bandwidth and not a DRAM result | `python -m vla_cu gemv` | EXP-010 |
 | 2026-11-22 | two int8 GEMV kernels chained, 1024 -> 1024 -> 512 | plain 0.031 ms, graph replay 0.012 ms, bit exact | `python -m vla_cu graph` | EXP-011 |
+| 2026-11-22 | int8 GEMV block size sweep, 8192 x 16384 | 256 to 1024 within 0.2 percent, 336.7 GB/s best, 128 loses 13 percent | `python -m vla_cu tune` | EXP-012 |
+| 2026-11-22 | int8 GEMV split-K, 16 x 8388608, 134 MB | 3.430 ms at split 1, 0.525 ms at split 8, 6.53x; loss above 256 rows | `python -m vla_cu tune` | EXP-012 |
+| 2026-11-22 | ladder at 8192 x 16384, batch 1 | fp32 1.614 ms, bf16 0.803, int8 0.375, int4 0.263, all with relative L2 error | `python -m vla_cu matrix` | EXP-013 |
 
 ## Environment change log
 - 2026-11-18: file created, nothing detected yet.

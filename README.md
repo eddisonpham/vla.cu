@@ -44,23 +44,26 @@ Details and sources: `agents/HARDWARE.md`.
 
 ## Status
 
-The environment is real and the first project kernel exists: a fused int8 GEMV with
-per-channel scales, at 92.4 percent of peak memory bandwidth on a shape that does
-not fit in cache. The 4-bit path, the actual target, is not started.
+The ladder is measured end to end. On 8192 x 16384 weights, batch 1, the fused 4-bit
+dequant GEMV runs in 0.263 ms against 1.614 ms for the fp32 path, a 6.15x speedup at
+an L2 relative error of 1.07e-1. The int8 rung is at 93.2 percent of DRAM peak.
 
 | Piece | State |
 |---|---|
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph` |
+| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix` |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
 | Launch overhead, graph against Python | 16.71 us per launch from Python, 0.63 us per graph node |
 | int8 GEMV with per-channel scales | done, 354.7 GB/s, 92.4 percent of 384, at 8192 x 16384 |
+| Split-K and block size sweep | done, split-K 6.53x at 16 rows, neutral above 256 rows |
+| 4-bit packing and reference dequantize | done, low nibble first, one scale per 64 weights |
+| Fused 4-bit dequant GEMV | done, 0.263 ms at 8192 x 16384, 6.15x the fp32 path |
+| Full ladder matrix, fp32 to int4 | done, one table on identical weights and activations |
 | Two GEMV kernels chained in a CUDA graph | done, 0.031 ms plain against 0.012 ms graphed, bit exact |
-| 4-bit packing, fused dequant GEMV | not started |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -88,6 +91,8 @@ python -m vla_cu bench
 python -m vla_cu launch
 python -m vla_cu gemv
 python -m vla_cu graph
+python -m vla_cu tune
+python -m vla_cu matrix
 ```
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both
