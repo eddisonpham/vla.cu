@@ -298,3 +298,11 @@
 - Chosen and why: (c). Seven microseconds buys two and a half digits of cosine. int4 stays the byte floor and the interesting kernel, int8 becomes the quality path.
 - Revisit if: a stacked block shows int4 attention holding the 0.98 gate on real weights, or the 7 us matters at model level.
 - Status: active
+
+## DEC-039: the action block runs int8 attention and int8 down  (2026-11-23)
+- Context: EXP-036. Over four blocks, int4 attention with int4 down reads 0.90671, int8 attention with int4 down 0.97606, int8 everywhere 0.99951. Graphed stack times are 0.100, 0.123 and 0.140 ms.
+- Options considered: (a) int4 everywhere, the byte floor; (b) int8 attention with int4 down, the middle rung; (c) int8 everywhere, the quality path.
+- Chosen and why: (c) as the default and (b) as the middle rung, because the 0.98 gate is the constraint and only (c) clears it through four blocks. (a) stays for its bytes and for the kernel comparison.
+- Cost accepted: 34.5 MB per four blocks against 23.7 for int4, and 1.4x the time of int4. It is still 3.94x faster than fp32.
+- Revisit if: a real checkpoint shows int4 down holding the gate, or the gate moves.
+- Status: active

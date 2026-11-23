@@ -584,3 +584,26 @@
 - Explanation / hypothesis: at 2 MB the block is launch bound, which is why grouping halves it. int8 lands under the byte ratio because its outer loop does less per byte and the wider tile keeps more loads in flight.
 - Verdict: worked, both predictions held.
 - Follow-ups: int8 attention is the better default when 7 us is affordable. Test what it does to a stacked block in cycle 3.
+
+## EXP-036: the accuracy limit is the MLP down projection, not attention  (2026-11-23, commit 495df03)
+- Goal / question: which projection sets the stacked-block cosine, and what does int8 everywhere cost in time?
+- Change (one thing): added `vla_cu/blocks.py` and `bench/block.py` (task `block`), three precision mixes over four blocks on one seeded weight set and one seeded activation.
+- Prediction (agent's, labelled): int8 everywhere holds 0.99 at depth 4; both int4-down mixes fall under the 0.98 gate.
+- Command: `python -m vla_cu block`
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, torch 2.8.0+cu129, Triton 3.9.0.
+- Result (measured): cosine after 1, 2, 3, 4 blocks. int4 attention with int4 down: 0.98219, 0.96186, 0.94526, 0.90671. int8 attention with int4 down: 0.99401, 0.98824, 0.98336, 0.97606. int8 everywhere: 0.99985, 0.99975, 0.99965, 0.99951. Bytes and graphed time for four blocks: 23.7 MB and 0.100 ms, 30.2 MB and 0.123 ms, 34.5 MB and 0.140 ms. One block graphed is 0.025 to 0.031 ms. fp32 is 0.551 ms for the stack, so int8 everywhere is 3.94x faster at 64.4 percent of peak. Every graph reproduces its eager chain bit for bit.
+- Explanation / hypothesis: int8 attention lifts the first block from 0.982 to 0.994, so attention is not the limit once it has a byte per weight. The int4 down projection then loses 0.018 over four blocks, while int8 down loses 0.0003. The extra byte on down costs 0.017 ms for four blocks, which is 13 percent of the stack.
+- Verdict: worked, both predictions held.
+- Follow-ups: int8 everywhere is the quality default (DEC-039). The untested rung is int4 attention with int8 down, which would separate the two effects more cleanly.
+
+## EXP-037: a seeded fuzz gate over every kernel  (2026-11-23, commit 495df03)
+- Goal / question: does a randomized sweep find a shape the fixed tests miss, and can it run as one command?
+- Change (one thing): added `bench/fuzz.py` (task `fuzz`), 32 seeded cases per kernel against a float64 reference.
+- Prediction (agent's, labelled): 160 cases, zero mismatches.
+- Command: `python -m vla_cu fuzz`
+- GPU / environment: RTX 5060 Laptop, seed 0, torch 2.8.0+cu129.
+- Result (measured): 160 cases, 0 failures. Worst absolute error by kernel: int4 GEMV 5.058e-07, int8 GEMV 2.883e-05, int4 GEMM 1.573e-03, int4 grouped 0, int8 grouped 1.144e-05.
+- Surprise: int8 grouped is not bit identical to per-matrix launches, 1.1e-05 absolute and 3.1e-07 relative, while int4 grouped is exactly 0. The extra segment and x_base loads change register allocation, so the compiler reassociates the last adds. That is a float fact, not a wrong result, and the gate is 1e-4.
+- Explanation / hypothesis: the fixed tests cover the shapes a person chose; the sweep covers K values that break block sizes (83, 129, 249, 3401) and row counts that break tiles.
+- Verdict: worked.
+- Follow-ups: run the task in CI once a GPU runner exists, and add the block objects to it.
