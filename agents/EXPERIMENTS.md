@@ -618,3 +618,14 @@
 - Explanation / hypothesis: 23.71 MB is 5.93 MB per block against a 4.84 MB estimate, because the MLP up projection stays int8 in both mixes. The prediction was per block and the table is four blocks, so the arithmetic agrees once the up projection is counted.
 - Verdict: worked.
 - Follow-ups: load straight into a device buffer if load time ever matters. A real checkpoint conversion is the next user of this format.
+
+## EXP-039: packaging and a style gate  (2026-11-23, commit 9445096)
+- Goal / question: can the repo install as a package and check its own style invariants without a GPU?
+- Change (one thing): added `pyproject.toml`, `.github/workflows/ci.yml` and `scripts/style_check.py` (task `style`); removed 47 comment lines from the two CUDA sources and moved their content to `docs/ARCHITECTURE.md` section 9.
+- Prediction (agent's, labelled): the gate reports the CUDA headers and nothing else, the editable install succeeds, and no Python file carries a comment.
+- Command: `python -m vla_cu style`, `python -m pytest -q`, `python -m compileall -q vla_cu kernels bench scripts tests`, `pip install -e . --no-deps`, `python -m vla_cu --help` from outside the repo, then the vcvars suite.
+- GPU / environment: RTX 5060 Laptop, torch 2.8.0+cu129, MSVC 14.44, Python 3.13.
+- Result (measured): 47 violations before the strip, 0 after. 96 passed and 23 skipped in a plain shell, 119 passed inside vcvars with both extensions rebuilt from the edited sources. `compileall` and the editable install exit 0, and `--help` from `/tmp` prints every task. The gate found no Python comments, so the CUDA headers were the only offenders.
+- Explanation / hypothesis: the CUDA files predate the no-comments invariant, and their mapping and access notes are documentation, so `docs/` is where they belong. The CI job checks style and byte-compiles only, because a GPU runner does not exist here.
+- Verdict: worked.
+- Follow-ups: add the GPU suites to CI when a runner exists; keep the gate at zero so a new comment fails the push.

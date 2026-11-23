@@ -314,3 +314,11 @@
 - Consequence: load returns CPU tensors on purpose, so a caller moves them to a device before a launch. The bundle is 5.93 MB per int4 block against 34.4 MB of fp32 weights.
 - Revisit if: untrusted bundles are ever accepted, or a host tool needs random access without loading the whole file.
 - Status: active
+
+## DEC-041: the style invariant is a script, and CI checks it without a GPU  (2026-11-23)
+- Context: EXP-039. Two rules in CLAUDE.md were enforced by memory, and the CUDA sources had drifted to 47 comment lines across two files.
+- Options considered: (a) keep the rules in prose; (b) a script that scans git-tracked files, wired as `style` and in CI; (c) an off-the-shelf linter.
+- Chosen and why: (b). It needs no dependency, it is the same command locally and in CI, and it states the no-comments rule that no general linter carries. (c) would add a tool for one rule.
+- Cost accepted: CI cannot run the GPU tests, so the workflow checks style and byte-compiles only. GPU correctness stays a manual gate on this machine.
+- Revisit if: a GPU runner exists, or a linter is adopted for type and import checks.
+- Status: active
