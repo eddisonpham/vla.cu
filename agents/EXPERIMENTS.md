@@ -562,3 +562,14 @@
 - Explanation / hypothesis: the kernels were right; the failures were silent wrong shapes (`hadamard(3)` returned a 4 x 4 matrix), a wrapper that trusted every grouped input, and a gate that checked `nvcc` only. `torch.utils.cpp_extension.load` raises `subprocess.CalledProcessError` when `cl` is missing, not `RuntimeError`, which is why the friendly build message never appeared.
 - Verdict: worked. No kernel arithmetic changed; the largest reporting change is 0.3 percent of the bf16 byte count.
 - Follow-ups: two input gaps stay open on purpose. `int4_gemm_into` accepts a non-power-of-two `block_n` and lets Triton raise, and the grouped wrapper cannot prove that every segment length is a multiple of the row tile without a device sync.
+
+## EXP-034: one validator for every kernel entry point  (2026-11-23, commit 0b88c1b)
+- Goal / question: do the six wrappers reject the same bad inputs, and can one module describe a valid call once?
+- Change (one thing): added `vla_cu/validate.py`; every Triton and CUDA wrapper now calls it; added the checks missing after EXP-033.
+- Prediction (agent's, labelled): identical results on valid inputs, every wrapper rejects a wrong device, a strided activation, a wrong dtype and a ragged group before launching, and the wrappers lose about 60 lines.
+- Command: `.venv/Scripts/python.exe -m pytest -q`, then the same suite with the vcvars64 environment built by `/tmp/vc_test.py`.
+- GPU / environment: RTX 5060 Laptop, torch 2.8.0+cu129, Triton 3.9.0, MSVC 14.44, CUDA 12.9.
+- Result (measured): 80 passed, 23 skipped in a plain shell; 103 passed inside vcvars. Before the change: 69 and 92. Four real gaps closed: `block_n` power of two, int4 GEMM scale dtype and device, CUDA fp32-scale and alignment checks. The six wrappers went from 842 to 780 lines, the new module is 144, so the net is +82 lines.
+- Explanation / hypothesis: the duplicated checks were only 62 lines, so a shared module cannot pay for itself in size. Its value is one description of each format and one exception type. The prediction on net size was wrong.
+- Verdict: worked on consistency, failed on size.
+- Follow-ups: a new kernel must be added to `tests/test_validation.py` in the same commit that adds it. The native suite needs the vcvars environment, which this shell cannot build directly, so `/tmp/vc_test.py` is the working form.

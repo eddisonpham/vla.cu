@@ -283,3 +283,11 @@
 - Consequence: no silent out-of-bounds read from a grouped launch, and `pytest -q` is green in the default shell with the cuda tests skipped rather than failed. Kernel arithmetic is untouched.
 - Revisit if: the grouped kernel becomes the default path and its per-call Python checks show up in a profile.
 - Status: active
+
+## DEC-037: one shared validator describes each format once  (2026-11-23)
+- Context: EXP-034. Six wrappers repeated the same shape, dtype, device and contiguity checks, and four checks were missing after EXP-033.
+- Options considered: (a) leave the checks per wrapper; (b) one module of format checks called by every wrapper; (c) validate in C++ only.
+- Chosen and why: (b). It gives one description of a valid call, it keeps every rejection at the Python boundary as ValueError, and it makes the Triton and CUDA implementations of a format agree. (c) leaves the Triton path uncovered.
+- Cost accepted: net +82 lines, because the module documents each format once. The six wrappers are 62 lines shorter. The win is consistency and four new checks, not size.
+- Revisit if: a wrapper needs a check that does not belong to the format, such as a block size or an alignment. Those stay in that wrapper.
+- Status: active
