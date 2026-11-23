@@ -106,3 +106,31 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local reproduction on 2026-11-23 (EXP-016); torch 2.8.0 source path `cpp_extension.py:2248`.
 - Confidence: high for this install and version.
 - Relevance to vla.cu: README documents the vcvars requirement, and `vla_cu/cuda_int4.py` turns the bare ninja error into a message that names the cause.
+
+## SM_120 execution limits and cache geometry  (2026-11-23)
+- Question: what limits a memory-bound kernel on this exact architecture, and what denominators belong in an occupancy or latency argument?
+- Finding: compute capability 12.0 allows 48 concurrent warps per SM, 1536 threads, 32 blocks per SM, 100 KB of shared memory per SM and 99 KB per block, with 64K 32-bit registers. A separate microarchitecture study of GB202 (same capability, larger die) measures 89 KB of L1 data cache by default, 128 B lines, 44 cycles for an L1 hit, 354 cycles for L2, about 362 cycles for DRAM, and HFMA2 at 0.5 instructions per cycle, so fp16x2 FMA is not faster than two fp32 FMA.
+- Source: https://docs.nvidia.com/cuda/blackwell-tuning-guide (section 1.4.1 Occupancy, accessed 2026-11-23); https://zartbot.github.io/micro_arch/nvidia/sm_120/01_architecture_overview.html and .../02_memory_subsystem.html (accessed 2026-11-23).
+- Confidence: high for the occupancy table, it is NVIDIA's own document; medium for the cycle counts, which were measured on a GB202 with 96 MB of L2, not on this GB206-class part with 33.6 MB.
+- Relevance to vla.cu: gives the Little's law budget in `OPTIMIZATIONS.md` section 2 (about 58 KB in flight, 2.2 KB per SM) and rules out fp16x2 arithmetic as a dequant speed trick.
+
+## Prior art: how Marlin dequantizes int4 to fp16 in one instruction  (2026-11-23)
+- Question: is there a cheaper unpack than shift, mask, convert and multiply per weight?
+- Finding: Marlin turns a nibble into an fp16 value with one lop3 (mask the low four bits, OR in an fp16 exponent) and then subtracts a constant with `__hsub2`, so two nibbles in an int32 become two half values in one instruction, with the zero point folded into the subtrahend. Weights are also repacked offline into the order the tensor core fragments want, and global loads use cp.async into a circular shared memory queue. Marlin's README states the approach needs roughly 25 to 50 tensor-core MACs per 4-bit weight to reach its ideal 4x, which is why it targets batch 16 to 32.
+- Source: https://arxiv.org/html/2408.11743 (Marlin paper, dequantization section, accessed 2026-11-23); https://github.com/IST-DASLab/marlin (README, techniques); https://github.com/vllm-project/vllm/blob/main/csrc/quantization/marlin/dequant.h (the lop3 template).
+- Confidence: high for the technique, medium for exact instruction counts on sm_120, untested here.
+- Relevance to vla.cu: candidate H10. At batch 1 it saves instructions in a kernel that is about 4 percent ALU busy, so it is ranked low on purpose. The transferable idea is the repack: choose the layout offline to match the read pattern.
+
+## Triton load and store cache modifiers, and eviction policies  (2026-11-23)
+- Question: can a Triton kernel mark one-shot weight loads as streaming and keep the reused activation vector resident, without dropping to CUDA C++?
+- Finding: `tl.load` accepts `cache_modifier` limited to "", ".ca", ".cg", ".cv", so there is no ".cs" on loads, plus `eviction_policy` of "", "evict_first" or "evict_last". `tl.store` accepts ".wb", ".cg", ".cs" and ".wt". Triton's own fp4 matmul example loads weights `evict_first` and activations `evict_last`, and xformers pairs them the same way. TMA loads accept neither, because `cp.async.bulk.tensor` moves data from L2 to shared memory and bypasses L1.
+- Source: https://triton-lang.org/main/python-api/generated/triton.language.load.html and .../store.html (accessed 2026-11-23); https://github.com/facebookresearch/xformers/blob/main/xformers/ops/_triton/rmsnorm_kernels.py; https://github.com/FlashSampling/FlashSampling/blob/main/findings/tma-cache-modifiers.md
+- Confidence: high for the API surface, unverified for `triton-windows` 3.9 on sm_120, which is exactly what EXP-020 would test.
+- Relevance to vla.cu: H2 is a one keyword experiment, and it is mutually exclusive with a TMA-based variant.
+
+## SmolVLA architecture facts that change the kernel plan  (2026-11-23)
+- Question: what does the real model execute, and is batch 1 the right assumption everywhere?
+- Finding: 450M parameters total with about 100M in the action expert, only the first 16 VLM layers run, the expert width is 0.75 times the VLM width, the model predicts chunks of 50 actions, and inference fixes flow matching at 10 steps. The expert is a transformer over the action chunk with interleaved cross attention to the VLM prefix and causal self attention, so its linear layers see 50 tokens, not 1. LeRobot's `SmolVLAConfig` names `chunk_size: 50`, `num_vlm_layers: 16`, `expert_width_multiplier: 0.75` and `self_attn_every_n_layers: 2`.
+- Source: https://arxiv.org/html/2506.01844 (SmolVLA paper, implementation details); https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/smolvla/configuration_smolvla.py; https://huggingface.co/blog/smolvla (accessed 2026-11-23).
+- Confidence: high for the four config values and the 10 steps; the widths 960 and 2560 remain the repo's assumption, not read from a `config.json` (DEC-024).
+- Relevance to vla.cu: rewrites the model-level budget. Derived, 0.586 ms floor for 450M parameters at 4-bit, of which 1.30 ms comes from the ten sequential expert passes, so the expert (M = 50) is the part worth a tensor-core kernel and the VLM prefix is the only true batch 1 part. It also kills the idea of fusing the denoising loop, because the steps are sequential.

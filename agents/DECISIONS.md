@@ -181,3 +181,11 @@
 - Consequences: two implementations to keep correct, and the CUDA one carries an unresolved sanitizer result (EXP-016) until the tooling problem is understood.
 - Revisit if: profiling shows the Triton kernel leaving performance on the table, or the sanitizer issue is fixed.
 - Status: active
+
+## DEC-024: SmolVLA widths stay assumptions until a checkpoint config is read  (2026-11-23)
+- Context: `bench/layer.py` treats hidden 960 and intermediate 2560 as "the SmolVLA MLP". The paper and the LeRobot config confirm the parameter count, the 16 VLM layers, the 0.75 expert ratio, the chunk of 50 and the 10 sampler steps, but no `config.json` has been read in this repo.
+- Options considered: (a) keep assuming and say so; (b) download the base checkpoint's config and index only, no weights; (c) wait for a full checkpoint before benchmarking a block.
+- Chosen and why: (a) for now, with the assumption stated in the docstring, `agents/RESEARCH.md` and this entry. The widths only set a benchmark's constants, while the verified ratio facts already carry the model-level arithmetic in `OPTIMIZATIONS.md`. (b) is small and is queued as a follow-up.
+- Consequence: every layer-level number in EXP-015 and every derived model number inherits 960 and 2560. Expert hidden 720 and intermediate 1920 are derived from the verified 0.75 ratio, not read from a file.
+- Revisit if: `lerobot/smolvla_base` config and index are downloaded, or the benchmark moves onto a real checkpoint.
+- Status: active

@@ -10,6 +10,19 @@
 - [x] Chunk 2: first Triton kernel, vector add - done 2026-11-22, `kernels/triton/vector_add.py`, EXP-007
 - [x] Chunk 3: correctness test and bandwidth benchmark - done 2026-11-22, EXP-008: 86.2% of peak at 16M elements
 
+## Optimization queue (ranked arguments in `agents/OPTIMIZATIONS.md`, written 2026-11-23)
+- [ ] EXP-017 H1: measure the attainable streaming ceiling on this part, plus run-to-run spread. Decides whether any micro-optimization below can claim anything. Task `stream`.
+- [ ] EXP-018 H6: CUDA-graph the MLP block, target 0.085 to about 0.055 ms.
+- [ ] EXP-019 H5: `ncu` both int4 kernels and `nsys` the layer. Explains the 328 against 358 GB/s gap, or proves it is noise.
+- [ ] EXP-020 H2: streaming cache hints, weights `evict_first`, x `evict_last`.
+- [ ] EXP-021 H3: fp16 group scales, 5.6 percent of bytes for 5e-4 of accuracy.
+- [ ] EXP-022 H4: drop the CUDA tail guard and unroll 4 steps so four loads sit in flight.
+- [ ] EXP-023 H9: is the action expert M = 50, not M = 1? Read `modeling_smolvla.py` first. If yes, tensor cores become legal for the expert and the whole model plan changes.
+- [ ] EXP-024 H8: grouped GEMV, q, k, v in one launch off one x read.
+- [ ] EXP-025 H7: one persistent cooperative launch per MLP block, hidden never leaves L2.
+- [ ] EXP-026 H11: Hadamard rotation fused into the forward, for cosine at group 64.
+- [ ] C14, decided against for now: tensor-core int4 at M = 1 wastes 15 of 16 rows and ALU use is 4 percent. Revisit only under EXP-023.
+
 ## Environment blockers (fix before the kernels that need them)
 - [x] ~~Get Triton running on Windows~~ DONE 2026-11-18: `triton-windows` 3.9.0 works on sm_120, bit-exact (EXP-002, DEC-008). WSL2 kept only as a fallback.
 - [x] ~~Install the CUDA toolkit~~ DONE 2026-11-18: CUDA 12.9.2 in place, `nvcc` V12.9.86 and `compute-sanitizer` present (EXP-003, DEC-013).
@@ -49,9 +62,9 @@ on purpose, not forgotten.
 - [x] Hoist the int4 group scale out of the inner loop - done 2026-11-23, EXP-014: 0.263 to 0.230 ms, 75.0 to 85.5 percent of peak. The tile plateaus at 4 rows
 - [x] Wrap the kernels as torch custom ops and run one layer end to end - done 2026-11-23, EXP-015, DEC-022
 - [x] Port the int4 GEMV to CUDA C++ and compare - done 2026-11-23, EXP-016, DEC-023
-- [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015)
+- [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015). Queued as EXP-018.
 - [ ] Resolve the compute-sanitizer failure on the CUDA extension, or run `ncu` on both kernels instead
-- [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile
+- [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
 - [x] `python -m vla_cu cuda-check`: which toolkit and host compiler a build would use, plus a verdict (2026-11-18, EXP-005, DEC-015).

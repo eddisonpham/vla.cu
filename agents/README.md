@@ -14,6 +14,7 @@ This folder is the agent's long-term memory for vla.cu. Chat context is lost bet
 | `DECISIONS.md` | Why we chose X over Y (design choices, tool choices, scope cuts) | **Append-only**; supersede old decisions with a new entry |
 | `HARDWARE.md` | The detected GPU, toolchain versions, peak bandwidth with source, measured baselines | Updated when the environment changes; keep a dated change log at the bottom |
 | `BACKLOG.md` | Ideas, suggested next steps, open questions, things deferred | Add and tick off; move finished or dropped items to the "Done / dropped" section with a reason |
+| `OPTIMIZATIONS.md` | Where the headroom is: measured ledger, derived budgets, ranked candidates, and one falsifiable experiment per hypothesis | Rewrite and re-rank as results land; never mark a hypothesis tested until its experiment ran |
 
 ## Session start protocol (always do this first)
 
