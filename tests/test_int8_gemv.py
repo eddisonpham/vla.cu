@@ -58,6 +58,43 @@ def test_rejects_mismatched_shapes() -> None:
         int8_gemv(w, scales, x)
 
 
+@pytest.mark.parametrize("split", (1, 2, 3, 8))
+@pytest.mark.parametrize(("n_out", "n_in"), ((1, 1), (3, 64), (17, 257), (64, 1000)))
+def test_split_matches_reference(n_out: int, n_in: int, split: int) -> None:
+    """Splitting a row across programs changes the summation order, not the answer."""
+    generator = torch.Generator(device="cuda").manual_seed(1)
+    w = torch.randint(-127, 128, (n_out, n_in), device="cuda", dtype=torch.int8, generator=generator)
+    scales = torch.rand(n_out, device="cuda", generator=generator) * 0.02 + 0.001
+    x = torch.randn(n_in, device="cuda", generator=generator)
+
+    out = int8_gemv(w, scales, x, split=split)
+
+    torch.testing.assert_close(out, reference(w, scales, x), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("block_k", (128, 2048))
+def test_block_k_matches_reference(block_k: int) -> None:
+    """The block size changes how the row is chunked, not what the dot product is."""
+    generator = torch.Generator(device="cuda").manual_seed(2)
+    w = torch.randint(-127, 128, (9, 1000), device="cuda", dtype=torch.int8, generator=generator)
+    scales = torch.rand(9, device="cuda", generator=generator) * 0.02 + 0.001
+    x = torch.randn(1000, device="cuda", generator=generator)
+
+    out = int8_gemv(w, scales, x, block_k=block_k)
+
+    torch.testing.assert_close(out, reference(w, scales, x), rtol=1e-4, atol=1e-4)
+
+
+def test_rejects_bad_split() -> None:
+    """A split below one would launch an empty grid and silently return zeros."""
+    w = torch.zeros((4, 8), device="cuda", dtype=torch.int8)
+    scales = torch.zeros(4, device="cuda")
+    x = torch.zeros(8, device="cuda")
+
+    with pytest.raises(ValueError):
+        int8_gemv(w, scales, x, split=0)
+
+
 def test_rejects_non_int8_weights() -> None:
     """fp32 weights would silently pass the launch, so the wrapper must refuse them."""
     w = torch.zeros((4, 8), device="cuda", dtype=torch.float32)
