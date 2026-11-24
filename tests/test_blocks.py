@@ -379,3 +379,25 @@ def test_gqa_token_block_above_the_loop_matches_the_reference(tokens: int) -> No
     exact = gqa_mix(x @ wq.T, x @ wk.T, x @ wv.T, head_dim=8) @ wo.T
     assert out.shape == (tokens, 32)
     assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995
+
+
+def test_a_block_mask_hides_a_prefix_key_row() -> None:
+    """The fused kernel must ignore a key row the mask hides, exactly as the einsum does."""
+    generator = torch.Generator(device="cuda").manual_seed(15)
+    heads, kv_heads, head_dim = 4, 2, 8
+    tokens = 6
+    q = torch.randn((tokens, heads * head_dim), device="cuda", generator=generator)
+    k = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
+    v = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
+    cosine_table, sine_table = rotary_tables(tokens, head_dim)
+    visible = torch.ones((tokens, tokens), dtype=torch.bool, device="cuda")
+    visible[:-1, -1] = False
+    out = torch.empty_like(q)
+
+    gqa_attention_into(
+        q, k, v, cosine_table, sine_table, out, head_dim=head_dim, causal=False, visible=visible
+    )
+
+    exact = gqa_mix(q, k, v, head_dim=head_dim, causal=False, visible=visible)
+    torch.testing.assert_close(out, exact, rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(out, gqa_mix(q, k, v, head_dim=head_dim, causal=False))

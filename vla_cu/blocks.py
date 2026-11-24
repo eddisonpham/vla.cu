@@ -383,12 +383,20 @@ class GqaTokenBlock:
             for token in range(self.tokens):
                 int8_gemv_into(packed, scales, x[token], out[token])
 
-    def into(self, x: Tensor, other: Tensor | None, out: Tensor, other_value: Tensor | None = None) -> None:
+    def into(
+        self,
+        x: Tensor,
+        other: Tensor | None,
+        out: Tensor,
+        other_value: Tensor | None = None,
+        visible: Tensor | None = None,
+    ) -> None:
         """Write the attention output into `out`, reading `x` and the cross streams.
 
         A cross block takes keys from `other` and values from `other_value`, which is
         `other` when the caller has one stream; the real expert reads the VLM key cache
-        and value cache separately.
+        and value cache separately. `visible` is a bool [tokens, keys] mask where a true
+        entry keeps the key row, which the prefix uses for its state block.
         """
         require(x.shape[0] == self.tokens, f"block was built for {self.tokens} tokens, got {x.shape[0]}")
         source = x if other is None else other
@@ -412,9 +420,12 @@ class GqaTokenBlock:
                 self.head_dim,
                 causal,
                 self.rotate_keys,
+                visible,
             )
         else:
-            self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, causal, self.rotate_keys))
+            self.context.copy_(
+                gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, causal, self.rotate_keys, visible)
+            )
         self._project(self.o, self.o_scales, self.context, out)
 
 
@@ -591,21 +602,23 @@ class LayerBlock:
         out: Tensor,
         other: Tensor | None = None,
         other_value: Tensor | None = None,
+        visible: Tensor | None = None,
         *,
         fused: bool = False,
     ) -> None:
         """Write one layer into `out`, reading `x` and the cross streams `other` and `other_value`.
 
-        `fused` replaces the post norm, the gated MLP and the residual with one cooperative
-        launch. It needs a gated block that fits the kernel; a captured chain is faster, so
-        the default is off.
+        `visible` is the attention block mask passed to the attention block. `fused`
+        replaces the post norm, the gated MLP and the residual with one cooperative launch.
+        It needs a gated block that fits the kernel; a captured chain is faster, so the
+        default is off.
         """
         require(x.shape == (self.tokens, self.hidden_width), f"expected x {(self.tokens, self.hidden_width)}, got {tuple(x.shape)}")
         require(out.shape == x.shape, f"expected out {tuple(x.shape)}, got {tuple(out.shape)}")
         fits = isinstance(self.mlp, GatedMlpBlock) and self.mlp.can_tail()
         require(not fused or fits, "the fused tail needs a gated MLP with an int4 down at group 64 and widths that fit")
         rmsnorm_into(x, self.input_norm, self.normed)
-        self.attention.into(self.normed, other, self.attention_out, other_value)
+        self.attention.into(self.normed, other, self.attention_out, other_value, visible)
         if fused:
             self.mlp.tail_into(x, self.attention_out, self.post_norm, self.residual, self.normed, out)
             return

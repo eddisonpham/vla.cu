@@ -28,6 +28,7 @@ def gqa_attention_kernel(
     cos_ptr,
     sin_ptr,
     out_ptr,
+    visible_ptr,
     TK,
     HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
@@ -36,13 +37,16 @@ def gqa_attention_kernel(
     SCALE: tl.constexpr,
     CAUSAL: tl.constexpr,
     ROTATE_KEYS: tl.constexpr,
+    MASKED: tl.constexpr,
 ) -> None:
     """Rotate the group's keys once, then mix every query head in the group.
 
     q: fp32 [TQ, HEADS * HEAD_DIM], k and v: fp32 [TK, KV_HEADS * HEAD_DIM], cos and
-    sin: fp32 [TQ, HEAD_DIM // 2], out: fp32 [TQ, HEADS * HEAD_DIM]. A cross layer passes
-    ROTATE_KEYS false, because its keys arrive already rotated, and CAUSAL false, because
-    it reads the whole prefix whatever its length.
+    sin: fp32 [TQ, HEAD_DIM // 2], out: fp32 [TQ, HEADS * HEAD_DIM], visible: uint8
+    [TQ, TK] where a nonzero entry keeps the key row. A cross layer passes ROTATE_KEYS
+    false, because its keys arrive already rotated, and CAUSAL false, because it reads the
+    whole prefix whatever its length. MASKED false ignores the mask pointer, which a
+    caller still passes as any tensor.
     Mapping: program (token, kv_head) loads the key and value rows of the group once,
     rotates them unless they are cached, then walks the HEADS // KV_HEADS query heads of
     that group, rotating one query row per head, scoring it against the shared key tile,
@@ -59,6 +63,9 @@ def gqa_attention_kernel(
     key_mask = keys < TK
     if CAUSAL:
         key_mask = key_mask & (keys <= token)
+    if MASKED:
+        allowed = tl.load(visible_ptr + token * TK + keys, mask=keys < TK, other=0) > 0
+        key_mask = key_mask & allowed
 
     cos_query = tl.load(cos_ptr + token * half + dims)
     sin_query = tl.load(sin_ptr + token * half + dims)
@@ -106,6 +113,7 @@ def gqa_attention_into(
     head_dim: int = 64,
     causal: bool = True,
     rotate_keys: bool = True,
+    visible: torch.Tensor | None = None,
 ) -> None:
     """Write rope and the attention context of q, k and v into `out` with one launch.
 
@@ -113,8 +121,10 @@ def gqa_attention_into(
     contiguous; cosine and sine are [tokens, head_dim // 2] fp32 from
     `vla_cu.blocks.rotary_tables`; out is [tokens, heads * head_dim] fp32. A cross layer
     passes fewer keys than queries, `causal=False` and `rotate_keys=False`, because its
-    cached keys were rotated by the prefix pass. head_dim must be a power of two with an
-    even count, and kv_heads must divide heads.
+    cached keys were rotated by the prefix pass. `visible` is a bool or uint8 [tokens,
+    keys] mask where a true entry keeps the key row, which is how a prefix block mask keeps
+    the state row out of every other row. head_dim must be a power of two with an even
+    count, and kv_heads must divide heads.
     """
     tokens = q.shape[0]
     key_tokens = k.shape[0]
@@ -134,12 +144,26 @@ def gqa_attention_into(
     require(key_tokens == v.shape[0], f"expected k and v at {key_tokens} rows, got {v.shape[0]}")
     require(not causal or key_tokens == tokens, f"a causal mix needs equal rows, got {tokens} and {key_tokens}")
     require(
+        not rotate_keys or key_tokens == tokens,
+        f"rotating {key_tokens} keys needs a cos and sine table of that length, and the tables hold {tokens} rows",
+    )
+    require(
         cosine.shape == (tokens, head_dim // 2) and sine.shape == cosine.shape,
         f"expected tables {(tokens, head_dim // 2)}, got {tuple(cosine.shape)} and {tuple(sine.shape)}",
+    )
+    require(
+        visible is None
+        or (
+            visible.shape == (tokens, key_tokens)
+            and visible.dtype in (torch.bool, torch.uint8)
+            and visible.is_contiguous()
+        ),
+        f"expected a contiguous bool or uint8 visible {(tokens, key_tokens)}, got {None if visible is None else (visible.dtype, tuple(visible.shape))}",
     )
     if tokens == 0:
         return
 
+    mask = None if visible is None else visible.to(torch.uint8)
     gqa_attention_kernel[(tokens, kv_heads)](
         q,
         k,
@@ -147,6 +171,7 @@ def gqa_attention_into(
         cosine,
         sine,
         out,
+        q if mask is None else mask,
         key_tokens,
         HEADS=heads,
         KV_HEADS=kv_heads,
@@ -155,5 +180,6 @@ def gqa_attention_into(
         SCALE=1.0 / math.sqrt(head_dim),
         CAUSAL=causal,
         ROTATE_KEYS=rotate_keys,
+        MASKED=mask is not None,
         num_warps=4,
     )
