@@ -28,6 +28,7 @@ _EXPORTS: dict[str, str] = {
     "MlpBlock": "vla_cu.blocks",
     "MlpTokenBlock": "vla_cu.blocks",
     "PackedMatrix": "vla_cu.bundle",
+    "SmolVlaPolicy": "vla_cu.policy",
     "dequantize_int4": "vla_cu.quant",
     "gqa_mix": "vla_cu.blocks",
     "hadamard": "vla_cu.rotate",
