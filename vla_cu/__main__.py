@@ -45,6 +45,7 @@ TASKS: dict[str, str] = {
     "realstack": "bench.real_stack",
     "expertstack": "bench.expert_stack",
     "fullmodel": "bench.full_model",
+    "fullprefix": "bench.full_prefix",
     "scale": "bench.scale",
     "demo": "bench.demo",
     "sanitize": "bench.sanitize",
