@@ -11,7 +11,10 @@ from kernels.triton.int4_gemm import (
     block_m_for,
     int4_gemm,
     int4_gemm_into,
+    int4_stream_k_into,
     shared_memory_bytes,
+    stream_k_buffers,
+    stream_k_plan,
     tile_for,
 )
 from kernels.triton.int4_gemv import int4_gemv_into
@@ -144,6 +147,55 @@ def test_split_k_needs_counters() -> None:
 
     with pytest.raises(ValueError, match="counters"):
         int4_gemm_into(packed, scales, x, out, group_size=16, splits=2, partial=partial)
+
+
+@pytest.mark.parametrize("waves", (1, 2, 64))
+def test_balanced_stream_k_matches_the_single_launch(waves: int) -> None:
+    """A contiguous work slice must match the single launch, repeat bit for bit and reset its counters."""
+    packed, scales, x, expected = reference(50, 720, 720, 16)
+    whole = int4_gemm(packed, scales, x, group_size=16)
+    partial, counters, _ = stream_k_buffers(50, 720, 720)
+    out = torch.empty((50, 720), device="cuda")
+
+    int4_stream_k_into(packed, scales, x, out, group_size=16, waves=waves, partial=partial, counters=counters)
+    first = out.clone()
+    int4_stream_k_into(packed, scales, x, out, group_size=16, waves=waves, partial=partial, counters=counters)
+
+    assert torch.equal(out, first)
+    assert torch.allclose(out, whole, atol=1e-3, rtol=1e-3)
+    assert int(counters.sum()) == 0
+    similarity = torch.nn.functional.cosine_similarity(out.flatten(), expected.flatten(), dim=0)
+    assert similarity.item() > 0.9995
+
+
+def test_balanced_stream_k_balances_a_wide_shape() -> None:
+    """The wide expert shape has fewer tiles than SMs, which is the imbalance this schedule removes."""
+    packed, scales, x, _ = reference(50, 1920, 720, 16)
+    _, units, programs, tiles, k_tiles = stream_k_plan(50, 1920, 720)
+    partial, counters, _ = stream_k_buffers(50, 1920, 720)
+    out = torch.empty((50, 1920), device="cuda")
+
+    int4_stream_k_into(packed, scales, x, out, group_size=16, partial=partial, counters=counters)
+
+    assert tiles == 15 and units == tiles * k_tiles
+    assert programs > tiles
+    assert torch.allclose(out, int4_gemm(packed, scales, x, group_size=16), atol=1e-3, rtol=1e-3)
+
+
+def test_balanced_stream_k_survives_a_cuda_graph() -> None:
+    """The handoff uses atomics and counters, so it must still capture and replay exactly."""
+    packed, scales, x, _ = reference(50, 720, 720, 16)
+    partial, counters, _ = stream_k_buffers(50, 720, 720)
+    out = torch.empty((50, 720), device="cuda")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        int4_stream_k_into(packed, scales, x, out, group_size=16, partial=partial, counters=counters)
+    out.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert torch.allclose(out, int4_gemm(packed, scales, x, group_size=16), atol=1e-3, rtol=1e-3)
 
 
 def test_rejects_shape_mismatch() -> None:

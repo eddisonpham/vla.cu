@@ -24,6 +24,11 @@ workspace, then the last one to arrive sums the partials in split order and rese
 arrival counter. The separate reduce launch this replaces was measured as the whole cost
 of the split (EXP-068, EXP-071).
 
+Stream K walks one contiguous slice of the flattened (tile, K step) work list per program,
+so every SM gets a near equal share of the K steps instead of one output tile each. A
+program that holds only part of a tile publishes its partial and the last arrival sums
+the slots in ascending K order, which is the boundary handoff.
+
 Task: python -m vla_cu m50
 """
 
@@ -50,6 +55,60 @@ TILES: tuple[Tile, ...] = (
     (16, 64, 128, 3),
     (32, 64, 128, 3),
 )
+
+
+@triton.jit
+def _int4_step(
+    packed_ptr,
+    scale_ptr,
+    x_ptr,
+    m_offsets,
+    n_offsets,
+    m_mask,
+    n_mask,
+    k,
+    K,
+    GROUP: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Return one K step of the product: dequantized nibbles dotted with the activation tile.
+
+    The byte tile sits on whole groups, so it dequantizes to a [BLOCK_N, BLOCK_K] fp16 block
+    in registers with one rounding at the dot. Two dots, even and odd elements, keep both
+    operands contiguous along the reduction.
+    """
+    bytes_per_step: tl.constexpr = BLOCK_K // 2
+    byte_lanes = tl.arange(0, bytes_per_step)
+    n_groups = K // GROUP
+    n_bytes_total = K // 2
+    byte_index = k // 2 + byte_lanes
+    weight_mask = n_mask[:, None] & (byte_index < n_bytes_total)[None, :]
+    packed_offsets = n_offsets[:, None] * n_bytes_total + byte_index[None, :]
+    packed = tl.load(packed_ptr + packed_offsets, mask=weight_mask, other=0).to(tl.int32)
+
+    group_index = byte_index // (GROUP // 2)
+    scale = tl.load(
+        scale_ptr + n_offsets[:, None] * n_groups + group_index[None, :],
+        mask=weight_mask & (group_index < n_groups)[None, :],
+        other=0.0,
+    ).to(tl.float32)
+
+    low = ((packed & 0x0F).to(tl.float32) - 8.0) * scale
+    high = (((packed >> 4) & 0x0F).to(tl.float32) - 8.0) * scale
+
+    k_element = k + 2 * byte_lanes
+    activation_offsets = m_offsets[:, None] * K + k_element[None, :]
+    activation_mask = m_mask[:, None] & (k_element < K)[None, :]
+    activations_even = tl.load(x_ptr + activation_offsets, mask=activation_mask, other=0.0)
+    activations_odd = tl.load(
+        x_ptr + activation_offsets + 1,
+        mask=activation_mask & (k_element + 1 < K)[None, :],
+        other=0.0,
+    )
+
+    acc = tl.dot(activations_even.to(tl.float16), tl.trans(low.to(tl.float16)))
+    acc += tl.dot(activations_odd.to(tl.float16), tl.trans(high.to(tl.float16)))
+    return acc
 
 
 @triton.jit
@@ -91,41 +150,10 @@ def int4_gemm_kernel(
     n_offsets = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     m_mask = m_offsets < M
     n_mask = n_offsets < N
-    bytes_per_step: tl.constexpr = BLOCK_K // 2
-    byte_lanes = tl.arange(0, bytes_per_step)
-    n_groups = K // GROUP
-    n_bytes_total = K // 2
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     for k in range(split * BLOCK_K, K, BLOCK_K * SPLITS):
-        byte_base = k // 2
-        byte_index = byte_base + byte_lanes
-        weight_mask = n_mask[:, None] & (byte_index < n_bytes_total)[None, :]
-        packed_offsets = n_offsets[:, None] * n_bytes_total + byte_index[None, :]
-        packed = tl.load(packed_ptr + packed_offsets, mask=weight_mask, other=0).to(tl.int32)
-
-        group_index = byte_index // (GROUP // 2)
-        scale = tl.load(
-            scale_ptr + n_offsets[:, None] * n_groups + group_index[None, :],
-            mask=weight_mask & (group_index < n_groups)[None, :],
-            other=0.0,
-        ).to(tl.float32)
-
-        low = ((packed & 0x0F).to(tl.float32) - 8.0) * scale
-        high = (((packed >> 4) & 0x0F).to(tl.float32) - 8.0) * scale
-
-        k_element = k + 2 * byte_lanes
-        activation_offsets = m_offsets[:, None] * K + k_element[None, :]
-        activation_mask = m_mask[:, None] & (k_element < K)[None, :]
-        activations_even = tl.load(x_ptr + activation_offsets, mask=activation_mask, other=0.0)
-        activations_odd = tl.load(
-            x_ptr + activation_offsets + 1,
-            mask=activation_mask & (k_element + 1 < K)[None, :],
-            other=0.0,
-        )
-
-        acc += tl.dot(activations_even.to(tl.float16), tl.trans(low.to(tl.float16)))
-        acc += tl.dot(activations_odd.to(tl.float16), tl.trans(high.to(tl.float16)))
+        acc += _int4_step(packed_ptr, scale_ptr, x_ptr, m_offsets, n_offsets, m_mask, n_mask, k, K, GROUP, BLOCK_K)
 
     output = m_offsets[:, None] * N + n_offsets[None, :]
     out_mask = m_mask[:, None] & n_mask[None, :]
@@ -255,6 +283,185 @@ def int4_gemm_into(
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         SPLITS=splits,
+        num_stages=stages,
+    )
+
+
+@triton.jit
+def int4_stream_k_kernel(
+    packed_ptr,
+    scale_ptr,
+    x_ptr,
+    out_ptr,
+    partial_ptr,
+    counter_ptr,
+    M,
+    N,
+    K,
+    GROUP: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    N_TILES: tl.constexpr,
+    K_TILES: tl.constexpr,
+    TILES: tl.constexpr,
+    PROGRAMS: tl.constexpr,
+) -> None:
+    """Walk a contiguous slice of the flattened (tile, K step) work list and hand boundaries off.
+
+    Mapping: unit u = tile * K_TILES + k step, tile = m tile * N_TILES + n tile, so the work
+    list is tile major and a program owns CEIL(TILES * K_TILES / PROGRAMS) consecutive units,
+    which is at most two output tiles. A program holding every K step of a tile stores the
+    output itself. One holding part of a tile writes its accumulator to the slot named by
+    its first K step, raises that tile's arrival counter, and the last arrival sums the
+    slots in ascending K order, stores the output and resets the counter.
+    Expected bottleneck: the weight read, now spread evenly over the SMs.
+    """
+    pid = tl.program_id(axis=0)
+    total = TILES * K_TILES
+    per = tl.cdiv(total, PROGRAMS)
+    begin = pid * per
+    end = tl.minimum(begin + per, total)
+    if begin < end:
+        first_tile = begin // K_TILES
+        last_tile = (end - 1) // K_TILES
+        row_index = tl.arange(0, BLOCK_M)[:, None] * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+        for tile in range(first_tile, last_tile + 1):
+            tile_start = tile * K_TILES
+            k_first = tl.maximum(begin - tile_start, 0)
+            k_last = tl.minimum(end - tile_start, K_TILES)
+            m_offsets = (tile // N_TILES) * BLOCK_M + tl.arange(0, BLOCK_M)
+            n_offsets = (tile % N_TILES) * BLOCK_N + tl.arange(0, BLOCK_N)
+            m_mask = m_offsets < M
+            n_mask = n_offsets < N
+            out_mask = m_mask[:, None] & n_mask[None, :]
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(k_first, k_last):
+                acc += _int4_step(
+                    packed_ptr, scale_ptr, x_ptr, m_offsets, n_offsets, m_mask, n_mask, kk * BLOCK_K, K, GROUP, BLOCK_K
+                )
+            output = m_offsets[:, None] * N + n_offsets[None, :]
+            if tl.maximum(k_first, K_TILES - k_last) > 0:
+                slot = tile * K_TILES + k_first
+                tl.store(partial_ptr + slot * BLOCK_M * BLOCK_N + row_index, acc, mask=out_mask)
+                arrived = tl.atomic_add(counter_ptr + tile, 1, sem="acq_rel", scope="gpu")
+                expected = ((tile + 1) * K_TILES - 1) // per - tile_start // per + 1
+                if arrived == expected - 1:
+                    summed = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                    q_first = tile_start // per
+                    q_last = ((tile + 1) * K_TILES - 1) // per
+                    for q in range(q_first, q_last + 1):
+                        closed = tl.maximum(q * per - tile_start, 0)
+                        summed += tl.load(
+                            partial_ptr + (tile * K_TILES + closed) * BLOCK_M * BLOCK_N + row_index,
+                            mask=out_mask,
+                            other=0.0,
+                            cache_modifier=".cg",
+                        )
+                    tl.store(out_ptr + output, summed, mask=out_mask)
+                    tl.store(counter_ptr + tile, 0)
+            else:
+                tl.store(out_ptr + output, acc, mask=out_mask)
+
+
+def stream_k_plan(
+    tokens: int, n_rows: int, n_cols: int, tile: Tile | None = None, waves: int = 1
+) -> tuple[Tile, int, int, int, int]:
+    """Return the tile, unit count, program count, tile count and K step count for one shape.
+
+    One wave is one program per SM, which is the point of the schedule: the single launch
+    gives one program per output tile, and a shape with fewer tiles than SMs leaves part of
+    the GPU idle. Extra waves balance a ragged K at the cost of one more partial per
+    boundary.
+    """
+    block_m, block_n, block_k, stages = tile_for(tokens, n_rows) if tile is None else tile
+    tiles = triton.cdiv(tokens, block_m) * triton.cdiv(n_rows, block_n)
+    k_tiles = triton.cdiv(n_cols, block_k)
+    require(waves >= 1, f"expected at least one wave, got {waves}")
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    programs = min(tiles * k_tiles, sms * waves)
+    return (block_m, block_n, block_k, stages), tiles * k_tiles, programs, tiles, k_tiles
+
+
+def stream_k_buffers(
+    tokens: int,
+    n_rows: int,
+    n_cols: int,
+    tile: Tile | None = None,
+    waves: int = 1,
+    device: torch.device | str = "cuda",
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Return the partial slots, the zeroed counters and the program count for one launch.
+
+    The slots are one fp32 block per published boundary, so a timed or captured launch
+    reuses them instead of allocating inside the measured region.
+    """
+    (block_m, block_n, _, _), _, programs, tiles, k_tiles = stream_k_plan(tokens, n_rows, n_cols, tile, waves)
+    partial = torch.empty((tiles * k_tiles, block_m, block_n), device=device, dtype=torch.float32)
+    counters = torch.zeros(tiles, device=device, dtype=torch.int32)
+    return partial, counters, programs
+
+
+def int4_stream_k_into(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    x: torch.Tensor,
+    out: torch.Tensor,
+    group_size: int = GROUP_SIZE,
+    tile: Tile | None = None,
+    waves: int = 1,
+    partial: torch.Tensor | None = None,
+    counters: torch.Tensor | None = None,
+) -> None:
+    """Write the product of `int4_gemm_into`, with the K steps balanced over `waves` SM waves.
+
+    Assumptions match the tile menu and the group size rules of `int4_gemm_into`. `partial`
+    is fp32 [tiles * K steps, block_m, block_n] and `counters` is a zeroed int32 [tiles];
+    without them both are allocated per call, which a graph capture cannot do.
+    """
+    n_tokens, n_rows, n_cols, _ = check_int4_gemm(packed, scales, x, out, group_size)
+    (block_m, block_n, block_k, stages), _, programs, tiles, k_tiles = stream_k_plan(
+        n_tokens, n_rows, n_cols, tile, waves
+    )
+    check_power_of_two("block size", block_k)
+    check_power_of_two("output tile", block_n)
+    require(block_k % group_size == 0, f"block size {block_k} must be a multiple of group size {group_size}")
+    staged = shared_memory_bytes((block_m, block_n, block_k, stages))
+    require(staged <= SHARED_LIMIT_BYTES, f"tile stages {staged} bytes against a {SHARED_LIMIT_BYTES} byte limit")
+    slots = tiles * k_tiles
+    if partial is None:
+        partial = torch.empty((slots, block_m, block_n), device=x.device, dtype=torch.float32)
+    if counters is None:
+        counters = torch.zeros(tiles, device=x.device, dtype=torch.int32)
+    require(
+        partial.dtype == torch.float32 and tuple(partial.shape) == (slots, block_m, block_n) and partial.is_contiguous(),
+        f"expected fp32 partial slots {(slots, block_m, block_n)}, got {partial.dtype} {tuple(partial.shape)}",
+    )
+    require(
+        counters.dtype == torch.int32 and tuple(counters.shape) == (tiles,) and counters.is_contiguous(),
+        f"expected int32 counters for {tiles} tiles, got {counters.dtype} {tuple(counters.shape)}",
+    )
+    if n_tokens == 0 or n_rows == 0:
+        return
+
+    int4_stream_k_kernel[(programs,)](
+        packed,
+        scales,
+        x,
+        out,
+        partial,
+        counters,
+        n_tokens,
+        n_rows,
+        n_cols,
+        GROUP=group_size,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        N_TILES=triton.cdiv(n_rows, block_n),
+        K_TILES=k_tiles,
+        TILES=tiles,
+        PROGRAMS=programs,
         num_stages=stages,
     )
 

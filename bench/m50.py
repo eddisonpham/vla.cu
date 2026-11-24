@@ -19,7 +19,15 @@ from __future__ import annotations
 
 import torch
 
-from kernels.triton.int4_gemm import SHARED_LIMIT_BYTES, int4_gemm_into, shared_memory_bytes, tile_for
+from kernels.triton.int4_gemm import (
+    SHARED_LIMIT_BYTES,
+    int4_gemm_into,
+    int4_stream_k_into,
+    shared_memory_bytes,
+    stream_k_buffers,
+    stream_k_plan,
+    tile_for,
+)
 from kernels.triton.int4_gemv import int4_gemv_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
@@ -42,6 +50,7 @@ WARMUP = 5
 ITERATIONS = 20
 REPEATS = 5
 SPLITS = (1, 2, 4)
+WAVES = (1, 2)
 CANDIDATES = (
     (16, 64, 64, 2),
     (16, 64, 128, 3),
@@ -172,8 +181,40 @@ def main() -> int:
                 f"{splits:>6}  {pair.b * 1e3:>8.3f}  {pair.ratio:>7.2f}x  "
                 f"{pair.ratio_low:.2f} to {pair.ratio_high:.2f}  {partial_mb:>10.2f}"
             )
+        print("stream k, one contiguous work slice per program with a boundary handoff")
+        stream_partial, stream_counters, _ = stream_k_buffers(TOKENS, n_out, n_in)
+        stream_tile, units, _, stream_tiles, stream_k_tiles = stream_k_plan(TOKENS, n_out, n_in)
+        slots_mb = 4 * stream_tiles * stream_k_tiles * stream_tile[0] * stream_tile[1] / 1e6
+
+        def stream_k(waves: int) -> None:
+            int4_stream_k_into(
+                packed,
+                scales,
+                activations,
+                out,
+                group_size=group,
+                waves=waves,
+                partial=stream_partial,
+                counters=stream_counters,
+            )
+
+        int4_gemm()
+        whole = out.clone()
+        stream_k(1)
+        print(f"stream k matches the single launch within 1e-3: {torch.allclose(out, whole, atol=1e-3, rtol=1e-3)}")
+        first = out.clone()
+        stream_k(1)
+        print(f"stream k repeats bit for bit: {torch.equal(first, out)}")
+        print(f"{'waves':>6}  {'programs':>8}  {'units':>6}  {'ms':>8}  {'speedup':>8}  {'range':>13}  {'MB slots':>9}")
+        for waves in WAVES:
+            _, _, programs, _, _ = stream_k_plan(TOKENS, n_out, n_in, waves=waves)
+            pair = time_pair(int4_gemm, lambda w=waves: stream_k(w), ITERATIONS, REPEATS, WARMUP)
+            print(
+                f"{waves:>6}  {programs:>8}  {units:>6}  {pair.b * 1e3:>8.3f}  {pair.ratio:>7.2f}x  "
+                f"{pair.ratio_low:.2f} to {pair.ratio_high:.2f}  {slots_mb:>9.2f}"
+            )
         print()
-        del w, packed, scales, activations, half, half_activations, out, half_out, partials
+        del w, packed, scales, activations, half, half_activations, out, half_out, partials, stream_partial, stream_counters
 
     return 0
 
