@@ -206,6 +206,24 @@ class Tower:
         return self.connector(pixel_shuffle(self.hidden(frame)[None], SCALE)[0])
 
 
+_CACHED: dict[tuple[str, int, int, int], Tower] = {}
+
+
+def tower_for(checkpoint: Checkpoint, bits: int = 32, group_size: int = GROUP_SIZE) -> Tower:
+    """Return this checkpoint's tower, building it only on the first call in a process.
+
+    A prefill re-reads 172.87 MB of bf16 whenever it builds a tower, so a server builds it
+    once and holds it. The cache keeps one tower: a different checkpoint, header length,
+    width or group drops the previous one, which bounds the GPU memory held between calls.
+    """
+    key = (str(checkpoint.path), checkpoint.header_bytes, bits, group_size)
+    held = _CACHED.get(key)
+    if held is None:
+        _CACHED.clear()
+        held = _CACHED[key] = Tower(checkpoint, bits, group_size)
+    return held
+
+
 def embed_frame(checkpoint: Checkpoint, frame: Tensor, bits: int = 32) -> Tensor:
     """Return the 64 image rows [64, 960] for one frame [3, 512, 512] in [-1, 1]."""
     return Tower(checkpoint, bits).rows(frame)
@@ -214,9 +232,9 @@ def embed_frame(checkpoint: Checkpoint, frame: Tensor, bits: int = 32) -> Tensor
 def image_tokens(checkpoint: Checkpoint, frames: Tensor, bits: int = 32) -> Tensor:
     """Return the image prefix rows [frames, 64, 960], scaled by sqrt(960) as SmolVLA scales them.
 
-    One tower is built for the whole batch, so the checkpoint is read once per call
-    rather than once per frame.
+    The tower comes from `tower_for`, so the first call reads the checkpoint and later
+    calls in the same process replay the packed weights.
     """
-    tower = Tower(checkpoint, bits)
+    tower = tower_for(checkpoint, bits)
     rows = torch.stack([tower.rows(frame) for frame in frames])
     return rows * math.sqrt(rows.shape[-1])
