@@ -19,3 +19,8 @@ numpy>=2.0
 
 # torch.utils.cpp_extension shells out to ninja to build csrc/*.cu.
 ninja>=1.11
+
+# Verification only. `python -m vla_cu visioncheck` loads SiglipVisionModel from
+# transformers to cross-check the hand-written SigLIP tower. No test imports it.
+transformers<6
+safetensors>=0.4
