@@ -307,6 +307,43 @@ def test_attention_kernel_matches_the_einsum_reference(tokens: int) -> None:
     torch.testing.assert_close(out, gqa_mix(q, k, v, head_dim=head_dim), rtol=1e-5, atol=1e-5)
 
 
+def test_cross_attention_kernel_reads_cached_keys() -> None:
+    """A cross pass has fewer keys than queries, and its keys arrive rotated, so none is turned again."""
+    generator = torch.Generator(device="cuda").manual_seed(13)
+    heads, kv_heads, head_dim = 4, 2, 8
+    tokens, keys = 3, 5
+    q = torch.randn((tokens, heads * head_dim), device="cuda", generator=generator)
+    k = torch.randn((keys, kv_heads * head_dim), device="cuda", generator=generator)
+    v = torch.randn((keys, kv_heads * head_dim), device="cuda", generator=generator)
+    cosine_table, sine_table = rotary_tables(tokens, head_dim)
+    out = torch.empty_like(q)
+
+    gqa_attention_into(q, k, v, cosine_table, sine_table, out, head_dim=head_dim, causal=False, rotate_keys=False)
+
+    exact = gqa_mix(q, k, v, head_dim=head_dim, causal=False, rotate_keys=False)
+    torch.testing.assert_close(out, exact, rtol=1e-5, atol=1e-5)
+
+
+def test_cross_token_block_reads_two_streams() -> None:
+    """The expert cross layer projects its keys and values from different caches."""
+    generator = torch.Generator(device="cuda").manual_seed(14)
+    scale = 1.0 / 16**0.5
+    wq = torch.randn((16, 16), device="cuda", generator=generator) * scale
+    wk = torch.randn((8, 8), device="cuda", generator=generator) * scale
+    wv = torch.randn((8, 8), device="cuda", generator=generator) * scale
+    wo = torch.randn((32, 16), device="cuda", generator=generator) * scale
+    x = torch.randn((3, 16), device="cuda", generator=generator)
+    keys = torch.randn((5, 8), device="cuda", generator=generator)
+    values = torch.randn((5, 8), device="cuda", generator=generator)
+    out = torch.empty((3, 32), device="cuda")
+
+    GqaTokenBlock(wq, wk, wv, wo, head_dim=8, tokens=3, other_tokens=5).into(x, keys, out, values)
+
+    exact = gqa_mix(x @ wq.T, keys @ wk.T, values @ wv.T, head_dim=8, causal=False, rotate_keys=False) @ wo.T
+    assert out.shape == (3, 32)
+    assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995
+
+
 @pytest.mark.parametrize("tokens", (8, 65))
 def test_gqa_token_block_above_the_loop_matches_the_reference(tokens: int) -> None:
     """A chunk past the projection loop must cross the same chain, fused mix or not."""

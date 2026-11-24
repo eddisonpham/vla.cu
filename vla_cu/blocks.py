@@ -91,27 +91,32 @@ def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     return rotated.reshape(tokens, heads * head_dim)
 
 
-def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM, causal: bool = True) -> Tensor:
+def gqa_mix(
+    q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM, causal: bool = True, rotate_keys: bool = True
+) -> Tensor:
     """Return the attention context [tokens, heads * head_dim] for q, k and v.
 
-    q is [tokens, heads * head_dim], k and v are [tokens, kv_heads * head_dim], with
-    kv_heads dividing heads. q and k rotate to their row's position first, so a score
-    depends on the relative position of the pair. Scores are [heads, tokens, tokens],
-    q.k over sqrt(head_dim), with future keys set to -inf when `causal` so token i reads
-    keys 0 to i and the chain runs the schedule the expert runs. Softmax runs over the
-    key axis and each kv head serves `heads // kv_heads` query heads.
+    q is [tokens, heads * head_dim], k and v are [keys, kv_heads * head_dim], with
+    kv_heads dividing heads. q and k rotate to their row's position by default, so a
+    score depends on the relative position of the pair; `rotate_keys` false is the cross
+    case, where the cached keys were rotated by the prefix pass. Scores are
+    [heads, tokens, keys], q.k over sqrt(head_dim), with future keys set to -inf when
+    `causal`. Softmax runs over the key axis and each kv head serves
+    `heads // kv_heads` query heads.
     """
     tokens = q.shape[0]
+    keys = k.shape[0]
     heads = q.shape[1] // head_dim
     kv_heads = k.shape[1] // head_dim
     require(heads % kv_heads == 0, f"{heads} query heads do not group {kv_heads} kv heads")
     share = torch.arange(heads, device=q.device) // (heads // kv_heads)
     query = rotary(q, head_dim).reshape(tokens, heads, head_dim)
-    key = rotary(k, head_dim).reshape(tokens, kv_heads, head_dim).index_select(1, share)
-    value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    key_rows = rotary(k, head_dim) if rotate_keys else k
+    key = key_rows.reshape(keys, kv_heads, head_dim).index_select(1, share)
+    value = v.reshape(keys, kv_heads, head_dim).index_select(1, share)
     scores = torch.einsum("thd,shd->hts", query, key) * (1.0 / math.sqrt(head_dim))
     if causal:
-        future = torch.ones(tokens, tokens, dtype=torch.bool, device=q.device).triu(1)
+        future = torch.arange(keys, device=q.device)[None, :] > torch.arange(tokens, device=q.device)[:, None]
         scores = scores.masked_fill(future[None], float("-inf"))
     weights = torch.softmax(scores, dim=-1)
     return torch.einsum("hts,shd->thd", weights, value).reshape(tokens, heads * head_dim)
@@ -268,9 +273,11 @@ class GqaTokenBlock:
     mix, rope included, is one fused Triton kernel up to FUSED_MAX_TOKENS and two
     [heads, tokens, tokens] einsums above it, because BLOCK_T stops fitting registers past
     a 64 token row tile (EXP-062, EXP-064). `into` reads `x` [tokens, input_width] and
-    writes `out` [tokens, hidden], taking k and v from `other` [tokens, other_width] when
-    it is given. `tokens` fixes the buffer shapes, so one block serves one token count and
-    a graph captures that count.
+    writes `out` [tokens, hidden]. A cross block is one whose k and v read a narrower
+    stream than q: it takes keys from `other` [keys, other_width] and values from
+    `other_value`, which defaults to `other`, and its keys arrive already rotated. `tokens`
+    and `other_tokens` fix the buffer shapes, so one block serves one token count and a
+    graph captures that count.
     """
 
     def __init__(
@@ -282,6 +289,7 @@ class GqaTokenBlock:
         head_dim: int = HEAD_DIM,
         tokens: int = 2,
         causal: bool = True,
+        other_tokens: int | None = None,
     ) -> None:
         require(wq.dim() == 2 and wk.shape == wv.shape and wo.dim() == 2, f"expected 2D matrices, got {tuple(wq.shape)} and {tuple(wo.shape)}")
         require(wo.shape[1] == wq.shape[0], f"o input {wo.shape[1]} does not match q output {wq.shape[0]}")
@@ -289,6 +297,10 @@ class GqaTokenBlock:
         require(tokens > 0, f"token count {tokens} must be positive")
         self.tokens = tokens
         self.causal = causal
+        self.cross = wk.shape[1] != wq.shape[1]
+        self.rotate_keys = not self.cross
+        self.other_tokens = tokens if other_tokens is None else other_tokens
+        require(self.other_tokens > 0, f"key row count {self.other_tokens} must be positive")
         self.hidden_width = wo.shape[0]
         self.input_width = wq.shape[1]
         self.other_width = wk.shape[1]
@@ -300,30 +312,48 @@ class GqaTokenBlock:
         device = wq.device
         self.cosine, self.sine = rotary_tables(tokens, head_dim, device=device)
         self.q_out = torch.empty(tokens, wq.shape[0], device=device, dtype=torch.float32)
-        self.k_out = torch.empty(tokens, wk.shape[0], device=device, dtype=torch.float32)
-        self.v_out = torch.empty(tokens, wv.shape[0], device=device, dtype=torch.float32)
+        self.k_out = torch.empty(self.other_tokens, wk.shape[0], device=device, dtype=torch.float32)
+        self.v_out = torch.empty(self.other_tokens, wv.shape[0], device=device, dtype=torch.float32)
         self.context = torch.empty(tokens, wo.shape[1], device=device, dtype=torch.float32)
         self.bytes = sum(
             matrix_bytes(rows, cols, 8, GROUP_SIZE) for rows, cols in (wq.shape, wk.shape, wv.shape, wo.shape)
         )
 
-    def into(self, x: Tensor, other: Tensor | None, out: Tensor) -> None:
-        """Write the attention output into `out` [tokens, hidden], reading `x` and `other`."""
+    def into(self, x: Tensor, other: Tensor | None, out: Tensor, other_value: Tensor | None = None) -> None:
+        """Write the attention output into `out`, reading `x` and the cross streams.
+
+        A cross block takes keys from `other` and values from `other_value`, which is
+        `other` when the caller has one stream; the real expert reads the VLM key cache
+        and value cache separately.
+        """
         require(x.shape[0] == self.tokens, f"block was built for {self.tokens} tokens, got {x.shape[0]}")
         source = x if other is None else other
+        values = source if other_value is None else other_value
+        require(source.shape[0] == self.other_tokens, f"block was built for {self.other_tokens} key rows, got {source.shape[0]}")
         if self.tokens >= GEMM_MIN_TOKENS:
             int8_gemm_into(self.q, self.q_scales, x, self.q_out)
             int8_gemm_into(self.k, self.k_scales, source, self.k_out)
-            int8_gemm_into(self.v, self.v_scales, source, self.v_out)
+            int8_gemm_into(self.v, self.v_scales, values, self.v_out)
         else:
             for token in range(self.tokens):
                 int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
                 int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
-                int8_gemv_into(self.v, self.v_scales, source[token], self.v_out[token])
+                int8_gemv_into(self.v, self.v_scales, values[token], self.v_out[token])
+        causal = self.causal and not self.cross
         if self.tokens <= FUSED_MAX_TOKENS:
-            gqa_attention_into(self.q_out, self.k_out, self.v_out, self.cosine, self.sine, self.context, self.head_dim, self.causal)
+            gqa_attention_into(
+                self.q_out,
+                self.k_out,
+                self.v_out,
+                self.cosine,
+                self.sine,
+                self.context,
+                self.head_dim,
+                causal,
+                self.rotate_keys,
+            )
         else:
-            self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, self.causal))
+            self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, causal, self.rotate_keys))
         if self.tokens >= GEMM_MIN_TOKENS:
             int8_gemm_into(self.o, self.o_scales, self.context, out)
         else:
@@ -498,8 +528,16 @@ class LayerBlock:
         self.mlp_out = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
         self.bytes = attention.bytes + mlp.bytes
 
-    def into(self, x: Tensor, out: Tensor, other: Tensor | None = None, *, fused: bool = False) -> None:
-        """Write one layer into `out`, reading `x` [tokens, hidden] and the cross stream `other`.
+    def into(
+        self,
+        x: Tensor,
+        out: Tensor,
+        other: Tensor | None = None,
+        other_value: Tensor | None = None,
+        *,
+        fused: bool = False,
+    ) -> None:
+        """Write one layer into `out`, reading `x` and the cross streams `other` and `other_value`.
 
         `fused` replaces the post norm, the gated MLP and the residual with one cooperative
         launch. It needs a gated block that fits the kernel; a captured chain is faster, so
@@ -510,7 +548,7 @@ class LayerBlock:
         fits = isinstance(self.mlp, GatedMlpBlock) and self.mlp.can_tail()
         require(not fused or fits, "the fused tail needs a gated MLP with an int4 down at group 64 and widths that fit")
         rmsnorm_into(x, self.input_norm, self.normed)
-        self.attention.into(self.normed, other, self.attention_out)
+        self.attention.into(self.normed, other, self.attention_out, other_value)
         if fused:
             self.mlp.tail_into(x, self.attention_out, self.post_norm, self.residual, self.normed, out)
             return
