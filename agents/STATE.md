@@ -9,62 +9,58 @@
 
 ## Campaign
 
-The limitations pass is closed except for profiling on the large shape, which needs the
-human's elevated shell. The attention block is causal, its scores cover positions, the rope
-and norm constants come from the model config, and the chain now runs the expert's real 50
-token chunk. That last step moved the bottleneck from dispatch to the per-token GEMV.
+The attention block is causal, its scores cover positions, and its mix is now a Triton
+kernel for short chunks and einsums for long ones. The 50 token chunk is measured, the
+int4 GEMM is measured against fifty GEMV launches, and eleven production CUDA inference
+systems are surveyed in `docs/PRODUCTION.md`. The named bottleneck is the per-token GEMV
+launch, and the fix is decided (DEC-062) but not yet wired.
 
 ## Closed this pass
 
-- **The chain runs at 50 tokens, the real chunk length.** 336.872 ms eager against 25.120 ms
-  graphed at depth 16, exact, cosine 0.99637. A layer is 200 launches, so 1.57 ms graphed
-  is 7.85 us per launch (EXP-060).
-- **`gqa_mix` was mixing over key heads, not tokens.** `torch.bmm` batched on tokens, so
-  scores were [tokens, heads, kv heads]. The causal mask exposed it; einsums fix it, and
-  scores are [heads, tokens, tokens] (EXP-057, DEC-059).
-- **The chain is causal.** Cosine falls with the token count, 0.99783 at two and 0.99637 at
-  fifty, which is what a real score matrix does (EXP-057, EXP-060).
-- **The RMSNorm epsilon is the model's.** 1e-6 corrected to 1e-05 from the config, cosine
-  unchanged at five decimals (EXP-058, DEC-060).
-- **The real shapes are launch bound.** Every int4 and int8 path on the 720 to 2560 wide
-  expert matrices lands at 0.021 to 0.031 ms while bytes move 2x, so ~22 us is dispatch
-  (EXP-061).
-- **Theta 100000 with the Llama pairing.** Read from the SmolVLM2 text config, so the old
-  adjacent pairing was wrong (EXP-055, DEC-056).
-- **Every kernel has a correctness check and a sanitizer pass.** int4 EXP-044, int8
-  EXP-046, the wide Triton kernel EXP-052 and EXP-056, 0 errors each.
+- **The causal mix is one kernel for short chunks.** Depth 16 graph 2.016 and 2.585 ms at
+  2 and 3 tokens against 2.723 and 3.025 with einsums. It loses at 8 and 50, so the block
+  dispatches at `FUSED_MAX_TOKENS = 4` (EXP-062, DEC-061).
+- **An int4 GEMM at M = 50 beats the GEMV loop by 24 to 42x** on the expert matrices, and
+  is still 2.5 to 3.8x behind cuBLAS bf16, at 3.6 to 7.6 percent of peak (EXP-063).
+- **The chain runs at 50 tokens.** 23.245 ms graphed against 360.220 ms eager at depth 16,
+  exact, cosine 0.99637. 500 launches per layer counted from the code (EXP-060).
+- **`gqa_mix` was mixing over key heads, not tokens.** `torch.bmm` batched on tokens. The
+  causal mask exposed it, einsums fix it (EXP-057, DEC-059).
+- **Constants now come from the model config**: rope theta 100000 with the Llama pairing,
+  and `rms_norm_eps` 1e-05 (EXP-055, EXP-058, DEC-056, DEC-060).
+- **The real shapes are launch bound** at about 22 us while bytes move 3.6x (EXP-061).
 
 ## What works
 
-- 27 tasks, `pytest -q` 125 passed with vcvars active, 96 passed and 23 skipped without.
+- 27 tasks, `pytest -q` 126 passed with vcvars active, 96 passed and 23 skipped without.
 - `scale` prints four stages plus the 50 token block, with eager, graph, cosine, relative
   L2 and an exactness column.
+- `m50` compares the GEMV loop, the int4 GEMM and cuBLAS bf16 at the expert widths.
 - `plateau` median of 5: staged Triton 63.6 to 73.1, wide ieee 11.3 to 16.1, wide tf32
   28.3, native unroll 86.8 to 88.0 percent at 4096 x 8192 across runs.
-- `sass` counts three Triton mappings and three native variants in one table.
-- `style` zero violations, `bundle` bit exact, `fuzz` 160 seeded cases clean.
+- `docs/PRODUCTION.md` maps 11 production systems onto this repo and ranks six gaps.
 
 ## Still open
 
-- **A 50 token layer is 200 launches.** Batching the projections over tokens would make it
-  4, with the same weight traffic (EXP-060).
-- **Each weight is read once per token.** A real int4 GEMM at M = 50 would read it once per
-  chunk, which is what the expert runs.
+- **A 50 token layer is 500 launches.** Decided: dispatch to the int4 GEMM above a small
+  token count (DEC-062). Not wired yet.
+- **The attention kernel reloads its key tile per query head.** Group it by kv head and
+  fuse rope, then the crossover moves up.
+- **The int4 GEMM is 7.6 percent of peak at M = 50.** Needs `num_stages` and a tile menu
+  in the Marlin shape.
 - **`ncu` on the large shape** needs the elevated shell: `python -m vla_cu ncu`.
-- **The attention mix is torch ops, not a kernel.** Two einsums per layer inside the graph.
-- **The wide mapping** lost on load width, reduction and precision; the staged mapping
-  remains the one to keep (EXP-052, 054, 056, 059).
-- **Run drift reaches 25 percent** on eager paths, so only numbers inside one output
-  block are comparable.
+- **Run drift reaches 25 percent**, so only numbers inside one output block compare. The
+  attention crossover is the first casualty and needs a paired run.
+- **The wide mapping** lost on load width, reduction and precision (EXP-052, 054, 056, 059).
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell, then say what the report shows.
-2. Pick the next question: a batched GEMV over tokens, or the int4 GEMM.
+2. Pick the next question: wire the GEMM for chunks, or regroup the attention kernel.
 3. Reset the lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Batch the int8 and int4 GEMV over the token axis, so a layer is 4 launches.
-2. Write the int4 GEMM at M = 50 and compare it against 50 GEMV launches.
-3. Put the causal mix in a Triton kernel, to price the torch einsums.
+1. Wire the int4 GEMM into the block above a token threshold, then re-run `scale` at 8 and 50.
+2. Group the attention program by kv head and fuse rope into it.
+3. Pipeline the int4 GEMM and give it a tile menu, then repeat `m50`.

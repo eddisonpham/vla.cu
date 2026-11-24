@@ -104,8 +104,14 @@ on purpose, not forgotten.
 - [x] Re-time the staged int4 GEMV at the expert's real 720 and 960 wide shapes. Done 2026-11-23, EXP-061: every path is 0.021 to 0.031 ms while bytes move 0.39 to 2.5 MB, so the real shapes are launch bound at about 22 us.
 - [x] Run the causal chain over a 50 token action chunk. Done 2026-11-23, EXP-060: 336.872 ms eager against 25.120 ms graphed at depth 16, exact, cosine 0.99637. The limit is 200 launches per layer, not the score matrix.
 - [ ] Batch the projections over the token axis so a 50 token layer is 4 launches instead of 200. This keeps the same weight traffic as today and removes the dispatch, and it is the cheapest test of the batched idea (EXP-060).
-- [ ] Compare that batched GEMV against an int4 GEMM at M = 50, which reads each weight once per chunk instead of once per token and is the shape the expert actually runs.
-- [ ] Replace the two einsums in `gqa_mix` with a small fused attention kernel once the token count is realistic (DEC-059).
+- [x] Compare the int4 GEMM at M = 50 against fifty GEMV launches. Done 2026-11-23, EXP-063: 41.6x and 24.5x faster on the two expert shapes, 1.6 and 1.3 MB against 52.4 and 39.4, but still 2.5 to 3.8x behind cuBLAS bf16 (DEC-062).
+- [x] Replace the two einsums in `gqa_mix` with a small fused attention kernel. Done 2026-11-23, EXP-062, DEC-061: 27 percent faster at 2 tokens, 13 percent slower at 50, so the block dispatches at 4 tokens.
+- [ ] Group the attention program by kv head so its key and value tiles load once per group, and fuse rope into the same kernel (EXP-062, TensorRT-LLM XQA, vLLM Q blocks).
+- [ ] Add `num_stages` and a tile menu to the int4 GEMM. At M = 50 it is 3.6 to 7.6 percent of peak while cuBLAS bf16 is 2.5 to 3.8x faster (EXP-063, Marlin, llama.cpp MMQ).
+- [ ] A W4A8 rung: int4 weights with int8 activations, then compare cosine at depth 16 against the current int4 down (EXP-036, CUTLASS W4A8, LiquidGEMM).
+- [ ] Replace the hardcoded tile constants with a measured shape table, the way llama.cpp switches kernels per architecture and quant type (EXP-052, EXP-060, docs/PRODUCTION.md).
+- [ ] Cache the VLM prefix KV across calls, which is the RadixAttention idea applied to a fixed policy prefix (docs/PRODUCTION.md).
+- [ ] Run both attention paths in one process at 2, 3, 4 and 8 tokens, so the crossover is paired rather than compared across runs (EXP-062, DEC-061).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

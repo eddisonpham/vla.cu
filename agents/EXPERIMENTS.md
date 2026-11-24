@@ -889,6 +889,33 @@
 - Verdict: the real shapes are a dispatch problem before they are a bandwidth problem.
 - Follow-ups: none new, this is the evidence behind the batched launch item in the backlog.
 
+## EXP-062: the causal mix in one Triton kernel, priced against the einsums  (2026-11-23)
+- Goal / question: the causal mix was two einsums, one softmax and a mask per layer. What does that cost when it becomes one kernel, and where does the kernel stop winning?
+- Change (one thing): added `kernels/triton/gqa_attention.py`, one program per (query token, query head), and `GqaTokenBlock` now takes a fused or einsum path. Rotation stays in `rotary` on both paths.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, clocks pinned, after `pytest -q`.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s, 16 real expert layers, int8 projections, int4 down, causal, theta 100000.
+- Result (measured), depth 16, tokens, graph ms fused, graph ms einsum, eager ms fused: 2, 1.988, 2.723, 23.588. 3, 2.524, 3.025, 29.753. 4, 2.977, 3.139, 37.046. 8, 5.290, 5.174, 64.003. 50, 28.302, 25.120, 344.764.
+- Correctness: exact at every depth against the eager run, and cosine and relative L2 match the einsum run to every printed digit (0.99783, 0.99766, 0.99756, 0.99712, 0.99637), so a different implementation crosses the same chain.
+- Explanation / hypothesis: the kernel wins at 2, 3 and 4 tokens by 27, 17 and 5 percent, because it replaces about a dozen small torch nodes per layer with one launch. It loses at 8 and 50 by 2 and 13 percent, because program (token, head) reloads its whole key and value tile for every query head: at 50 tokens that is 15 heads times two [50, 64] fp32 tiles per token, about 19 MB of L1 traffic per layer, and the [64, 64] tile also costs registers at `num_warps=4`.
+- Caveat: the two columns come from different runs whose eager stage 3 differs by 4 percent (4.673 against 4.497 ms), so the 4 token margin at 5 percent is inside run drift and only the 2 and 3 token wins are solid.
+- Result, the dispatch run (measured): with `FUSED_MAX_TOKENS = 4` shipping, depth 16 graph at 2, 3, 4, 8 and 50 tokens is 2.016, 2.585, 3.186, 5.934 and 23.245 ms. The 4 token case reads 3.186 against 3.139 for the einsums in the earlier run, so that margin did not repeat, and the 50 token case reads 23.245 against 25.120, which is drift in the other direction. Only 2 and 3 tokens are solid, and the paired comparison is in the backlog.
+- Verdict: worked, with a shape dependent crossover. The fused path is now used for `tokens <= FUSED_MAX_TOKENS` and the einsums above it (DEC-061).
+- Follow-ups: group the program by kv head so the key tile is loaded once per group, and fuse RoPE into the same kernel.
+
+## EXP-063: the int4 GEMM at M = 50 against fifty GEMV launches  (2026-11-23)
+- Goal / question: the 50 token chunk issues 50 GEMV launches per projection. The int4 GEMM in `kernels/triton/int4_gemm.py` already exists. How much is it worth on the expert matrices, and how far is it from a plain bf16 cuBLAS GEMM?
+- Change (one thing): `m50` gained an `int4 gemm x1` row with its own byte budget next to the existing GEMV loop and bf16 rows.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu m50` in vcvars, 5 warmup and 20 iterations, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, expert widths 720 and 1920, M = 50, group 16 for 720 and 64 for 1920, random Gaussian weights.
+- Result (measured), 1920 x 720 group 16, path, bytes, ms: gemv loop x50, 52.4 MB, 2.235. int4 gemm x1, 1.6 MB, 0.054 (41.6x). bf16 gemm x1, 3.4 MB, 0.021 (104.9x).
+- Result, 720 x 1920 group 64: gemv loop x50, 39.4 MB, 2.312. int4 gemm x1, 1.3 MB, 0.094 (24.5x). bf16 gemm x1, 3.1 MB, 0.025 (90.7x).
+- Explanation / hypothesis: reading each weight once instead of fifty times is the whole win, and the 24 to 42x on time tracks the 30 to 33x on bytes. But the int4 GEMM reaches only 29.1 and 13.8 GB/s, 7.6 and 3.6 percent of peak, and cuBLAS bf16 beats it by 2.5 to 3.8x while moving twice the bytes. At M = 50 this is a latency bound kernel, not a bandwidth one: one 64 row tile, six output tiles, and a 64 wide K step.
+- Caveat: Gaussian weights and a single shape per width, no repeats, one process. The int4 numbers include fp16 rounding at the dot, which the cosine in `scale` already carries.
+- Verdict: the GEMM is clearly the right shape for a chunk, and it is not yet a good kernel. The loop is 24 to 42x worse, so shipping the GEMM into the block is worth it before tuning it.
+- Follow-ups: pipeline the GEMM with `num_stages` in the Marlin shape, and give it a tile menu, then repeat this table.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

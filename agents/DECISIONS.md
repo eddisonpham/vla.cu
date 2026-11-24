@@ -477,3 +477,18 @@
 - Consequence: stage 3 has one fewer hidden difference from SmolVLA. The cosine is unchanged at five decimals, which is the honest report.
 - Revisit if: a different checkpoint with a different epsilon is loaded, in which case it belongs in the config reader rather than a module constant.
 - Status: active
+
+## DEC-061: the block dispatches its attention mix on token count  (2026-11-23)
+- Context: EXP-062. The fused kernel is 27, 17 and 5 percent faster than the einsums at 2, 3 and 4 tokens, and 2 and 13 percent slower at 8 and 50.
+- Options considered: (a) keep only the fused kernel; (b) keep only the einsums; (c) dispatch on `tokens` at a constant threshold; (d) a learned table of shapes.
+- Chosen and why: (c) at `FUSED_MAX_TOKENS = 4`. Both paths are tested against each other and cross the chain with identical cosine, so the choice is purely about time, and a named constant is easier to re-measure than a hidden branch. A shape table is the right end state (see `docs/PRODUCTION.md`), not this chunk.
+- Cost accepted: one more code path in `GqaTokenBlock.into`, and a threshold that is only solid at 2 and 3 tokens. The 4 token margin is inside run drift: the dispatch run read 3.186 against 3.139 ms at 4 tokens. The constant stays at 4 rather than fitting noise at 3, and a paired in-process comparison is in the backlog.
+- Revisit if: the kernel is regrouped by kv head, in which case it should win further up and the threshold moves.
+- Status: active
+
+## DEC-062: a chunk of tokens belongs to a GEMM, not a GEMV loop  (2026-11-23)
+- Context: EXP-063. At M = 50 the GEMM is 24 to 42x faster than the loop on the expert matrices, and cuBLAS bf16 is another 2.5 to 3.8x faster than our int4 GEMM. EXP-060 counted 500 launches per layer at 50 tokens.
+- Options considered: (a) keep the per-token loop because it is batch 1 code; (b) dispatch the projections to the int4 GEMM above a small token count; (c) always use the GEMM, even at one token.
+- Chosen and why: (b). The batch 1 GEMV is still the right kernel at one or two tokens, where a GEMM pads 1 row to 16 and reads a weight tile for nothing, and the GEMM is the right kernel once a chunk exists. (c) would regress the project's headline case, (a) leaves 500 launches in the path.
+- Cost accepted: two projection paths in `GqaTokenBlock`, and the int4 GEMM is only 3.6 to 7.6 percent of peak at M = 50, so this decision buys the dispatch and the byte count, not peak bandwidth.
+- Status: active, not yet wired

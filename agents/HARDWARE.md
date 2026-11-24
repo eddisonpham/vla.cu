@@ -131,3 +131,6 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | depth 16 causal chain at 2, 3, 4 and 8 tokens | 30.500 / 39.244 / 39.159 / 84.353 ms eager, 2.723 / 3.025 / 3.068 / 4.897 ms graphed, exact, cosine 0.99783 to 0.99712 | `python -m vla_cu scale` | EXP-057 |
 | 2026-11-23, pinned clock | depth 16 causal chain at 50 tokens | 336.872 ms eager, 25.120 ms graphed, 200 launches per layer, exact, cosine 0.99637 | `python -m vla_cu scale` | EXP-060 |
 | 2026-11-23, pinned clock | real expert matrices, one GEMV each | 0.021 to 0.031 ms for 0.39 to 2.5 MB, 8 to 28 percent of peak, launch bound at about 22 us | `python -m vla_cu real` | EXP-061 |
+| 2026-11-23, pinned clock | int4 GEMM at M = 50, expert widths | 1920 x 720: 0.054 ms against 2.235 for the GEMV loop; 720 x 1920: 0.094 against 2.312; 7.6 and 3.6 percent of peak | `python -m vla_cu m50` in vcvars | EXP-063 |
+| 2026-11-23, pinned clock | causal mix as one Triton kernel, 16 layers | depth 16 graph 1.988 ms at 2 tokens against 2.723 with einsums, and 28.302 against 25.120 at 50 tokens | `python -m vla_cu scale` | EXP-062 |
+| 2026-11-23, pinned clock | causal chain with the attention dispatch shipping | depth 16 graph 2.016 / 2.585 / 3.186 / 5.934 / 23.245 ms at 2, 3, 4, 8 and 50 tokens, exact | `python -m vla_cu scale` | EXP-062 |
