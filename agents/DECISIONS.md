@@ -421,3 +421,19 @@
 - Consequence: `int4_gemv_into` stays the path every block uses; `int4_gemv_wide_into` is called only by `plateau` and `sass`.
 - Revisit if: a hint or a rewrite makes the wide mapping beat the staged one, in which case the default flips and this decision is superseded.
 - Status: active
+
+## DEC-054: the rotation lives inside `gqa_mix`, and row index is position  (2026-11-23)
+- Context: EXP-053. RoPE has to be applied to q and k before the score, in both the kernel path and the fp32 reference, or the two stop describing the same block.
+- Options considered: (a) rotate inside `GqaTokenBlock.into` and again in the reference; (b) rotate inside `gqa_mix`, which both already call; (c) pre-rotate the k and q weight matrices once at construction.
+- Chosen and why: (b). One implementation means the kernel path and the reference cannot drift, and the block stays a thin wrapper. Row i of the input is position i, which is true for a contiguous prefix of tokens and needs no position tensor.
+- Cost accepted: theta is a module constant of 10000, not read from the checkpoint, because the checkpoint directory holds weights only. Pre-rotating the weights was rejected because it only works when the position of every token is known at packing time.
+- Revisit if: the real config exposes theta, or tokens arrive out of order and positions must be passed in.
+- Status: active
+
+## DEC-055: the two token stage quotes the graphed time, like the one token stage  (2026-11-23)
+- Context: EXP-053. The same chain is 24.880 ms eager and 2.818 ms graphed at depth 16, exact at every depth.
+- Options considered: (a) keep one number and lose the dispatch story; (b) print both columns, graphed as the cost and eager as the dispatch measurement.
+- Chosen and why: (b), which is DEC-051 applied again. A graph must pass `torch.equal` against the eager run before its time is printed, so a captured path that is wrong cannot be quoted.
+- Consequence: both chain stages now carry an exactness column, and any future stage that captures a graph does the same.
+- Revisit if: a stage contains something a graph cannot capture.
+- Status: active

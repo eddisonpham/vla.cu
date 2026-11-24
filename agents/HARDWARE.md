@@ -122,3 +122,6 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | int4 SASS at 4096 x 8192 | Triton 416 instructions, 12 LDG, 8 shared memory ops, 12 butterfly shuffles; native unroll 544, 32 LDG where the 16 `LDG.E.128` are fp32 activations, no SMEM, 5 shuffle-downs | `python -m vla_cu sass` in vcvars | EXP-050 |
 | 2026-11-23, pinned clock | depth 16 chain at two tokens, q and k included | 64.59 MB, 15.450 ms eager, cosine 0.99622, rel L2 8.76e-02 | `python -m vla_cu scale` | EXP-051 |
 | 2026-11-23, pinned clock | wide-load Triton int4 at 4096 x 8192 | 0.088 ms, 216.1 GB/s, 56.3 percent, 0.77x of the staged mapping, 448 instructions, 0 `LDG.E.128` | `python -m vla_cu plateau` in vcvars | EXP-052 |
+| 2026-11-23, pinned clock | depth 16 two-token chain, graphed | 2.818 ms graphed against 24.880 ms eager, exact at every depth, cosine 0.99622 | `python -m vla_cu scale` | EXP-053 |
+| 2026-11-23, pinned clock | depth 16 two-token chain, q and k rotated | cosine 0.99622, rel L2 8.76e-02, rotation costs 49 us per layer inside a graph | `python -m vla_cu scale` | EXP-053 |
+| 2026-11-23, noisier run | wide Triton with contiguity hints | 0.276 ms, 17.8 percent, 0 `LDG.E.128`, LDS 8, reverted | `python -m vla_cu plateau` in vcvars | EXP-054 |

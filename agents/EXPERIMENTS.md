@@ -770,6 +770,32 @@
 - Verdict: worked. The chain now prices real attention, and the cosine is stable to 16 layers.
 - Follow-ups: apply RoPE to q and k; graph this stage to remove the dispatch the table is now dominated by.
 
+## EXP-053: the two token chain graphed, then with rotary positions on q and k  (2026-11-23)
+- Goal / question: does a CUDA graph remove the 8 launches per layer that dominate EXP-051, and does the cosine survive a rotation that makes the scores positional?
+- Change (one thing): stage 4 captures each depth as a `torch.cuda.CUDAGraph` and checks it exact before timing it; then `rotary` in `vla_cu/blocks.py` turns q and k by row position inside `gqa_mix`, so the kernel path and the fp32 reference rotate identically.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, clocks pinned near 1985 MHz.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, same 16 layers, two tokens, theta 10000 assumed, no config file in the checkpoint to read it from.
+- Result A (measured), graph only, depth, MB, eager ms, graph ms, exact: 1, 4.16, 1.087, 0.084, yes. 2, 8.07, 1.808, 0.210, yes. 4, 16.15, 3.472, 0.459, yes. 8, 32.29, 8.873, 0.954, yes. 16, 64.59, 15.409, 2.027, yes.
+- Result B (measured), graph plus rotary, same columns, cos, rel L2: 1, 4.16, 1.558, 0.176, 0.99970, 2.45e-02. 2, 8.07, 3.173, 0.334, 0.99944, 3.34e-02. 4, 16.15, 6.012, 0.708, 0.99880, 4.90e-02. 8, 32.29, 11.766, 1.471, 0.99798, 6.38e-02. 16, 64.59, 24.880, 2.818, 0.99622, 8.76e-02. Exact yes at every depth.
+- Explanation / hypothesis: the graph is 7.6x on the pre-rotation chain and 8.8x with it, and it is exact, so the dispatch was the whole cost. At depth 16 eager is 1.555 ms per layer against 0.176 ms graphed, which is 8 launches at about 170 us of Python each. The rotary rotation is free in kernels and expensive in Python: it added 590 us per layer eager and 49 us per layer graphed, because `rotary` is about 8 tiny torch ops and each one pays the same dispatch. Cosine did not move at 5 decimals because the reference rotates the same way.
+- Caveat: theta 10000 is an assumption. The checkpoint directory holds weights only, so neither the real theta nor a per-layer variation was read. RoPE also changes only the off-diagonal scores: q0.k0 and q1.k1 are unchanged, only q0.k1 and q1.k0 move, which is what relative position means here.
+- Verdict: worked. The two token layer is dispatch bound until graphed, and the graphed number is the honest cost.
+- Follow-ups: read theta from the model config; run three or more tokens to watch the score matrix grow.
+
+## EXP-054: contiguity hints on the wide Triton load  (2026-11-23)
+- Goal / question: the wide mapping reads a flat run of int32 words but still emits narrow loads (EXP-052). Will `tl.max_contiguous` and `tl.multiple_of` tell Triton the run is contiguous and let it reach 16 bytes?
+- Change (one thing): wrapped the flat offsets in `tl.max_contiguous(tl.multiple_of(offsets, block_words), block_words)`.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu sass`, then `python -m vla_cu plateau`, both in vcvars.
+- GPU / environment: RTX 5060 Laptop, Triton 3.9.0, block 1024, 1 warp, 4096 x 8192.
+- Result (measured): with the hints the listing was 456 instructions, 18 LDG, still 0 `LDG.E.128`, and LDS rose from 2 to 8. Timing 0.276 ms, 68.5 GB/s, 17.8 percent at 4096 x 8192. Without the hints, in the earlier quieter run, 0.088 ms and 56.3 percent. Reverted, the listing is 448 instructions, 0 `LDG.E.128`, 2 LDS, and the next run measured 0.097 ms and 51.0 percent; that run also shows every implementation 4 to 6 points below its earlier value with per-row spreads up to 0.19 ms, so the whole run was hotter.
+- Explanation / hypothesis: the hints did not change the load width, they changed the layout conversion. Triton answered the contiguity assertion by inserting more shared memory traffic for the reshape, so the same bytes moved through SMEM twice as often.
+- Caveat: this is two runs of one config each, not a paired comparison, and the second run's spread is large. The direction is clear (0.276 against 0.097 ms in the same session) but the exact ratio is not a precise number.
+- Verdict: negative, and reverted. The weight load width is decided by the layout the consumer wants, not by the offsets hint.
+- Follow-ups: keep the tile in the load's shape and reduce with `tl.dot` on a fake matrix so no reshape is needed, or accept the staged mapping.
+
+
 ## EXP-052: a wide-load Triton int4 GEMV, and why it did not reach 88 percent  (2026-11-23)
 - Goal / question: if the 18 point gap is Triton staging a tile through shared memory with 4 and 8 byte loads (EXP-050), can reading the packed row as int32 close it?
 - Change (one thing): added `kernels/triton/int4_gemv_wide.py`, a second Triton mapping, plus a `wide` row in `plateau` and a second listing in `sass`.
