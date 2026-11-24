@@ -1237,6 +1237,16 @@
 - Verdict: worked. A three-matrix layer is one launch with the same two barriers, and it wins by 3.49x at the batch size the project targets.
 - Follow-ups: share the gate and up weight reads across token tiles, so the fused path stops growing at the same rate; port the gated shape into `GatedMlpBlock` behind a flag, so the block and the kernel agree on one entry point.
 
+## EXP-092: where a captured Int4Linear call pays  (2026-11-24)
+- Goal / question: EXP-089 added `Int4Linear.graphed()` and the demo showed 3x on a block, but nobody had timed the wrapper alone. Above what matrix size does capture stop paying?
+- Change: `bench/graph_layer.py` (task `graphed`) builds one Int4Linear at five shapes, captures each with `graphed()`, checks the replay is bit exact, then times eager against graphed in alternating pairs. It prints the paired ratio, the stored megabytes and achieved GB/s against the packed weight plus scales. No kernel or wrapper code changed.
+- Prediction: none filed by the human.
+- Result (measured), RTX 5060 Laptop GPU, one token, warmup 10, repeats 5, 50 iterations: 256 x 640 (0.09 MB) eager 0.0366 ms against graphed 0.0166, 2.20x; 768 x 1920 (0.83 MB) 0.0352 against 0.0166, 2.11x; 960 x 2560 (1.38 MB) 0.0340 against 0.0189, 1.79x; 4096 x 4096 (9.44 MB) 0.0386 against 0.0414, 0.93x; 8192 x 4096 (18.87 MB) 0.0723 against 0.0764, 0.94x. Every replay was bit exact. Suite 236 passed, 42 passed and 194 skipped with no device, style 0.
+- Explanation / hypothesis: eager costs about 0.0365 ms at every small shape, which is host dispatch, not the kernel. Replay has a floor near 0.0166 ms, so the graph removes a flat 0.020 ms. Once the kernel body passes that, the graph's input copy and replay dispatch put it slightly behind: at 4096 x 4096 the body is about 0.038 ms and the graphed path reads 0.0414. The crossover sits between 1.38 and 9.44 MB of packed weights.
+- Caveat: all five weights fit the 33.6 MB L2 after warmup, so the GB/s column is L2-fed and the 261 GB/s at the largest shape is not a DRAM claim. Only one token is measured, because `graphed()` captures a fixed 1D input. The 0.020 ms saving is this laptop's host cost and will differ elsewhere.
+- Verdict: capture pays below roughly 1.5 MB of packed weights, is a wash near 9 MB and a small loss above it. The wrapper is for small layers such as an attention or MLP projection, not for the big projection.
+- Follow-ups: drop the input copy by capturing a producer that writes the same buffer, which is the few microseconds that makes 4096 x 4096 a loss; a block-level wrapper that captures several layers and one residual add.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

@@ -122,7 +122,8 @@ on purpose, not forgotten.
 - [x] One-command memcheck over every CUDA kernel. Done 2026-11-24, EXP-087: cooperative kernel clean, the extension cannot be attached on Windows.
 - [x] A checkpoint to block builder, so a real SmolVLA layer is three lines instead of a bench file. Done 2026-11-24, EXP-088, gated MLP included.
 - [x] A graph wrapper for `Int4Linear`, since the eager layer pays dispatch per call. Done 2026-11-24, EXP-089, `layer.graphed()`.
-- [ ] Time `GraphedInt4Linear` standalone at 960 x 2560 and 8192 x 4096, to say where it pays and where the bytes dominate.
+- [x] Time `GraphedInt4Linear` standalone at small and large matrices. Done 2026-11-24, EXP-092: pays below about 1.5 MB, loses above 9 MB.
+- [ ] Drop the input copy from `graphed()` by capturing a producer that writes the same buffer, which is what makes the 4096 x 4096 case a small loss.
 - [x] The gated SwiGLU MLP inside the cooperative kernel, so a real layer is one launch. Done 2026-11-24, EXP-091, 3.49x at 1 token.
 - [ ] Share the gate and up weight reads across token tiles in the gated tail, which is why it crosses at 8 tokens at 960/2560 and 12 at 720/1920.
 - [ ] A layer index to prefix helper for the two SmolVLA naming schemes, so the builder can take `layer=3`.

@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-085: `graphed()` is for small layers, and the docstring says so (2026-11-24)
+
+- Context: EXP-092 timed the wrapper alone. The graph removes a flat 0.020 ms of host dispatch and adds a copy and a replay dispatch, so it wins below roughly 1.5 MB of packed weights and loses slightly above 9 MB.
+- Decision: keep `graphed()` opt in and shape fixed, and state the threshold in the wrapper's docstring rather than recommending it generally.
+- Consequence: a caller can predict the outcome from the weight size. A block or a small projection benefits; the large projection does not.
+
 ## DEC-084: the gated tail is a second kernel that shares the stages (2026-11-24)
 
 - Context: EXP-091. A SmolVLA MLP needs silu(gate x) times (up x), which is one more projection than the existing cooperative kernel computes.
