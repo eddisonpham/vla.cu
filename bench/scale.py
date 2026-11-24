@@ -221,11 +221,12 @@ def stack_scale(checkpoint) -> None:
 def layer_launches(tokens: int) -> int:
     """Return the launches one layer issues at `tokens`: projections, mix, MLP, norms and adds.
 
-    Above GEMM_MIN_TOKENS both projection pairs are one GEMM per matrix, so only the two
-    norms and the two residual adds still scale with the token count.
+    Above GEMM_MIN_TOKENS both projection pairs are one GEMM per matrix, and the norm,
+    the fused add-norm and the residual add are one row kernel each over the whole chunk,
+    so nothing in the layer scales with the token count any more.
     """
     attention = 5 if tokens >= GEMM_MIN_TOKENS else 1 + 4 * tokens
-    return attention + 3 + 3 * tokens
+    return attention + 6
 
 
 def token_chain(
@@ -282,20 +283,17 @@ def token_chain(
     delta = torch.empty(tokens, hidden, device="cuda")
 
     def chain(depth: int) -> torch.Tensor:
-        """Run attention and MLP for the first `depth` layers at every token."""
+        """Run attention and MLP for the first `depth` layers over the whole chunk."""
         current.copy_(x)
         for index in range(depth):
             attention, mlp, (input_norm, post_norm), other = blocks[index]
             source = current if index % 2 == 0 else following
             target = following if index % 2 == 0 else current
-            for token in range(tokens):
-                rmsnorm_into(source[token], input_norm, normed[token])
+            rmsnorm_into(source, input_norm, normed)
             attention.into(normed, other, scratch)
-            for token in range(tokens):
-                add_norm_into(source[token], scratch[token], post_norm, delta[token], normed[token])
+            add_norm_into(source, scratch, post_norm, delta, normed)
             mlp.into(normed, scratch)
-            for token in range(tokens):
-                add_into(delta[token], scratch[token], target[token])
+            add_into(delta, scratch, target)
         return following if depth % 2 else current
 
     references: dict[int, torch.Tensor] = {}

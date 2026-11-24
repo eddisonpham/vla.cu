@@ -140,6 +140,50 @@ def test_add_norm_matches_the_two_pass_chain() -> None:
     torch.testing.assert_close(normed, expected_normed, rtol=1e-6, atol=1e-6)
 
 
+def test_row_kernels_match_the_row_loop() -> None:
+    """A chunk norm, add and fused add-norm must equal the row calls they replace."""
+    generator = torch.Generator(device="cuda").manual_seed(15)
+    rows, width = 4, 128
+    x = torch.randn((rows, width), device="cuda", generator=generator)
+    other = torch.randn((rows, width), device="cuda", generator=generator)
+    weight = torch.randn(width, device="cuda", generator=generator)
+    chunk_normed = torch.empty((rows, width), device="cuda")
+    chunk_sum = torch.empty((rows, width), device="cuda")
+    chunk_added = torch.empty((rows, width), device="cuda")
+    chunk_normed_sum = torch.empty((rows, width), device="cuda")
+    row_normed = torch.empty((rows, width), device="cuda")
+    row_sum = torch.empty((rows, width), device="cuda")
+    row_added = torch.empty((rows, width), device="cuda")
+    row_normed_sum = torch.empty((rows, width), device="cuda")
+
+    rmsnorm_into(x, weight, chunk_normed)
+    add_into(x, other, chunk_sum)
+    add_norm_into(x, other, weight, chunk_added, chunk_normed_sum)
+    for row in range(rows):
+        rmsnorm_into(x[row], weight, row_normed[row])
+        add_into(x[row], other[row], row_sum[row])
+        add_norm_into(x[row], other[row], weight, row_added[row], row_normed_sum[row])
+
+    for chunk_result, row_result in (
+        (chunk_normed, row_normed),
+        (chunk_sum, row_sum),
+        (chunk_added, row_added),
+        (chunk_normed_sum, row_normed_sum),
+    ):
+        torch.testing.assert_close(chunk_result, row_result, rtol=1e-6, atol=1e-6)
+
+
+def test_row_kernels_reject_mismatched_shapes() -> None:
+    """A chunk add with a short second operand must fail before it launches."""
+    generator = torch.Generator(device="cuda").manual_seed(16)
+    a = torch.randn((4, 32), device="cuda", generator=generator)
+    b = torch.randn((2, 32), device="cuda", generator=generator)
+    out = torch.empty((4, 32), device="cuda")
+
+    with pytest.raises(ValueError):
+        add_into(a, b, out)
+
+
 def test_rotary_turns_row_one_and_leaves_row_zero() -> None:
     """Position 0 is the identity rotation, which is what lets a one token block skip it."""
     generator = torch.Generator(device="cuda").manual_seed(6)
