@@ -21,6 +21,8 @@ BLOCK_N = 64
 BLOCK_K = 128
 MAX_BLOCK_M = 128
 SHARED_LIMIT_BYTES = 101376
+LONG_TOKENS = 33
+LONG_TILE: tuple[int, int, int, int] = (16, 128, 128, 2)
 Tile = tuple[int, int, int, int]
 TILES: tuple[Tile, ...] = (
     (16, 64, 128, 3),
@@ -90,7 +92,15 @@ def shared_memory_bytes(tile: Tile) -> int:
 
 
 def tile_for(tokens: int) -> Tile:
-    """Return the preset whose row tile covers `tokens` and whose stages fit shared memory."""
+    """Return the preset for `tokens`, using a narrow row tile once the chunk is long.
+
+    A 50 token chunk on a 64 row tile is one row block, so 720 outputs means six programs
+    on 26 SMs, and a 16 row tile makes four. That tile won every repeat of three paired
+    runs at 720 x 1920 and 50 tokens, by 1.07x to 1.53x (EXP-080). The direction repeated
+    and the size did not, so quote the range and not the best reading.
+    """
+    if tokens >= LONG_TOKENS:
+        return LONG_TILE
     for tile in TILES:
         if tokens <= tile[0] and shared_memory_bytes(tile) <= SHARED_LIMIT_BYTES:
             return tile

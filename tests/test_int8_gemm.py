@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from kernels.triton.int8_gemm import (
+    LONG_TILE,
     SHARED_LIMIT_BYTES,
     TILES,
     int8_gemm,
@@ -60,9 +61,10 @@ def test_every_menu_tile_fits_shared_memory() -> None:
     assert all(shared_memory_bytes(tile) <= SHARED_LIMIT_BYTES for tile in TILES)
 
 
-def test_tile_for_covers_the_token_count() -> None:
-    """A chunk pads to the next preset, and a long one keeps the last preset."""
-    assert [tile_for(tokens)[0] for tokens in (1, 16, 17, 50, 200)] == [16, 16, 32, 64, 128]
+def test_tile_for_gives_a_long_chunk_enough_programs() -> None:
+    """A 50 token chunk on a 16 row tile gives four row blocks instead of one padded one."""
+    assert tile_for(50) == LONG_TILE
+    assert [tile_for(tokens)[0] for tokens in (1, 16, 17, 200)] == [16, 16, 32, 16]
 
 
 def test_rejects_a_shape_mismatch() -> None:
