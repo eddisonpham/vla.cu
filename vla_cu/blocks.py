@@ -8,11 +8,15 @@ its projections only.
 
 Attention at one visible token reduces to the value path, so the block is v = Wv x and
 out = Wo v. The three qkv matrices share x, which is what the grouped launch exploits.
+At two tokens q and k decide the output, because the softmax has to choose how much of
+each value to keep, so that path prices a real attention block.
 
-Task: python -m vla_cu block
+Task: python -m vla_cu block, python -m vla_cu scale
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 from torch import Tensor
@@ -40,6 +44,26 @@ def matrix_bytes(rows: int, cols: int, bits: int, group_size: int) -> int:
     weights = rows * cols * bits // 8
     scales = 4 * rows * (cols // group_size) if bits == 4 else 4 * rows
     return weights + scales
+
+
+def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM) -> Tensor:
+    """Return the attention context [tokens, heads * head_dim] for unrotated q, k and v.
+
+    q is [tokens, heads * head_dim], k and v are [tokens, kv_heads * head_dim], with
+    kv_heads dividing heads. Scores are q.k over sqrt(head_dim), softmax runs over the
+    key axis, and each kv head serves `heads // kv_heads` query heads. No rotary
+    rotation is applied, so the scores carry no position, only content.
+    """
+    tokens = q.shape[0]
+    heads = q.shape[1] // head_dim
+    kv_heads = k.shape[1] // head_dim
+    require(heads % kv_heads == 0, f"{heads} query heads do not group {kv_heads} kv heads")
+    share = torch.arange(heads, device=q.device) // (heads // kv_heads)
+    query = q.reshape(tokens, heads, head_dim)
+    key = k.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    scores = torch.bmm(query, key.transpose(1, 2)) * (1.0 / math.sqrt(head_dim))
+    return torch.bmm(torch.softmax(scores, dim=-1), value).reshape(tokens, heads * head_dim)
 
 
 class MlpBlock:
@@ -138,6 +162,50 @@ class GqaValueBlock:
         int8_gemv_into(self.v, self.v_scales, x, self.v_out)
         torch.index_select(self.v_out, 0, self.expand, out=self.expanded)
         int8_gemv_into(self.o, self.o_scales, self.expanded, out)
+
+
+class GqaTokenBlock:
+    """One grouped-query attention block at two or more tokens, q and k included.
+
+    `wq` is [heads * 64, input_width], `wk` and `wv` are [kv_heads * 64, other_width] and
+    `wo` is [hidden, heads * 64]. Every projection is one GEMV per token, so the block
+    costs four launches per token; the softmax and the value mix are a few [tokens, heads,
+    tokens] torch ops between them. `into` reads `x` [tokens, input_width] and writes `out`
+    [tokens, hidden], taking k and v from `other` [tokens, other_width] when it is given.
+    """
+
+    def __init__(self, wq: Tensor, wk: Tensor, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM) -> None:
+        require(wq.dim() == 2 and wk.shape == wv.shape and wo.dim() == 2, f"expected 2D matrices, got {tuple(wq.shape)} and {tuple(wo.shape)}")
+        require(wo.shape[1] == wq.shape[0], f"o input {wo.shape[1]} does not match q output {wq.shape[0]}")
+        require(wq.shape[0] % head_dim == 0 and wk.shape[0] % head_dim == 0, "head_dim must divide both head counts")
+        tokens = 2
+        self.hidden_width = wo.shape[0]
+        self.input_width = wq.shape[1]
+        self.other_width = wk.shape[1]
+        self.head_dim = head_dim
+        self.q, self.q_scales = quantize_int8(wq)
+        self.k, self.k_scales = quantize_int8(wk)
+        self.v, self.v_scales = quantize_int8(wv)
+        self.o, self.o_scales = quantize_int8(wo)
+        device = wq.device
+        self.q_out = torch.empty(tokens, wq.shape[0], device=device, dtype=torch.float32)
+        self.k_out = torch.empty(tokens, wk.shape[0], device=device, dtype=torch.float32)
+        self.v_out = torch.empty(tokens, wv.shape[0], device=device, dtype=torch.float32)
+        self.context = torch.empty(tokens, wo.shape[1], device=device, dtype=torch.float32)
+        self.bytes = sum(
+            matrix_bytes(rows, cols, 8, GROUP_SIZE) for rows, cols in (wq.shape, wk.shape, wv.shape, wo.shape)
+        )
+
+    def into(self, x: Tensor, other: Tensor | None, out: Tensor) -> None:
+        """Write the attention output into `out` [tokens, hidden], reading `x` and `other`."""
+        source = x if other is None else other
+        for token in range(x.shape[0]):
+            int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
+            int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
+            int8_gemv_into(self.v, self.v_scales, source[token], self.v_out[token])
+        self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim))
+        for token in range(x.shape[0]):
+            int8_gemv_into(self.o, self.o_scales, self.context[token], out[token])
 
 
 class ActionBlock:

@@ -25,7 +25,7 @@ from vla_cu.bench_utils import (
     time_call,
     warm_gpu,
 )
-from vla_cu.blocks import GqaValueBlock, MlpBlock
+from vla_cu.blocks import GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
 from vla_cu.checkpoint import open_checkpoint
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
@@ -213,6 +213,98 @@ def stack_scale(checkpoint) -> None:
     print()
 
 
+def two_token_chain(checkpoint) -> None:
+    """Run the 16 real expert layers at two tokens, where q and k decide the mixing.
+
+    Two tokens make the softmax choose between two keys, so a layer pays for q, k and v
+    and every projection is one GEMV per token. The reference is the same chain in fp32
+    with the same weights and the same fixed cross-attention prefix. No rotary rotation
+    is applied on either side, so this prices content mixing, not position.
+    """
+    print("stage 4: two tokens through the expert stack, q and k included")
+    print(f"{'layers':>7}  {'MB':>7}  {'ms':>8}  {'cos':>9}  {'rel L2':>9}")
+    tokens = 2
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    names = (
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight",
+        "input_layernorm.weight",
+        "post_attention_layernorm.weight",
+    )
+    blocks = []
+    for index in range(EXPERT_LAYERS):
+        prefix = f"model.vlm_with_expert.lm_expert.layers.{index}"
+        wq, wk, wv, wo, up, down, input_norm, post_norm = (
+            checkpoint.read(f"{prefix}.{name}").to(device="cuda", dtype=torch.float32) for name in names
+        )
+        attention = GqaTokenBlock(wq, wk, wv, wo)
+        other = None
+        if attention.other_width != attention.hidden_width:
+            other = torch.randn(tokens, attention.other_width, device="cuda", generator=generator)
+        blocks.append((attention, MlpBlock(up, down, down_bits=4), (input_norm, post_norm), other))
+        del wq, wk, wv, wo, up, down
+
+    hidden = blocks[0][1].hidden_width
+    x = torch.randn(tokens, hidden, device="cuda", generator=generator)
+    current = torch.empty(tokens, hidden, device="cuda")
+    following = torch.empty(tokens, hidden, device="cuda")
+    scratch = torch.empty(tokens, hidden, device="cuda")
+    normed = torch.empty(tokens, hidden, device="cuda")
+    delta = torch.empty(tokens, hidden, device="cuda")
+
+    def chain(depth: int) -> torch.Tensor:
+        """Run attention and MLP for the first `depth` layers at every token."""
+        current.copy_(x)
+        for index in range(depth):
+            attention, mlp, (input_norm, post_norm), other = blocks[index]
+            source = current if index % 2 == 0 else following
+            target = following if index % 2 == 0 else current
+            for token in range(tokens):
+                rmsnorm_into(source[token], input_norm, normed[token])
+            attention.into(normed, other, scratch)
+            for token in range(tokens):
+                add_into(source[token], scratch[token], delta[token])
+                rmsnorm_into(delta[token], post_norm, normed[token])
+                mlp.into(normed[token], scratch[token])
+                add_into(delta[token], scratch[token], target[token])
+        return following if depth % 2 else current
+
+    references: dict[int, torch.Tensor] = {}
+    reference = x.clone()
+    for depth in range(1, EXPERT_LAYERS + 1):
+        prefix = f"model.vlm_with_expert.lm_expert.layers.{depth - 1}"
+        wq, wk, wv, wo, up, down, input_norm, post_norm = (
+            checkpoint.read(f"{prefix}.{name}").to(device="cuda", dtype=torch.float32) for name in names
+        )
+        other = blocks[depth - 1][3]
+        normalized = torch.stack([reference_norm(reference[token], input_norm) for token in range(tokens)])
+        value_input = normalized if other is None else other
+        context = gqa_mix(normalized @ wq.T, value_input @ wk.T, value_input @ wv.T)
+        reference = reference + context @ wo.T
+        normalized = torch.stack([reference_norm(reference[token], post_norm) for token in range(tokens)])
+        reference = reference + F.silu(normalized @ up.T) @ down.T
+        if depth in STACKS:
+            references[depth] = reference.clone()
+        del wq, wk, wv, wo, up, down
+
+    for depth in STACKS:
+        result = chain(depth).clone()
+        seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
+        n_bytes = sum(attention.bytes + mlp.bytes for attention, mlp, _, _ in blocks[:depth])
+        flat = result.reshape(-1)
+        expected = references[depth].reshape(-1)
+        print(
+            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>8.3f}  "
+            f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}"
+        )
+    print("note: no rotary rotation on either side, odd layers read the same fixed prefix [2, 320]")
+    print()
+
+
 def main() -> int:
     """Run the three scaling stages in order, smallest first, inside the memory cap."""
     enforce_memory_budget()
@@ -223,6 +315,7 @@ def main() -> int:
     checkpoint = open_checkpoint(CHECKPOINT)
     precision_ladder(checkpoint)
     stack_scale(checkpoint)
+    two_token_chain(checkpoint)
     return 0
 
 
