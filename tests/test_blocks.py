@@ -7,7 +7,17 @@ import torch
 import torch.nn.functional as F
 
 from kernels.triton.gqa_attention import gqa_attention_into
-from vla_cu.blocks import ActionBlock, AttentionBlock, GqaTokenBlock, MlpBlock, gqa_mix, rotary, rotary_tables
+from kernels.triton.rmsnorm import add_into, add_norm_into, rmsnorm_into
+from vla_cu.blocks import (
+    ActionBlock,
+    AttentionBlock,
+    GqaTokenBlock,
+    MlpBlock,
+    MlpTokenBlock,
+    gqa_mix,
+    rotary,
+    rotary_tables,
+)
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -40,6 +50,32 @@ def test_mlp_matches_the_fp32_chain() -> None:
 
     exact = down @ F.silu(up @ x)
     assert cosine(out, exact) > 0.99
+
+
+def test_mlp_token_block_matches_the_fp32_chain() -> None:
+    """The chunk MLP must hold the same chain as the one-token block, GEMMs or not."""
+    up, down = mlp_matrices(64, 128, 12)
+    x = torch.randn((3, 64), device="cuda")
+    out = torch.empty((3, 64), device="cuda")
+    MlpTokenBlock(up, down, tokens=3).into(x, out)
+
+    exact = F.silu(x @ up.T) @ down.T
+    assert out.shape == (3, 64)
+    assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.99
+
+
+def test_mlp_token_block_agrees_with_the_token_loop() -> None:
+    """The GEMM rounds activations to fp16 at the dot, so it is close, not identical, to the GEMV."""
+    up, down = mlp_matrices(64, 128, 13)
+    x = torch.randn((2, 64), device="cuda")
+    chunk = torch.empty((2, 64), device="cuda")
+    loop = torch.empty((2, 64), device="cuda")
+    MlpTokenBlock(up, down, tokens=2).into(x, chunk)
+    block = MlpBlock(up, down)
+    for token in range(2):
+        block.into(x[token], loop[token])
+
+    assert cosine(chunk.reshape(-1), loop.reshape(-1)) > 0.9999
 
 
 def test_int8_down_is_closer_than_int4_down() -> None:
@@ -83,6 +119,25 @@ def test_rejects_matrices_that_do_not_compose() -> None:
     up, down = mlp_matrices(64, 128, 5)
     with pytest.raises(ValueError):
         MlpBlock(up, down[:, :-1])
+
+
+def test_add_norm_matches_the_two_pass_chain() -> None:
+    """One launch must equal the residual add then the norm, or the fusion is a bug."""
+    generator = torch.Generator(device="cuda").manual_seed(14)
+    a = torch.randn(128, device="cuda", generator=generator)
+    b = torch.randn(128, device="cuda", generator=generator)
+    weight = torch.randn(128, device="cuda", generator=generator)
+    added = torch.empty(128, device="cuda")
+    normed = torch.empty(128, device="cuda")
+    expected_added = torch.empty(128, device="cuda")
+    expected_normed = torch.empty(128, device="cuda")
+    add_into(a, b, expected_added)
+    rmsnorm_into(expected_added, weight, expected_normed)
+
+    add_norm_into(a, b, weight, added, normed)
+
+    torch.testing.assert_close(added, expected_added, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(normed, expected_normed, rtol=1e-6, atol=1e-6)
 
 
 def test_rotary_turns_row_one_and_leaves_row_zero() -> None:

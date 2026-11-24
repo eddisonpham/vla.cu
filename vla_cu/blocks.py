@@ -22,6 +22,7 @@ import torch
 from torch import Tensor
 
 from kernels.triton.gqa_attention import gqa_attention_into
+from kernels.triton.int4_gemm import int4_gemm_into
 from kernels.triton.int4_gemv import int4_gemv_into
 from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
 from kernels.triton.int8_gemm import int8_gemm_into
@@ -143,6 +144,49 @@ class MlpBlock:
             int4_gemv_into(self.down, self.down_scales, self.hidden, out, group_size=self.group_size)
         else:
             int8_gemv_into(self.down, self.down_scales, self.hidden, out)
+
+
+class MlpTokenBlock:
+    """A two-layer MLP over a chunk of tokens: int8 up, SiLU in place, down at int4 or int8.
+
+    `up` is [intermediate, hidden] and `down` is [hidden, intermediate], both fp32. Every
+    projection is one GEMM over the whole chunk, so the weights are read once instead of
+    once per token, and the intermediate buffer is [tokens, intermediate]. The block owns
+    that buffer, so `into` is not reentrant.
+    """
+
+    def __init__(
+        self,
+        up: Tensor,
+        down: Tensor,
+        down_bits: int = 4,
+        group_size: int = GROUP_SIZE,
+        tokens: int = 2,
+    ) -> None:
+        require(up.dim() == 2 and down.dim() == 2, f"expected 2D matrices, got {tuple(up.shape)} and {tuple(down.shape)}")
+        require(up.shape[0] == down.shape[1] and up.shape[1] == down.shape[0], f"up {tuple(up.shape)} and down {tuple(down.shape)} do not compose")
+        require(down_bits in BITS, f"expected 4 or 8 bits, got {down_bits}")
+        require(tokens > 0, f"token count {tokens} must be positive")
+        intermediate, hidden = up.shape
+        self.tokens = tokens
+        self.hidden_width = hidden
+        self.intermediate = intermediate
+        self.down_bits = down_bits
+        self.group_size = group_size
+        self.up, self.up_scales = quantize_int8(up)
+        self.down, self.down_scales = _pack(down, down_bits, group_size)
+        self.hidden = torch.empty(tokens, intermediate, device=up.device, dtype=torch.float32)
+        self.bytes = matrix_bytes(intermediate, hidden, 8, group_size) + matrix_bytes(hidden, intermediate, down_bits, group_size)
+
+    def into(self, x: Tensor, out: Tensor) -> None:
+        """Write down(silu(up @ x)) into `out` for every row of `x` [tokens, hidden]."""
+        require(x.shape == (self.tokens, self.hidden_width), f"expected x {(self.tokens, self.hidden_width)}, got {tuple(x.shape)}")
+        int8_gemm_into(self.up, self.up_scales, x, self.hidden)
+        torch.nn.functional.silu(self.hidden, inplace=True)
+        if self.down_bits == 4:
+            int4_gemm_into(self.down, self.down_scales, self.hidden, out, group_size=self.group_size)
+        else:
+            int8_gemm_into(self.down, self.down_scales, self.hidden, out)
 
 
 class AttentionBlock:

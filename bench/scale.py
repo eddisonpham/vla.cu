@@ -16,7 +16,7 @@ from torch.nn import functional as F
 
 from bench.real_layers import CHECKPOINT, MATRICES, cosine, pad_columns, relative_error, run_int4
 from kernels.triton.int4_gemv import int4_gemv_into
-from kernels.triton.rmsnorm import EPS, add_into, rmsnorm_into
+from kernels.triton.rmsnorm import EPS, add_into, add_norm_into, rmsnorm_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
     bandwidth_gb_s,
@@ -25,7 +25,7 @@ from vla_cu.bench_utils import (
     time_call,
     warm_gpu,
 )
-from vla_cu.blocks import GEMM_MIN_TOKENS, THETA, GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
+from vla_cu.blocks import GEMM_MIN_TOKENS, THETA, GqaTokenBlock, GqaValueBlock, MlpBlock, MlpTokenBlock, gqa_mix
 from vla_cu.checkpoint import open_checkpoint
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
@@ -219,9 +219,13 @@ def stack_scale(checkpoint) -> None:
 
 
 def layer_launches(tokens: int) -> int:
-    """Return the launches one layer issues at `tokens`: projections, mix, norms and adds."""
-    projections = 4 if tokens >= GEMM_MIN_TOKENS else 4 * tokens
-    return projections + 1 + 6 * tokens
+    """Return the launches one layer issues at `tokens`: projections, mix, MLP, norms and adds.
+
+    Above GEMM_MIN_TOKENS both projection pairs are one GEMM per matrix, so only the two
+    norms and the two residual adds still scale with the token count.
+    """
+    attention = 5 if tokens >= GEMM_MIN_TOKENS else 1 + 4 * tokens
+    return attention + 3 + 3 * tokens
 
 
 def token_chain(
@@ -231,8 +235,8 @@ def token_chain(
 
     Two tokens make the softmax choose between two keys, up to eight make it choose among
     eight, so every token feeds every other one and a layer pays for q, k and v. Above
-    GEMM_MIN_TOKENS the four attention projections are one GEMM each, so their launch
-    count stops growing with the token count. The
+    GEMM_MIN_TOKENS the four attention    projections and both MLP projections are one GEMM each, so their launch count stops
+    growing with the token count; only the norms and residual adds still run per token. The
     reference is the same chain in fp32 with the same weights, the same fixed
     cross-attention prefix and the same rotation. Attention is causal, so token i reads
     keys 0 to i, which is the schedule the expert runs. Each depth is also captured as one
@@ -266,7 +270,7 @@ def token_chain(
         other = None
         if attention.other_width != attention.hidden_width:
             other = torch.randn(tokens, attention.other_width, device="cuda", generator=generator)
-        blocks.append((attention, MlpBlock(up, down, down_bits=4), (input_norm, post_norm), other))
+        blocks.append((attention, MlpTokenBlock(up, down, down_bits=4, tokens=tokens), (input_norm, post_norm), other))
         del wq, wk, wv, wo, up, down
 
     hidden = blocks[0][1].hidden_width
@@ -288,9 +292,9 @@ def token_chain(
                 rmsnorm_into(source[token], input_norm, normed[token])
             attention.into(normed, other, scratch)
             for token in range(tokens):
-                add_into(source[token], scratch[token], delta[token])
-                rmsnorm_into(delta[token], post_norm, normed[token])
-                mlp.into(normed[token], scratch[token])
+                add_norm_into(source[token], scratch[token], post_norm, delta[token], normed[token])
+            mlp.into(normed, scratch)
+            for token in range(tokens):
                 add_into(delta[token], scratch[token], target[token])
         return following if depth % 2 else current
 
