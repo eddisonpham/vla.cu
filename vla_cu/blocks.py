@@ -21,6 +21,7 @@ import math
 import torch
 from torch import Tensor
 
+from kernels.triton.gqa_attention import gqa_attention_into
 from kernels.triton.int4_gemv import int4_gemv_into
 from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
 from kernels.triton.int8_gemv import int8_gemv_into
@@ -31,6 +32,7 @@ from vla_cu.validate import require
 BITS = (4, 8)
 HEAD_DIM = 64
 THETA = 100000.0
+FUSED_MAX_TOKENS = 4
 
 
 def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
@@ -201,20 +203,30 @@ class GqaTokenBlock:
     `wo` is [hidden, heads * 64]. Every projection is one GEMV per token, so the block
     costs four launches per token; q and k rotate by their row's position, the softmax is
     causal so a token reads only itself and earlier tokens, and the score and value mix
-    are two [heads, tokens, tokens] einsums between them. `into` reads
-    `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
+    are either one fused Triton kernel or two [heads, tokens, tokens] einsums. The kernel
+    wins up to FUSED_MAX_TOKENS and the einsums win above it, because the kernel reloads
+    its key and value tiles per query head (EXP-062). `into`
+    reads `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
     `other` [tokens, other_width] when it is given. `tokens` fixes the buffer shapes, so
     one block serves one token count and a graph captures that count.
     """
 
     def __init__(
-        self, wq: Tensor, wk: Tensor, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM, tokens: int = 2
+        self,
+        wq: Tensor,
+        wk: Tensor,
+        wv: Tensor,
+        wo: Tensor,
+        head_dim: int = HEAD_DIM,
+        tokens: int = 2,
+        causal: bool = True,
     ) -> None:
         require(wq.dim() == 2 and wk.shape == wv.shape and wo.dim() == 2, f"expected 2D matrices, got {tuple(wq.shape)} and {tuple(wo.shape)}")
         require(wo.shape[1] == wq.shape[0], f"o input {wo.shape[1]} does not match q output {wq.shape[0]}")
         require(wq.shape[0] % head_dim == 0 and wk.shape[0] % head_dim == 0, "head_dim must divide both head counts")
         require(tokens > 0, f"token count {tokens} must be positive")
         self.tokens = tokens
+        self.causal = causal
         self.hidden_width = wo.shape[0]
         self.input_width = wq.shape[1]
         self.other_width = wk.shape[1]
@@ -240,7 +252,12 @@ class GqaTokenBlock:
             int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
             int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
             int8_gemv_into(self.v, self.v_scales, source[token], self.v_out[token])
-        self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim))
+        if self.tokens <= FUSED_MAX_TOKENS:
+            query = rotary(self.q_out, self.head_dim)
+            key = rotary(self.k_out, self.head_dim)
+            gqa_attention_into(query, key, self.v_out, self.context, self.head_dim, self.causal)
+        else:
+            self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, self.causal))
         for token in range(x.shape[0]):
             int8_gemv_into(self.o, self.o_scales, self.context[token], out[token])
 

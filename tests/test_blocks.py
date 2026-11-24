@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from kernels.triton.gqa_attention import gqa_attention_into
 from vla_cu.blocks import ActionBlock, AttentionBlock, GqaTokenBlock, MlpBlock, gqa_mix, rotary
 
 
@@ -139,3 +140,25 @@ def test_gqa_mix_masks_future_keys() -> None:
 
     torch.testing.assert_close(causal[0], v[0].repeat(2))
     assert not torch.allclose(full[0], v[0].repeat(2))
+
+
+def test_attention_kernel_matches_the_einsum_reference() -> None:
+    """The kernel must reproduce the masked softmax over positions, not over heads."""
+    generator = torch.Generator(device="cuda").manual_seed(10)
+    tokens, heads, kv_heads, head_dim = 5, 4, 2, 8
+    q = torch.randn((tokens, heads * head_dim), device="cuda", generator=generator)
+    k = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
+    v = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
+    share = torch.arange(heads, device="cuda") // (heads // kv_heads)
+    query = q.reshape(tokens, heads, head_dim)
+    key = k.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    scores = torch.einsum("thd,shd->hts", query, key) / head_dim**0.5
+    future = torch.ones(tokens, tokens, dtype=torch.bool, device="cuda").triu(1)
+    weights = torch.softmax(scores.masked_fill(future[None], float("-inf")), dim=-1)
+    expected = torch.einsum("hts,shd->thd", weights, value).reshape(tokens, heads * head_dim)
+
+    out = torch.empty_like(q)
+    gqa_attention_into(q, k, v, out, head_dim=head_dim)
+
+    torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-5)
