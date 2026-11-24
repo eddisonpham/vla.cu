@@ -42,6 +42,7 @@ TASKS: dict[str, str] = {
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",
     "real": "bench.real_layers",
+    "realstack": "bench.real_stack",
     "scale": "bench.scale",
     "demo": "bench.demo",
     "sanitize": "bench.sanitize",
