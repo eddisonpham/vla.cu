@@ -3,7 +3,9 @@
 Concept: RMSNorm scales a vector by the inverse root mean square and then by a learned
 per-feature weight. At one token the whole vector fits in one program, so the reduction
 is a single sum and the kernel is launch bound rather than bandwidth bound. The
-residual is its own pass here, so a normed layer costs norm, up, down, add.
+residual is its own pass here, so a normed layer costs norm, up, down, add. EPS is the
+model's `rms_norm_eps`, 1e-05 from the SmolVLM2 text config, and the fp32 reference in
+`bench/scale.py` imports the same constant, so the two sides cannot drift.
 
 Task: python -m vla_cu scale
 """
@@ -16,7 +18,7 @@ import triton.language as tl
 
 from vla_cu.validate import require
 
-EPS = 1e-6
+EPS = 1e-05
 
 
 @triton.jit
