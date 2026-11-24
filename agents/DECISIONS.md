@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-086: a layer index requires an explicit stack, never auto-detect (2026-11-24)
+
+- Context: EXP-093. A SmolVLA checkpoint stores the backbone and the action expert under `model.vlm_with_expert`, both indexed the same way, with different widths.
+- Decision: `layer_prefix` takes `part` as `"vlm"` or `"expert"`, defaults to `"vlm"`, and both builders accept either an index or a full prefix. An unknown part or an index the header does not hold is a ValueError naming the acceptable value or the layers present.
+- Consequence: `layer=3` cannot silently pick the other stack and build a block of the right rank and the wrong width. A caller with an unusual checkpoint keeps the prefix path.
+
 ## DEC-085: `graphed()` is for small layers, and the docstring says so (2026-11-24)
 
 - Context: EXP-092 timed the wrapper alone. The graph removes a flat 0.020 ms of host dispatch and adds a copy and a replay dispatch, so it wins below roughly 1.5 MB of packed weights and loses slightly above 9 MB.

@@ -9,35 +9,36 @@
 
 ## Campaign
 
-A real SmolVLA layer is three lines and one launch, and the cost of a captured call now
-has a measured boundary. 236 device tests pass, both cooperative kernels memcheck clean.
+A real layer is now a layer index and a stack name: `mlp_from_checkpoint(checkpoint, 3,
+part="expert")`. 240 device tests pass, both cooperative kernels memcheck clean.
 
 ## Closed in this pass
 
-- **Where graph capture pays.** The wrapper removes a flat 0.020 ms of host dispatch and
-  adds a copy plus a replay dispatch. Measured 2.20x at 0.09 MB of packed weights, 1.79x
-  at 1.38 MB, 0.93x at 9.44 MB, 0.94x at 18.87 MB (EXP-092, DEC-085).
-- **Gated cooperative kernel.** One launch for a three-matrix SwiGLU MLP, 3.49x at one
-  token at 720/1920 and 2.36x at 960/2560 (EXP-091).
-- **Checks.** 236 passed on the GPU, 42 passed and 194 skipped with no device, style 0,
-  memcheck 0 errors on both cooperative kernels.
+- **Layer index resolver.** `layer_prefix` maps `layer=3` onto the backbone
+  `model.vlm_with_expert.vlm.model.text_model.layers.3` or the expert
+  `model.vlm_with_expert.lm_expert.layers.3`, with `part` choosing and the header checked
+  (EXP-093, DEC-086). Both builders take an index or a prefix.
+- **Naming bugs caught.** The first run appended `.self_attn` twice for a prefix and
+  dropped `.mlp` for an index; tests now cover both paths.
+- **Checks.** 240 passed on the GPU, 44 passed and 196 skipped with no device, style 0,
+  memcheck 0 errors on both cooperative kernels (EXP-091).
 
 ## What works
 
 - `python -m vla_cu demo`, `coop`, `coopgated`, `graphed`, `sanitize`, `style` exit 0.
-- `mlp_from_checkpoint` builds `GatedMlpBlock` when `gate_proj` is present (EXP-088).
-- `Int4Linear.graphed()` replays bit for bit and pays below roughly 1.5 MB (EXP-092).
-- `python -m vla_cu coop`: both widths cross at 10 tokens (EXP-090).
+- `mlp_from_checkpoint(checkpoint, 3, part="expert")` builds a gated SwiGLU block.
+- `attention_from_checkpoint(checkpoint, 3, part="vlm")` appends `self_attn` itself.
+- `Int4Linear.graphed()` pays below roughly 1.5 MB of packed weights (EXP-092).
 
 ## Open edges
 
-- **The graphed wrapper still copies its input**, which is the few microseconds that make
-  4096 x 4096 a small loss. Capturing a producer that writes the same buffer would fix it.
+- **A whole layer is still several calls.** Norms and the residual pair have no builder,
+  so the layer index stops at the projections.
+- **The resolver knows two schemes**, the SmolVLB backbone and the expert, not arbitrary
+  checkpoints. A different model keeps the prefix path.
 - **The gated tail re-reads gate and up per token tile**, so it grows with tokens where
   the eager GEMM does not.
 - **The builder and `GatedMlpBlock` do not call the fused kernel.**
-- **All measured weights fit L2**, so the reported GB/s is L2-fed and no row here is a
-  DRAM claim, including the 261 GB/s at 18.87 MB.
 - **`ncu` is blocked** by ERR_NVGPUCTRPERM, so attribution is inference from timing.
 - **The int4 CUDA extension** still cannot be instrumented on Windows.
 - **CI proves style, imports and collection**, not kernel correctness.
@@ -45,12 +46,12 @@ has a measured boundary. 236 device tests pass, both cooperative kernels memchec
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell on the 1920 x 768 shape.
-2. Choose: a producer-captured layer with no input copy, `GatedMlpBlock` calling the fused
-   kernel, or a block-level graph wrapper.
+2. Choose: a whole layer builder, `GatedMlpBlock` calling the fused kernel, or the no-copy
+   graph wrapper.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Remove the input copy so capture stops losing on the big projection.
+1. Add norms and the residual pair to the builder, so one index is one whole layer.
 2. Wire `GatedMlpBlock` to `coop_gated_into`, so the library path is one launch too.
-3. Capture a whole block and its residual add, since the block demo is where graphs paid 3x.
+3. Remove the input copy from `graphed()`, the few microseconds that make big layers lose.

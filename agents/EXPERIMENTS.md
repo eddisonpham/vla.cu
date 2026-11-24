@@ -1247,6 +1247,17 @@
 - Verdict: capture pays below roughly 1.5 MB of packed weights, is a wash near 9 MB and a small loss above it. The wrapper is for small layers such as an attention or MLP projection, not for the big projection.
 - Follow-ups: drop the input copy by capturing a producer that writes the same buffer, which is the few microseconds that makes 4096 x 4096 a loss; a block-level wrapper that captures several layers and one residual add.
 
+## EXP-093: a layer index resolves the backbone or the expert  (2026-11-24)
+- Goal / question: EXP-088 made the caller pass a full prefix, because SmolVLA and its backbone name layers differently. With the two real schemes known from the checkpoint, can the builder take `layer=3` without guessing the wrong stack?
+- Change: `vla_cu/build.py` adds `layer_prefix`, which resolves one index against `PREFIXES`: `model.vlm_with_expert.vlm.model.text_model.layers.{layer}` for the backbone and `model.vlm_with_expert.lm_expert.layers.{layer}` for the action expert. `mlp_from_checkpoint` and `attention_from_checkpoint` accept `layer` as an index or a prefix, plus `part` to select the stack, and the index path appends the module itself, `.mlp` or `.self_attn`. A wrong index is refused with the layers the header holds. `layer_prefix` is exported. Four tests: both stacks at one index, attention by index, an out of range index, an unknown part.
+- Prediction: none filed by the human.
+- Command: `pytest -q`, `CUDA_VISIBLE_DEVICES= pytest -q`.
+- Result (measured): 240 tests pass on the RTX 5060 Laptop GPU, 44 pass and 196 skip with no device, style 0. Both stacks resolve at index 0 and their widths differ as written, the backbone 64 to 128 and the expert 128 to 256, so a wrong stack would show up as a wrong width rather than a plausible block.
+- Explanation / hypothesis: both stacks exist at the same index in a real checkpoint, so an auto-detect would have to choose, and it would choose silently. Making `part` explicit, with the backbone as the default and both names in the error, keeps the width visible at the call site.
+- Caveat: two bugs were caught by the first test run, both from joining names twice: the MLP path dropped `.mlp` after resolving, and the attention path appended `.self_attn` to a prefix that already ended at the module. The tests above cover both, and the prefix path still behaves as before. The resolver knows only these two SmolVLA schemes, not arbitrary checkpoints.
+- Verdict: worked. A real layer is `mlp_from_checkpoint(checkpoint, 3, part="expert")`.
+- Follow-ups: resolve norms and the residual pair from the same index, so a whole layer is one call; read the stack names from a config instead of a constant table.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

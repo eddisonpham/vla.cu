@@ -92,7 +92,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
 | CI and gates | 230 tests on a GPU, 40 passed and 190 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
-| Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk (EXP-088) |
+| Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
 | Gated cooperative tail | one launch for a three-matrix SwiGLU MLP, gate and up computed in one pass over the staged norm: 3.49x at 1 token at 720/1920 and 2.36x at 960/2560, crossing at 12 and 8 tokens (EXP-091) |
 | Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused (EXP-089) |
 | Where capture pays | 2.20x at 0.09 MB of packed weights, 1.79x at 1.38 MB, 0.93x at 9.44 MB and 0.94x at 18.87 MB, so the win is a fixed host cost, not a big-matrix one (EXP-092) |
@@ -144,7 +144,7 @@ fast = layer.graphed()
 y = fast(x)
 
 checkpoint = open_checkpoint("model.safetensors")
-block = mlp_from_checkpoint(checkpoint, "model.language_model.layers.0.mlp")
+block = mlp_from_checkpoint(checkpoint, 3, part="expert")
 out = torch.empty(block.hidden_width, device="cuda")
 block.into(x, out)
 ```
@@ -152,8 +152,9 @@ block.into(x, out)
 `python -m vla_cu demo` runs all three levels on synthetic weights at the SmolVLA
 widths and prints time and accuracy side by side. Every object here is inference only:
 fp32 activations, one CUDA device, no bias, no backward. `graphed()` is opt in and
-returns the captured buffer, so clone it to keep it. The builder takes the prefix that
-ends at the block; `gate_proj` in the checkpoint selects the gated block.
+returns the captured buffer, so clone it to keep it. The builder takes a layer index and
+a stack name, `part="vlm"` for the SmolVLM2 backbone or `part="expert"` for the action
+expert, and a full prefix still works. `gate_proj` in the checkpoint selects the gated block.
 
 ## How to run
 

@@ -135,6 +135,7 @@ kernels, so they are used as references and as performance baselines.
 | 45 | two-width tail sweep | 1 to 64 tokens at 720/1920 and 960/2560, first losing token count printed | `bench/coop.py` | done, both cross at 10 tokens, 0.44x against 0.67x at 16 (EXP-090) |
 | 46 | gated cooperative tail | gate and up dots share one pass over the staged norm, two grid barriers as before | `csrc/coop_layer_kernel.cuh`, `bench/coop_gated.py` | done, 3.49x and 2.36x at 1 token, crossover 12 and 8 tokens (EXP-091) |
 | 47 | graphed layer sweep | eager against `graphed()` at five shapes from 0.09 to 18.87 MB of packed weights | `bench/graph_layer.py` | done, 2.20x to 0.94x, so capture pays below about 1.5 MB (EXP-092) |
+| 48 | layer index resolver | one index plus a stack name resolves the SmolVLM2 backbone or the action expert, checked against the header | `vla_cu/build.py` | done, both stacks at one index, a wrong index names the layers held (EXP-093) |
 
 ## 7. Measurement protocol
 

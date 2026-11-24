@@ -126,7 +126,8 @@ on purpose, not forgotten.
 - [ ] Drop the input copy from `graphed()` by capturing a producer that writes the same buffer, which is what makes the 4096 x 4096 case a small loss.
 - [x] The gated SwiGLU MLP inside the cooperative kernel, so a real layer is one launch. Done 2026-11-24, EXP-091, 3.49x at 1 token.
 - [ ] Share the gate and up weight reads across token tiles in the gated tail, which is why it crosses at 8 tokens at 960/2560 and 12 at 720/1920.
-- [ ] A layer index to prefix helper for the two SmolVLA naming schemes, so the builder can take `layer=3`.
+- [x] A layer index to prefix helper for the two SmolVLA naming schemes. Done 2026-11-24, EXP-093: `layer=3` plus `part="vlm"` or `"expert"`.
+- [ ] Resolve the norms and the residual pair from the same layer index, so a whole transformer layer is one call.
 - [ ] Explain the 0.073 against 0.194 ms spread on the same matrix row across sessions (L2 residency or clock state) before quoting a matrix speedup.
 - [ ] Instrument the CUDA extension on Linux or WSL2, where the sanitizer may attach (EXP-087).
 - [ ] A self-hosted GPU runner would let CI run the 169 device tests instead of skipping them (EXP-083).
