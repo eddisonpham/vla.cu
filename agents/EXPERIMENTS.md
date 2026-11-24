@@ -994,6 +994,31 @@
 - Verdict: worked. What is left per token is the pre-attention norm and the final residual add, both one launch each.
 - Follow-ups: a two-dimensional norm over the token chunk would remove the rest of the tail in one change.
 
+## EXP-070: the norm, the add and the fused add-norm over a whole chunk  (2026-11-23)
+- Goal / question: after EXP-069 the layer still spent three launches per token on the pre-attention norm, the fused add-norm and the final residual add. One program per row should make each of them one launch for the whole chunk.
+- Change (one thing): the three rmsnorm kernels take a row program id and the wrappers accept 1D or 2D input, launching one program per row. The chain calls them on [tokens, hidden] buffers instead of slicing rows in Python.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, 16 real expert layers, clocks pinned at 1950 MHz.
+- GPU / environment: RTX 5060 Laptop, 75 C, 50 W draw, stage 1 at 145 GB/s, so still throttled against the 298 GB/s of the early afternoon.
+- Result (measured), depth 16 graph ms, tokens 2, 3, 4, 8, 50: 2.439, 2.434, 2.354, 2.300, 4.468. Launches per layer 11 against 158. Eager at 50 tokens 7.561 ms against 105.106.
+- Correctness: exact at every depth, cosine identical to five decimals (0.99784 at 2 tokens, 0.99638 at 50), and a new test proves each row kernel equals the row by row calls it replaces.
+- Explanation / hypothesis: the graph gain at 50 tokens (8.456 to 4.468) is the 147 launches removed; the eager gain is far larger because each removed launch also removed three torch slice views and the Python loop around them, and eager is where that cost lives.
+- Caveat: the 2 and 3 token columns read slightly above the previous run (2.439 against 2.050) while the 50 token column halved, which is the clock state, not the kernel. A launch count of 11 is the only number here that is independent of clocks.
+- Verdict: worked. The layer is now 11 launches at any token count: four attention GEMMs, one mix, one MLP up, one SiLU, one MLP down, one norm, one fused add-norm, one add.
+- Follow-ups: the 2 and 3 token columns need a paired run before anyone claims a small-M result.
+
+## EXP-071: stream K in one launch, a second negative  (2026-11-23)
+- Goal / question: EXP-068 showed a K split lost because the reduce was a whole extra launch. Does a split that recombines inside the same launch pay, with no reduce launch and no host side partials pass?
+- Change (one thing): each split program writes its partial to a workspace, raises its tile's arrival counter with `sem="acq_rel"` and GPU scope, and the last arrival loads every partial with the L1 bypassed (`cache_modifier=".cg"`), sums them in split order, stores the output and resets the counter. Counters are zeroed once by the caller and the kernel keeps them at zero.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu m50`, paired with `time_pair`, 20 iterations and 5 repeats, plus a bit repeat check.
+- Result (measured), speedup of split over the single launch, paired medians: 1920 x 720, 2 splits 0.86x (0.63 to 1.18), 4 splits 1.00x (0.90 to 4.64). 720 x 1920, 2 splits 0.93x (0.58 to 1.00), 4 splits 1.15x (0.85 to 1.25).
+- Correctness: a split launch repeats bit for bit across calls (`True` on both shapes), matches the single launch within 1e-3, matches the dense reference at 0.9995 cosine, captures in a CUDA graph and replays correctly, memcheck reports 0 errors and racecheck 0 hazards.
+- Explanation / hypothesis: removing the reduce launch moved the split from 0.57x to 0.86x to 1.15x, so the launch really was most of the loss in EXP-068. What is left is the partial write and read, 0.29 to 1.54 MB against a 1.3 MB weight read, so the split can at best match the single pass and never beat it by much.
+- Caveat: the 4 split ranges are wide (0.85 to 1.25 and 0.90 to 4.64), so only the flat medians are being read here. 3 shapes would be better than 2.
+- Verdict: parity, not a win. `splits` stays default 1 and the kernel keeps the one launch recombine, which is strictly better than the two launch version it replaced.
+- Follow-ups: a real stream-K (contiguous K ranges across tiles, with boundary handoff) would balance the grid instead of multiplying it, which is the only version of this idea left with upside.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.
