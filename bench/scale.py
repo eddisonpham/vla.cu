@@ -25,13 +25,14 @@ from vla_cu.bench_utils import (
     time_call,
     warm_gpu,
 )
-from vla_cu.blocks import GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
+from vla_cu.blocks import THETA, GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
 from vla_cu.checkpoint import open_checkpoint
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
 SHAPES = ((256, 1024), (1024, 1024), (2048, 4096), (4096, 8192), (8192, 16384), (16384, 16384), (16384, 32768))
 GROUPS = (64, 32, 16, 8)
 STACKS = (1, 2, 4, 8, 16)
+TOKENS = (2, 3, 4, 8)
 EXPERT_LAYERS = 16
 WARMUP = 20
 ITERATIONS = 100
@@ -213,19 +214,19 @@ def stack_scale(checkpoint) -> None:
     print()
 
 
-def two_token_chain(checkpoint) -> None:
-    """Run the 16 real expert layers at two tokens, where q and k decide the mixing.
+def token_chain(checkpoint, tokens: int) -> None:
+    """Run the 16 real expert layers at `tokens` visible tokens.
 
-    Two tokens make the softmax choose between two keys, so a layer pays for q, k and v
-    and every projection is one GEMV per token. The reference is the same chain in fp32
-    with the same weights and the same fixed cross-attention prefix. Both sides rotate q
-    and k by row position, so a score depends on relative position. Each depth is
-    also captured as one CUDA graph, checked exact against the eager run before its time
-    is printed, because 8 launches per layer is dispatch the graph can remove.
+    Two tokens make the softmax choose between two keys, up to eight make it choose among
+    eight, so every token feeds every other one and a layer pays for q, k and v. Every
+    projection is one GEMV per token, so a layer issues four launches per token. The
+    reference is the same chain in fp32 with the same weights, the same fixed
+    cross-attention prefix and the same rotation. Attention is not causal here, so token
+    0 already sees the last token. Each depth is also captured as one CUDA graph, checked
+    exact against the eager run before its time is printed.
     """
-    print("stage 4: two tokens through the expert stack, q and k included")
+    print(f"stage 4: {tokens} tokens through the expert stack, q and k included")
     print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
-    tokens = 2
     generator = torch.Generator(device="cuda").manual_seed(0)
     names = (
         "self_attn.q_proj.weight",
@@ -243,7 +244,7 @@ def two_token_chain(checkpoint) -> None:
         wq, wk, wv, wo, up, down, input_norm, post_norm = (
             checkpoint.read(f"{prefix}.{name}").to(device="cuda", dtype=torch.float32) for name in names
         )
-        attention = GqaTokenBlock(wq, wk, wv, wo)
+        attention = GqaTokenBlock(wq, wk, wv, wo, tokens=tokens)
         other = None
         if attention.other_width != attention.hidden_width:
             other = torch.randn(tokens, attention.other_width, device="cuda", generator=generator)
@@ -311,12 +312,12 @@ def two_token_chain(checkpoint) -> None:
             f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
             f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
-    print("note: q and k rotate by row position with theta 10000, odd layers read the same fixed prefix [2, 320]")
+    print(f"note: q and k rotate by position with theta {THETA:.0f} and the Llama pairing, attention is not causal")
     print()
 
 
 def main() -> int:
-    """Run the three scaling stages in order, smallest first, inside the memory cap."""
+    """Run the scaling stages in order, smallest first, inside the memory cap."""
     enforce_memory_budget()
     warm_gpu()
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s | working cap {WORKING_CAP_BYTES / 1e9:.0f} GB per shape")
@@ -325,7 +326,8 @@ def main() -> int:
     checkpoint = open_checkpoint(CHECKPOINT)
     precision_ladder(checkpoint)
     stack_scale(checkpoint)
-    two_token_chain(checkpoint)
+    for tokens in TOKENS:
+        token_chain(checkpoint, tokens)
     return 0
 
 

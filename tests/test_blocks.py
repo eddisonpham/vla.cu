@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vla_cu.blocks import ActionBlock, AttentionBlock, MlpBlock, rotary
+from vla_cu.blocks import ActionBlock, AttentionBlock, GqaTokenBlock, MlpBlock, gqa_mix, rotary
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -107,3 +107,21 @@ def test_rotary_moves_a_score_only_when_the_positions_differ() -> None:
 
     torch.testing.assert_close(turned.diagonal(), plain.diagonal(), rtol=1e-5, atol=1e-5)
     assert not torch.allclose(turned[0, 1], plain[0, 1])
+
+
+def test_gqa_token_block_mixes_three_keys() -> None:
+    """Three tokens put three keys in every softmax, so the value path alone cannot match."""
+    generator = torch.Generator(device="cuda").manual_seed(8)
+    scale = 1.0 / 16**0.5
+    wq = torch.randn((16, 16), device="cuda", generator=generator) * scale
+    wk = torch.randn((8, 16), device="cuda", generator=generator) * scale
+    wv = torch.randn((8, 16), device="cuda", generator=generator) * scale
+    wo = torch.randn((32, 16), device="cuda", generator=generator) * scale
+    x = torch.randn((3, 16), device="cuda", generator=generator)
+    out = torch.empty((3, 32), device="cuda")
+
+    GqaTokenBlock(wq, wk, wv, wo, head_dim=8, tokens=3).into(x, None, out)
+
+    exact = gqa_mix(x @ wq.T, x @ wk.T, x @ wv.T, head_dim=8) @ wo.T
+    assert out.shape == (3, 32)
+    assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995

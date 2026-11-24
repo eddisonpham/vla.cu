@@ -30,7 +30,7 @@ from vla_cu.validate import require
 
 BITS = (4, 8)
 HEAD_DIM = 64
-THETA = 10000.0
+THETA = 100000.0
 
 
 def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
@@ -50,9 +50,11 @@ def matrix_bytes(rows: int, cols: int, bits: int, group_size: int) -> int:
 def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     """Return `x` [tokens, heads * head_dim] with each row rotated to its own position.
 
-    Row i is position i, and within a head the pair (2p, 2p+1) turns by
-    i * theta ** (-2p / head_dim). Row 0 is the identity rotation, which is why a one
-    token block needs none of this. Only q and k are rotated, never v.
+    Row i is position i, and within a head element p turns with p + head_dim / 2 by
+    i * theta ** (-2p / head_dim), the Llama pairing. theta 100000 and the half split
+    pairing come from the SmolVLM2-500M text config, which the expert layers copy. Row 0
+    is the identity rotation, which is why a one token block needs none of this. Only q
+    and k are rotated, never v.
     """
     tokens = x.shape[0]
     heads = x.shape[1] // head_dim
@@ -61,10 +63,10 @@ def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     angles = torch.arange(tokens, device=x.device, dtype=torch.float32)[:, None] * frequencies[None, :]
     cosine = torch.cos(angles)[:, None, :]
     sine = torch.sin(angles)[:, None, :]
-    pairs = x.reshape(tokens, heads, half, 2)
-    even = pairs[..., 0]
-    odd = pairs[..., 1]
-    rotated = torch.stack((even * cosine - odd * sine, even * sine + odd * cosine), dim=-1)
+    pairs = x.reshape(tokens, heads, 2, half)
+    first = pairs[:, :, 0]
+    second = pairs[:, :, 1]
+    rotated = torch.stack((first * cosine - second * sine, first * sine + second * cosine), dim=2)
     return rotated.reshape(tokens, heads * head_dim)
 
 
@@ -195,14 +197,18 @@ class GqaTokenBlock:
     costs four launches per token; q and k rotate by their row's position, and the softmax
     and value mix are a few [tokens, heads, tokens] torch ops between them. `into` reads
     `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
-    `other` [tokens, other_width] when it is given.
+    `other` [tokens, other_width] when it is given. `tokens` fixes the buffer shapes, so
+    one block serves one token count and a graph captures that count.
     """
 
-    def __init__(self, wq: Tensor, wk: Tensor, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM) -> None:
+    def __init__(
+        self, wq: Tensor, wk: Tensor, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM, tokens: int = 2
+    ) -> None:
         require(wq.dim() == 2 and wk.shape == wv.shape and wo.dim() == 2, f"expected 2D matrices, got {tuple(wq.shape)} and {tuple(wo.shape)}")
         require(wo.shape[1] == wq.shape[0], f"o input {wo.shape[1]} does not match q output {wq.shape[0]}")
         require(wq.shape[0] % head_dim == 0 and wk.shape[0] % head_dim == 0, "head_dim must divide both head counts")
-        tokens = 2
+        require(tokens > 0, f"token count {tokens} must be positive")
+        self.tokens = tokens
         self.hidden_width = wo.shape[0]
         self.input_width = wq.shape[1]
         self.other_width = wk.shape[1]
@@ -222,6 +228,7 @@ class GqaTokenBlock:
 
     def into(self, x: Tensor, other: Tensor | None, out: Tensor) -> None:
         """Write the attention output into `out` [tokens, hidden], reading `x` and `other`."""
+        require(x.shape[0] == self.tokens, f"block was built for {self.tokens} tokens, got {x.shape[0]}")
         source = x if other is None else other
         for token in range(x.shape[0]):
             int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
