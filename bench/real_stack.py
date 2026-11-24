@@ -1,9 +1,9 @@
-"""Three real SmolVLA backbone layers at int8 and int4, against the fp32 chain.
+"""All 16 real SmolVLA backbone layers at int8 and int4, against the fp32 chain.
 
 Concept: EXP-043 read single matrices and EXP-036 measured four blocks on synthetic weights.
-This builds layers 0 to 2 of the real checkpoint through `layer_from_checkpoint`, so the
-cosine includes both norms, the grouped attention and the gated MLP. Each stack is captured
-as one graph and timed against the same three layers in fp32.
+This builds every backbone layer of the real checkpoint through `layer_from_checkpoint`, so
+the cosine includes both norms, the grouped attention and the gated MLP over the full depth.
+Each stack is captured as one graph and timed against the same layers in fp32.
 
 Task: python -m vla_cu realstack
 """
@@ -20,7 +20,7 @@ from vla_cu.blocks import gqa_mix
 from vla_cu.build import layer_from_checkpoint
 from vla_cu.checkpoint import open_checkpoint
 
-LAYERS = 3
+LAYERS = 16
 WARMUP = 10
 ITERATIONS = 50
 WEIGHTS = (
