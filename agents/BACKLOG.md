@@ -128,7 +128,8 @@ on purpose, not forgotten.
 - [ ] Share the gate and up weight reads across token tiles in the gated tail, which is why it crosses at 8 tokens at 960/2560 and 12 at 720/1920.
 - [x] A layer index to prefix helper for the two SmolVLA naming schemes. Done 2026-11-24, EXP-093: `layer=3` plus `part="vlm"` or `"expert"`.
 - [x] Resolve the norms and the residual pair from the same layer index. Done 2026-11-24, EXP-094: `layer_from_checkpoint` returns a `LayerBlock`.
-- [ ] Let `LayerBlock` call `tail_into` when the widths allow, so the MLP half of a layer is one launch.
+- [x] Let `LayerBlock` call `tail_into` when the widths allow. Done 2026-11-24, EXP-097: `fused=True` works and is correct, but it reads 0.59x a captured chain at 1 token, so it stays off by default (DEC-089).
+- [ ] A cooperative tail that can beat twelve graphed nodes at one token, if one exists. EXP-097 says the grid barriers cost more than the dispatch a graph already removes.
 - [ ] Explain the 0.073 against 0.194 ms spread on the same matrix row across sessions (L2 residency or clock state) before quoting a matrix speedup.
 - [ ] Instrument the CUDA extension on Linux or WSL2, where the sanitizer may attach (EXP-087).
 - [ ] A self-hosted GPU runner would let CI run the 169 device tests instead of skipping them (EXP-083).

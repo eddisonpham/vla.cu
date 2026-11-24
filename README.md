@@ -90,10 +90,10 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 230 tests on a GPU, 40 passed and 190 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088) |
+| CI and gates | 244 tests on a GPU, 45 passed and 199 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
-| Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094) |
+| Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094); `fused=True` runs its tail in one launch, measured slower than a captured chain (EXP-097) |
 | Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |
 | Gated cooperative tail | one launch for a three-matrix SwiGLU MLP, gate and up computed in one pass over the staged norm: 3.49x at 1 token at 720/1920 and 2.36x at 960/2560, crossing at 12 and 8 tokens (EXP-091) |
 | Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused; `graphed(x)` binds the input buffer and drops the copy (EXP-089, EXP-096) |
@@ -161,6 +161,7 @@ a stack name, `part="vlm"` for the SmolVLM2 backbone or `part="expert"` for the 
 expert, and a full prefix still works; `layer_from_checkpoint` returns the whole layer,
 both norms and both residual adds included, and `gate_proj` selects the gated block.
 `GatedMlpBlock.tail_into` runs the gated tail in one cooperative launch, and
+`LayerBlock.into(..., fused=True)` uses it, though a captured chain is faster (EXP-097).
 `graphed(x)` binds the capture to that buffer, so a caller who writes it in place skips
 the copy.
 
@@ -174,6 +175,7 @@ python -m vla_cu gemv
 python -m vla_cu layer
 python -m vla_cu coop
 python -m vla_cu coopgated
+python -m vla_cu whole
 python -m vla_cu graphed
 python -m vla_cu style
 ```
@@ -190,7 +192,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 |---|---|---|
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
-| Test suite | `python -m pytest -q` | a CUDA device, except the 44 tests marked `cpu` |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 45 tests marked `cpu` |
 | CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 

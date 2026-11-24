@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-089: the fused layer tail stays off by default (2026-11-24)
+
+- Context: EXP-097 captured both paths and the cooperative tail read 0.59x the chain at 1 token, 0.50x at 8 and 0.15x at 50. EXP-091's 3.49x was an eager comparison, so it measured dispatch.
+- Decision: `LayerBlock.into` takes `fused: bool = False`, and `fused=True` requires a gated block that passes `can_tail()`.
+- Consequence: the builder never switches kernels silently, and the documented fast path stays a CUDA graph. The flag remains for an eager caller and for the benchmark that prices the kernel.
+
 ## DEC-088: a graph capture may bind to the caller's buffer (2026-11-24)
 
 - Context: EXP-096. The wrapper's copy was a separate launch that cost 5 to 10 us and made capture lose above 9 MB of packed weights.

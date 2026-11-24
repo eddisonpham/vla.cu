@@ -9,53 +9,61 @@
 
 ## Campaign
 
-A real layer is one call: `layer_from_checkpoint(checkpoint, 3, part="expert")`. The
-gated block can run its whole tail in one launch, and a capture bound to the caller's
-buffer no longer copies. 243 device tests pass, style 0.
+One call builds and runs a whole transformer layer, and every documented surface is
+checked. The layer's fused tail is available and measured, but a captured chain is
+faster, so the default stays the chain.
 
 ## Closed in this pass
 
 - **Whole layer builder.** `LayerBlock` runs input norm, attention, residual, post norm,
   gated MLP, residual, and `layer_from_checkpoint` reads both RMSNorm weights from one
   index (EXP-094, DEC-087).
-- **Fused tail in the library.** `GatedMlpBlock.tail_into` calls the cooperative gated
-  kernel with the block's own packed weights, with the kernel contract checked first
-  (EXP-095).
+- **Fused tail reachable from the layer.** `LayerBlock.into(..., fused=True)` and
+  `GatedMlpBlock.can_tail()` (EXP-095, EXP-097).
 - **Bound capture.** `graphed(x)` captures against the caller's buffer, so the 5 to 10 us
   copy is gone: 4.18x down to 1.00 to 1.02x, where EXP-092 read 0.94x (EXP-096, DEC-088).
-- **Gates.** 243 passed on the GPU, 44 passed and 199 skipped with no device, style 0,
-  demo 4.72x on a four block stack.
+- **Release audit.** 39 tasks import, README and architecture counts corrected, no TODO or
+  FIXME markers, CI workflow present (EXP-098).
+
+## Measured truth about the fused tail
+
+Against a captured chain at 960/2560, the fused tail reads 0.59x at 1 token, 0.50x at 8
+and 0.15x at 50 (EXP-097). Its earlier 3.49x win was against an eager chain, so it was
+removing host dispatch that a graph also removes. `fused=False` is the default (DEC-089).
+
+## Gates
+
+- GPU suite 244 passed, CPU suite 45 passed and 199 skipped, style 0.
+- `demo`, `graphed`, `whole`, `coopgated` exit 0.
+- Graphed block 0.021 ms at 4.5x fp32, four block stack 4.7 to 5.2x, graphs bit exact.
 
 ## What works
 
-- `python -m vla_cu demo`, `coop`, `coopgated`, `graphed`, `sanitize`, `style` exit 0.
+- `python -m vla_cu demo`, `whole`, `graphed`, `coop`, `coopgated`, `sanitize`, `style`.
 - `layer_from_checkpoint(checkpoint, 3, part="expert", tokens=50)` returns a whole layer.
 - `mlp_from_checkpoint(...).tail_into(...)` runs the gated tail in one launch.
 - `Int4Linear.graphed(x)` reads `x` in place; `replay()` skips the copy.
 
 ## Open edges
 
-- **`LayerBlock` still issues the six launch chain.** It does not call `tail_into`, so the
-  layer builder has no fused path yet.
-- **The fused tail has conditions**: int4 down, group 64, 1 to 64 tokens, hidden divisible
-  by 16, intermediate by 64, so the 960/2560 backbone does not qualify as is.
-- **The resolver knows two schemes**, the SmolVLM2 backbone and the expert, not arbitrary
-  checkpoints.
-- **The gated tail re-reads gate and up per token tile**, so it grows with tokens where
-  the eager GEMM does not.
+- **The fused tail is slower than a graph**, so it is not on the recommended path.
+- **`LayerBlock` is square self-attention only**: it requires `input_width == hidden`, so a
+  cross-attention layer needs the lower level blocks.
+- **The resolver knows two schemes**, the SmolVLM2 backbone and the expert.
 - **`ncu` is blocked** by ERR_NVGPUCTRPERM, so attribution is inference from timing.
-- **The int4 CUDA extension** still cannot be instrumented on Windows.
+- **The int4 CUDA extension** cannot be instrumented on Windows.
 - **CI proves style, imports and collection**, not kernel correctness.
 
 ## What the human can do
 
-1. Run `python -m vla_cu ncu` from the elevated shell on the 1920 x 768 shape.
-2. Choose: `LayerBlock` on the fused tail, a multi-layer graph, or a producer writing into
-   `static_in`.
+1. Run `python -m vla_cu ncu` from the elevated shell on one kernel.
+2. Choose a next experiment from BACKLOG, for example the int4 attention rung or the
+   three layer stack on real weights.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Let `LayerBlock` call `tail_into` where the widths allow, so one layer is one launch.
-2. Capture several layers and one residual add in a single graph, so the copy is paid once.
-3. Measure the fused tail through `tail_into` at 1 to 8 tokens against the six launches.
+1. Measure the fused tail at 1 token against a graph at 720/1920, to see if the smaller
+   width changes the verdict.
+2. A three layer stack on real `lerobot/smolvla_base` weights at int8 and int4.
+3. Cache the VLM prefix KV for a policy loop, the one production idea nothing here covers.

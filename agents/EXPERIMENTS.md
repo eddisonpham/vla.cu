@@ -1290,6 +1290,28 @@
 - Verdict: worked. The loss above 9 MB came from the copy, not from capture.
 - Follow-ups: capture several layers and one residual add in a single graph; have a producer write directly into `static_in` so the bind serves a changing input.
 
+## EXP-097: the fused layer tail against a captured chain  (2026-11-24)
+- Goal / question: EXP-095 exposed the cooperative gated tail on the block, but nobody had timed it as part of a whole layer. Does the one launch that won in EXP-091 still win once the layer is a benchmark target?
+- Change (one thing): `LayerBlock.into(..., fused=True)` calls `tail_into` for the post norm, MLP and residual, `GatedMlpBlock.can_tail()` reports whether the kernel's contract holds, and `bench/whole_layer.py` (task `whole`) captures both paths and times the replays at 1, 8 and 50 tokens at 960/2560.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu whole` inside vcvars, warmup 5, repeats 5, 20 iterations per repeat, two runs; `pytest -q`.
+- GPU / environment: RTX 5060 Laptop GPU, clocks not pinned, machine loaded by other work during the pass.
+- Result (measured), two runs agreeing: at 1 token chain 0.048 ms against fused 0.081, 0.59x (repeat range 0.54 to 0.71); at 8 tokens 0.104 against 0.208, 0.50x (0.23 to 1.68); at 50 tokens 0.242 against 1.610, 0.15x (0.13 to 0.36). Max difference 5.4e-07 at 1 token and 1.1e-03 at 8 and 50. Suite 244 passed on the GPU, 45 passed and 199 skipped with no device, style 0.
+- Explanation / hypothesis: EXP-091 compared the fused kernel with an eager six launch chain, so its 3.49x included host dispatch. A graph removes the same 6 to 8 us per launch (EXP-096), and the chain's twelve captured nodes together cost less than one cooperative launch plus its two grid barriers. The fused tail wins only when the alternative is eager.
+- Caveat: absolute milliseconds are inflated by current GPU load (the demo read 0.174 ms for the int4 block against 0.072 ms earlier in the day), so only the paired ratios are quoted. The 8 token row had a 0.23 to 1.68 repeat range, so its median is the weakest of the three. The chain graph is the fair kernel comparison, not the default user path.
+- Verdict: negative result. `fused=False` stays the default, the docstring now says a captured chain wins, and the README says so.
+- Follow-ups: let the cooperative tail go when the caller will graph the layer; or write a kernel that beats twelve graphed nodes at one token.
+
+## EXP-098: release audit of the published surface  (2026-11-24)
+- Goal / question: after three feature passes, does every documented command, count and gate match the repo?
+- Change: added the `whole` task, corrected the README CI counts and the architecture row 37 counts, rewrote `STATE.md`, and re-ran every gate.
+- Prediction: none filed by the human.
+- Result (measured): `python -m vla_cu --help` lists 39 tasks and `tests/test_tasks.py` imports every one; GPU suite 244 passed; CPU suite 45 passed and 199 skipped; style 0; `demo`, `graphed`, `whole`, `coopgated` exit 0; no TODO or FIXME markers in the tree; `.github/workflows/ci.yml` exists and runs style, the task list and the suite.
+- Explanation / hypothesis: the only stale claims were two test counts left from earlier passes and the task count, which the new `whole` task happens to restore to 39.
+- Caveat: CI runs on a CPU runner, so it proves style, imports and collection, not kernel correctness. `ncu` and racecheck remain blocked by the environment, per STATE.
+- Verdict: the documented surface matches the code.
+- Follow-ups: none for release; the open BACKLOG items are future experiments, not unfinished work.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.
