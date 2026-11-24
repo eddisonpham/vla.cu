@@ -85,7 +85,8 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Seeded fuzz gate | 160 cases across five kernels, zero failures (EXP-037) |
 | Versioned weight bundle | bit-exact round trip, 5.81x smaller than fp32 at int4, 5.68 ms to load four blocks (EXP-038) |
 | Model widths | hidden 960 and intermediate 2560 confirmed from the SmolVLM2-500M config, expert 720 and 1920 from the 0.75 multiplier (RESEARCH 2026-11-23) |
-| Cooperative layer tail | one launch instead of five: 3.13x at 1 token, 1.26x at 8, 0.74x at 16 (EXP-078, EXP-082) |
+| Cooperative layer tail | one launch instead of five, widths as launch parameters: 2.91x at 1 token, 1.15x at 8, 0.70x at 16 (EXP-078, EXP-085) |
+| Tensor core body | tried as 16 x 16 WMMA tiles, 2x to 4x slower than the GEMV body, reverted (EXP-084) |
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |

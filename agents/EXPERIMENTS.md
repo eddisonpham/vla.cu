@@ -1159,6 +1159,28 @@
 - Verdict: CI catches style, docs invariants, the task registry and test collection on every push, and the GPU-only assertion lives on the workstation. The count check is the part worth remembering.
 - Follow-ups: a self-hosted GPU runner would let CI run the suite itself, which needs a label and a machine, not code.
 
+## EXP-084: the tensor core body, and why it lost  (2026-11-24)
+- Goal / question: the cooperative body was a warp per output row with no tensor core, so it lost at 8 tokens and up. Does a tiled body with WMMA dots widen the win, and where is the new crossover?
+- Change (one thing): rewrote stages 2 and 3 as 16 x 16 tensor core tiles. A block stages one 16 token activation tile in shared memory, each of the 8 warps owns a 16 column output tile, the K loop dequantizes the weight tile into shared memory and issues one `wmma::mma_sync` per 16 wide K slice. Two staging depths were measured: 16 K per block barrier, then 64 K per barrier to cut the barrier count fourfold.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu coop`, after `pytest -q tests/test_cuda_coop.py`.
+- Result (measured), fused ms at 1, 2, 3, 4, 8, 16, 32, 50, 64 tokens. 16 K staging: 0.247, 0.250, 0.254, 0.257, 0.272, 0.288, 0.360, 0.428, 0.436. 64 K staging: 0.427, 0.431, 0.470, 0.477, 0.486, 0.507, 0.629, 0.699, 0.762. The GEMV body it replaced: 0.038, 0.047, 0.054, 0.064, 0.093, 0.159, 0.306, 0.485, 0.596. Eager is 0.117 to 0.123 ms.
+- Correctness: 15 tests pass at both widths and all token counts, max difference 6.4e-06 to 3.6e-04, memcheck 0 errors. The first attempt failed because the up tile multiplied `up_scales` into the packed B tile and again in the epilogue, so every output was squared into the noise floor (act max 0.0033 against 5.92); the probe in `bench/results/tile_debug.py` found it.
+- Explanation / hypothesis: at these M values the tile pads to 16 rows and pays a block barrier per K slice. 165 slices for one call is 165 barriers, and the 64 K version trades barriers for a 16 KB shared stage that is refilled from global with no pipeline, so it is slower than the 16 K version. The GEMV body reads each weight once with one accumulator per token and no barrier inside K, which is why it wins below 16 tokens. Above 32 tokens the tile does beat the GEMV body (0.436 against 0.596 at 64), but it is still 2.7x slower than the five launch path.
+- Caveat: no profiler (ncu blocked), so the barrier count is an explanation supported by the 64 K regression, not a measured attribution.
+- Verdict: not adopted. Tiles are right for a large M and wrong for a fused layer at 1 to 8 tokens, which is the case this project exists for. The kernel was restored to the GEMV body before any commit, so the tile exists only in this entry and in the working tree backup.
+- Follow-ups: a body that reads 64 rows of tokens in one block with async copies and one K pipeline, or a graph of the Triton GEMMs, instead of a cooperative kernel.
+
+## EXP-085: widths as launch parameters  (2026-11-24)
+- Goal / question: the cooperative kernel was written for hidden 720 and intermediate 1920. Can it serve another layer without a rebuild or a second kernel?
+- Change (one thing): hidden and intermediate became kernel arguments, shared memory and both tile counts are computed from them on the host, and the attribute is raised only when a larger layer asks for it. Host checks: hidden divides by 16, intermediate by 64.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu coop`, plus `pytest -q tests/test_cuda_coop.py` which now runs 720/1920 at eight token counts, 256/640 at 1, 3 and 17, and 384/768 at 5.
+- Result (measured): 15 tests pass, max difference 9.7e-04 to 1.4e-03. Fused against the five launches: 0.042 against 0.123 at 1 token (2.91x), 0.052 against 0.119 at 2 (2.28x), 0.060 against 0.118 at 3 (1.95x), 0.070 against 0.118 at 4 (1.71x), 0.103 against 0.119 at 8 (1.15x), 0.172 against 0.120 at 16 (0.70x), 0.359 against 0.121 at 32 (0.34x), 0.564 against 0.120 at 50 (0.22x), 0.653 against 0.164 at 64 (0.25x).
+- Explanation / hypothesis: the runtime widths cost a little (0.042 against 0.038 at 1 token, and 2.91x against 3.13x), because the K step and the shared offsets are no longer compile-time constants. The crossover is unchanged, between 8 and 16 tokens, near 9 to 10.
+- Verdict: the kernel now serves any layer whose hidden width divides by 16 and intermediate width by 64, at the cost of about 7 percent at 1 token. The 720 and 1920 default is still the measured one.
+- Follow-ups: a second real layer (attention widths 960 and 2560) would need K and N tiles that respect the 16 row floor, which the tests at 384/768 already exercise.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

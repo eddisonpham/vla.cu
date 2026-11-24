@@ -511,6 +511,12 @@
 - Status: active
 
 ## DEC-066: a residual and its norm are one launch  (2026-11-23)
+## DEC-079: the cooperative body stays a GEMV, and the widths become parameters (2026-11-24)
+
+- Context: EXP-084 and EXP-085. Two tensor core tiled bodies were correct and 2x to 4x slower than the GEMV body below 16 tokens; the GEMV body with runtime widths costs about 7 percent at 1 token and keeps the crossover near 9 to 10 tokens.
+- Decision: no tensor core tile in the fused layer. Widths arrive as launch parameters instead, with hidden divisible by 16 and intermediate by 64.
+- Consequence: a tiled body needs a different design (64 rows of tokens per block, async copies, one K pipeline) before it is worth another attempt. The tile numbers live in EXP-084 so the next attempt does not repeat it.
+
 ## DEC-077: CI covers what a CPU runner can prove, and device tests skip with a reason (2026-11-24)
 
 - Context: EXP-083. Hosted runners have no GPU, and `torch.cuda.is_available()` reports true on a machine whose visible device count is zero.

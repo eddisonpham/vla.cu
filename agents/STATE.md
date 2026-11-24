@@ -9,49 +9,47 @@
 
 ## Campaign
 
-The project now has three layers of proof: numbers, gates and CI. The cooperative tail
-is hardened and sanitized (memcheck 0 errors, 10 tests from 1 to 64 tokens), CI runs
-style, the task registry and the suite on a CPU runner (35 passed, 169 skipped), and the
-fused path's crossover is measured at 8 to 16 tokens (EXP-082).
+The fused tail is one cooperative launch, serves any layer width in its class, and is
+measured from 1 to 64 tokens. It wins below 16 tokens and loses above. The tensor core
+body that was supposed to widen that lost 2x to 4x at every token count and was reverted
+before commit, so the negative is the finding: at these M values a GEMV body beats tiles.
 
 ## Closed in this pass
 
-- **Cooperative launcher hardened.** Shared memory limit configured once per device under
-  a mutex, co-residency bound from the occupancy API, alignment checks, non-contiguous
-  input refused. 10 tests, 1 to 64 tokens (EXP-081).
-- **Sanitizer gate named.** memcheck clean; racecheck serializes blocks and deadlocks on
-  any grid barrier, so it is documented as unusable, not skipped quietly (DEC-078).
-- **CI added.** `.github/workflows/ci.yml` on ubuntu with CPU torch. `tests/conftest.py`
-  keys the skip on `device_count()`, because `is_available()` reads true with no visible
-  device (EXP-083).
-- **Crossover measured.** Fused is 3.13x at 1 token, 1.26x at 8, 0.74x at 16, 0.27x at
-  64. A tiled body is the only way to widen it (EXP-082).
-- **README truth pass.** 35 tasks, a checks table with commands, the current status rows.
+- **Widths as launch parameters.** hidden and intermediate come from the tensors, shared
+  memory is sized from them, tests cover 720/1920, 256/640 and 384/768. Cost about
+  7 percent at 1 token (EXP-085).
+- **Tensor core body tried and dropped.** WMMA 16 x 16 tiles at two K staging depths:
+  0.247 and 0.427 ms at 1 token against 0.042 for the GEMV body, 15 tests pass, memcheck
+  clean. A double `up_scales` application was found and fixed first (EXP-084, DEC-079).
+- **Crossover re-measured.** 2.91x at 1 token, 2.28x at 2, 1.95x at 3, 1.15x at 8,
+  0.70x at 16, 0.22x at 50 (EXP-085).
 
 ## What works
 
-- `pytest -q` with a GPU: 204 passed. With no device: 35 passed, 169 skipped, exit 0.
-- `python -m vla_cu style`: 0 violations. `python -m vla_cu --help`: 35 tasks.
-- `compute-sanitizer --tool memcheck python -m vla_cu coop`: 0 errors.
+- `pytest -q` with a GPU: 209 passed, including 15 cooperative tests.
+- With no device: 35 passed, 169 skipped, exit 0.
+- `python -m vla_cu style`: 0 violations. `compute-sanitizer --tool memcheck`: 0 errors.
+- `python -m vla_cu coop` pins the whole tail to one launch at any width in its class.
 
 ## Open edges
 
-- **The fused body is still a GEMV.** It wins at 1 to 8 tokens only.
+- **Tiles are the wrong body below 16 tokens**, which is the batch size that matters. A
+  64 token block with async copies and one K pipeline is the untried design.
 - **The int4 dequant path** runs at 5 to 6 percent of peak and `ncu` is still blocked by
   ERR_NVGPUCTRPERM.
-- **Shared memory races** in the cooperative kernel are argued from the code, not
-  measured, since racecheck cannot run there.
-- **CI proves style, imports and collection**, not kernel correctness. That needs a
-  self-hosted GPU runner.
+- **Shared memory races** in the cooperative kernel are argued from the code, since
+  racecheck cannot run on a grid barrier.
+- **CI proves style, imports and collection**, not kernel correctness.
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell on the 1920 x 768 shape.
-2. Choose: tile the cooperative body, or strip the int4 dequant in a test variant.
+2. Choose: the 64 token single pipeline body, or the attention widths at 960 and 2560.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Tile the cooperative body and rerun the 1 to 64 table for a new crossover.
-2. An int4 variant without the group scale and transpose.
+1. A 64 row token block with async copies and one K pipeline.
+2. Run the cooperative kernel on the attention widths, where M is larger.
 3. A self-hosted GPU runner so CI runs the 169 device tests.

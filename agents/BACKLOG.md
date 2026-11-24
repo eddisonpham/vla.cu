@@ -115,7 +115,9 @@ on purpose, not forgotten.
 - [x] Give the int8 GEMM its own sweep. Done 2026-11-23, `python -m vla_cu int8tiles`, EXP-075: twelve candidates land in 0.041 to 0.052 ms at three expert widths and three token counts, and the menu's pick is inside that band, so it was kept rather than retuned.
 - [x] Pair the top three int8 tiles at 720 x 1920 and 50 tokens. Done 2026-11-24, EXP-080: the 16 row tile won every repeat of three paired runs, by 1.07x to 1.53x, and the menu now uses it above 32 tokens.
 - [ ] Pair that 16 row tile at 8 tokens and at 1920 x 720 before the rule spreads (EXP-080).
-- [ ] Tile the cooperative body: one shared activation tile per block and tensor core dots, so the fused path can also win past 8 tokens. The crossover to beat is 8 to 16 tokens now (EXP-082).
+- [x] Tile the cooperative body with tensor core dots. Attempted 2026-11-24, EXP-084: correct, but 0.247 ms at 1 token against 0.042 for the GEMV body, and 0.436 against 0.596 at 64. Reverted.
+- [ ] A different tiled body: 64 rows of tokens in one block, async copies and one K pipeline, or a graph of the Triton GEMMs. The number to beat at 1 token is 0.042 ms (EXP-084).
+- [ ] Try the cooperative kernel on the attention widths, 960 and 2560, where M is larger and the GEMV body loses sooner (EXP-085).
 - [ ] A self-hosted GPU runner would let CI run the 169 device tests instead of skipping them (EXP-083).
 - [ ] Skip the group scale and the transpose in an int4 test variant, which is the leading suspect for the 5 to 6 percent of peak in EXP-079.
 - [x] A cooperative-launch persistent layer in CUDA C++. Done 2026-11-24, EXP-078: one launch, 3.13x at 1 token, 2.55x at 2, 2.22x at 3, 1.25x at 8, 0.24x at 50. The body, not the launch, is what is left.
