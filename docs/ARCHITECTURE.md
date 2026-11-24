@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `pairedtail`, `int8tiles`, `floor`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `pairedtail`, `int8tiles`, `int8pair`, `floor`, `body`, `coop`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -120,6 +120,9 @@ kernels, so they are used as references and as performance baselines.
 | 30 | int8 tile sweep | every candidate tile timed at the expert widths and token counts | `bench/int8_tiles.py` | done, every candidate inside 0.041 to 0.052 ms, so the tile sits inside the launch floor's noise |
 | 31 | launch floor | a launch loop against a one node graph, an empty kernel against the int4 GEMM | `bench/launch_floor.py` | done, 6 us host gap and a 9 us empty kernel, so the 47 us GEMM body is the cost |
 | 32 | persistent layer | a grid barrier and five fused stages | not kept | negative, a two program sense barrier never exits, so Triton here has no usable device barrier |
+| 33 | cooperative tail | add, norm, int8 up, SiLU, int4 down, add in one launch with two grid barriers | `csrc/coop_layer.cu`, `bench/coop.py` | done, 3.13x at 1 token and 2.55x at 2, 1.25x at 8, 0.24x at 50, within 1.3e-3 |
+| 34 | body split | K step size, K length, format and program count at 50 tokens | `bench/body.py` | done, time is linear in bytes at 20 to 23 GB/s and flat in the step count, so the dequant path is the cost |
+| 35 | int8 paired tiles | menu pick against three challengers, alternating inside one process | `bench/int8_pair.py` | done, a 16 row tile won every repeat by 1.07x to 1.53x, so the menu changed |
 
 ## 7. Measurement protocol
 

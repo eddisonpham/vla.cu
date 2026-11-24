@@ -1093,6 +1093,40 @@
 - Verdict: dropped. The kernel, its bench and its tests were removed, so the suite never hangs, and no device-side spin barrier goes into this repo until a cooperative launch is available.
 - Follow-ups: a CUDA C++ port of the layer with `cudaLaunchCooperativeKernel` and `cooperative_groups::grid_group::sync()`, which `torch.utils.cpp_extension` can build; the measured ceiling for that idea is the 6 us host gap per launch, about 9 percent of a 64 us call at M = 50 and more at 2 tokens.
 
+## EXP-078: the whole layer tail in one cooperative launch  (2026-11-24)
+- Goal / question: EXP-077 stopped every Triton grid barrier. Does a real cooperative launch, one block per SM and `grid.sync()` between stages, reproduce the five launch path and save the four launch gaps?
+- Change (one thing): `csrc/coop_layer.cu` and `csrc/coop_layer_kernel.cuh`, a kernel for the expert layer only (hidden 720, intermediate 1920, group 64, 1 to 64 tokens). Stage 1 adds the residual and computes RMSNorm with one block per token, stage 2 runs the int8 up projection with SiLU in the epilogue, stage 3 runs the int4 down projection and the second residual add, with a grid barrier between each pair. Stages 2 and 3 stage 16 and 8 token rows of activations in shared memory and hold 16 and 8 accumulators per lane, so a weight row is read once per token group instead of once per token.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu coop`, 5 warmup, 5 repeats and 20 iterations per repeat, paired in one process against `add_norm_into` plus `MlpTokenBlock.into` plus `add_into`. Correctness first: `pytest -q tests/test_cuda_coop.py` passes at 1, 2, 3, 8 and 50 tokens.
+- GPU / environment: RTX 5060 Laptop, 26 SMs, one block per SM, 61440 bytes of dynamic shared memory per block, clocks pinned at 1972 MHz.
+- Result (measured): eager 0.119 against fused 0.038 ms at 1 token (3.13x), 0.119 against 0.047 at 2 (2.55x), 0.120 against 0.054 at 3 (2.22x), 0.117 against 0.093 at 8 (1.25x), 0.118 against 0.487 at 50 (0.24x). The max difference against the five launch path is 9.7e-4 to 1.3e-3, and the Fused `added` and `normed` buffers match to 1e-5 and 1e-4.
+- Explanation / hypothesis: at 1 to 3 tokens the eager path is five launches of 0.006 to 0.009 ms of host gap plus a 9 us GPU floor, so the call is 0.119 ms of almost nothing, and one launch of 0.038 ms collects four of those floors. At 50 tokens the fused body becomes the cost: the warp per output row mapping re-reads the activation tile for every output row and never uses a tensor core, so it moves 276 MB through L2 against a five launch path whose GEMMs use 64x128 tensor core tiles. The fusion is a launch fix, not a body fix, and at 50 tokens the body dominates.
+- Caveat: a cooperative launch is only safe when every block is resident, and this desktop runs other GPU work. It passed here, but a preempted block would stall in the barrier, so this path is an experiment and not a default. The 0.487 ms at 50 tokens is a warp per row GEMV style body, not a tiled GEMM.
+- Verdict: the cooperative launch works, is bit-for-bit close to the five launch path, and pays at 1 to 3 tokens, which is the batch size the project cares about. It does not pay at 8 or 50 tokens until the body is tiled.
+- Follow-ups: a tiled body with tensor cores and one shared activation tile per block, the same `tl.dot` shape the Triton GEMM uses, so the fused path can also win at 8 and 50 tokens.
+
+## EXP-079: where the int4 GEMM body's 38 to 47 us goes  (2026-11-24)
+- Goal / question: the launch is named (EXP-076). Is the body limited by the dependent K step chain, by the bytes, or by the dequantize arithmetic?
+- Change (one thing): `bench/body.py`, task `body`, times the same 1920 x 768 shape with three K step sizes, three K lengths, three formats, and pairs a 15 program grid against a 60 program grid. Width 720 pads to 768 for group 64.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu body`, 20 warmup and 100 iterations per row, 50 tokens.
+- GPU / environment: RTX 5060 Laptop, clocks pinned at 1972 MHz, other processes holding part of the GPU.
+- Result (measured): at 1.37 MB, 12 steps of K = 64 take 0.055 ms, 6 steps of 128 take 0.060, 3 steps of 256 at one stage take 0.090. At 6 steps of 128, K 768 takes 0.060 ms and 1.37 MB, K 1536 takes 0.113 ms and 2.35 MB, K 3072 takes 0.218 ms and 4.32 MB, so 22.8, 20.8 and 19.8 GB/s: the time is linear in bytes, not in the number of dependent steps. Same shape, formats: int4 group 64 0.060 ms at 22.8 GB/s, int8 rows 0.022 ms at 91.1 GB/s on 1.5x the bytes, bf16 cuBLAS 0.019 ms at 172.5 GB/s on 2.4x the bytes. Grid: the 64 row tile (15 programs) takes 0.060 ms against 0.070 for the 16 row tile (60 programs), so 64 row tiles are 0.86x the time.
+- Explanation / hypothesis: the body is not launch bound and not bandwidth bound at the dial: 5 to 6 percent of the 384 GB/s peak is not a memory ceiling, it is a per program issue ceiling. The int4 path does two dots per step on nibble halves plus a group scale expanded across the tile, and its int8 twin, with no group scale, one dot per step and more bytes, runs 2.7x faster. So the dequantized fp16 operand chain, built per step and transposed in shared memory, is the leading suspect, with the 15 program grid the second.
+- Caveat: no `ncu` (ERR_NVGPUCTRPERM), so this is a four way ablation, not a profiler attribution. The int4 and int8 rows differ in grid as well as format, and the 60 program int4 test says extra programs alone do not help.
+- Verdict: the 0.05 ms at M = 50 is the dequantize and dot chain inside the kernel, at 5 to 6 percent of peak, not the launch and not DRAM.
+- Follow-ups: an int4 kernel that skips the group scale and the transpose (a kernel side test variant), and `ncu` from the elevated shell on the same shape to name the stall.
+
+## EXP-080: the int8 menu's 50 token tile, paired  (2026-11-24)
+- Goal / question: EXP-075 put every int8 tile inside 0.041 to 0.052 ms and DEC-073 kept the menu rather than retune from that. Three paired runs at one shape can settle it.
+- Change (one thing): `bench/int8_pair.py`, task `int8pair`, alternates the menu pick and three challengers at 720 x 1920 and 50 tokens, 10 warmup, 5 repeats, 50 iterations per repeat.
+- Prediction: none filed by the human.
+- Result (measured): run 1, menu `(64, 64, 128, 2)` 0.036 ms against `(32, 128, 128, 2)` 0.034 (1.07x), `(16, 128, 128, 2)` 0.024 (1.53x) and `(64, 64, 128, 3)` 0.032 (1.14x), all in every repeat. Run 2, the same pair: 0.036 against 0.034 for the 16 row tile (1.07x), so the 1.53x did not reproduce. Run 3, after the menu changed to the 16 row tile: 0.023 against 0.033, 0.036 and 0.031 for the three challengers, so the new pick is 1.35x to 1.5x ahead.
+- Explanation / hypothesis: a 50 token chunk on a 64 row tile is one row block, so 720 outputs means six programs on 26 SMs, while a 16 row tile makes 24. The direction is stable in all three runs and the size is not, which is what a shared GPU does to a sub 0.04 ms call.
+- Caveat: the int4 grid pair in EXP-079 went the other way (60 programs 0.070 ms against 15 programs 0.060), so more programs is not a general rule and this upgrade is tied to the int8 kernel at this shape.
+- Verdict: menu changed. `LONG_TOKENS` 33 selects `LONG_TILE` `(16, 128, 128, 2)`, and the token to tile test follows.
+- Follow-ups: pair the 16 row tile at 1920 x 720 and at 8 tokens, where the same six program argument applies.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

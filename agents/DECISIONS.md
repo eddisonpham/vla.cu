@@ -511,6 +511,18 @@
 - Status: active
 
 ## DEC-066: a residual and its norm are one launch  (2026-11-23)
+## DEC-075: a long int8 chunk gets a 16 row tile, and only the int8 menu moves (2026-11-24)
+
+- Context: EXP-080. Three paired runs at 720 x 1920 and 50 tokens have the 16 row tile ahead every time, by 1.07x to 1.53x, because a 64 row tile leaves six programs at this width.
+- Decision: `LONG_TOKENS` 33 selects `LONG_TILE` `(16, 128, 128, 2)` in the int8 menu. The int4 menu is untouched: its paired grid test goes the other way (EXP-079).
+- Consequence: quote the range and not the best reading, and re-pair at 8 tokens and at 1920 x 720 before copying the rule.
+
+## DEC-076: the cooperative tail is an experiment, not a default path (2026-11-24)
+
+- Context: EXP-078. One cooperative launch matches the five launch path within 1.3e-3 and is 3.13x at 1 token, 2.55x at 2 and 2.22x at 3, but 0.24x at 50 because the warp per row body is not tiled.
+- Decision: keep the kernel and its bench and test as the measured proof that the launch floor is 24 us of a 119 us call at batch 1. Route nothing through it yet.
+- Consequence: a tiled body with tensor cores is the chunk that would make it a default at 8 and 50 tokens. A cooperative launch also assumes no other process takes a block, which a shared desktop cannot promise.
+
 ## DEC-073: the int8 GEMM menu is not retuned from a sequential sweep (2026-11-23)
 
 - Context: EXP-075. Twelve candidates at three widths sit inside 0.041 to 0.052 ms, a band the shared GPU can produce on its own, and the menu's pick is inside it.

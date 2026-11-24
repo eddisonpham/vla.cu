@@ -113,8 +113,11 @@ on purpose, not forgotten.
 - [x] A true stream-K: contiguous K ranges across tiles with boundary handoff, one launch and a balanced grid. Done 2026-11-23, EXP-073: 1.04x on 1920 outputs and 0.89x on 720, bit exact, so it stays off. The grid was not what limited the kernel.
 - [ ] Name the fixed cost at M = 50. Every int4 path lands at 0.048 to 0.057 ms for 1.3 to 1.7 MB (26 to 37 GB/s) whatever the program count, against 0.021 to 0.027 ms for cuBLAS bf16, so the limit is neither the grid nor DRAM. Needs `ncu` from the elevated shell (EXP-073).
 - [x] Give the int8 GEMM its own sweep. Done 2026-11-23, `python -m vla_cu int8tiles`, EXP-075: twelve candidates land in 0.041 to 0.052 ms at three expert widths and three token counts, and the menu's pick is inside that band, so it was kept rather than retuned.
-- [ ] Pair the top three int8 tiles at 720 x 1920 and 50 tokens, where the sweep's best reading (0.047 ms) is 4 percent under the menu's 0.049 and inside the noise (EXP-075).
-- [ ] A cooperative-launch persistent layer in CUDA C++ (`cudaLaunchCooperativeKernel` plus `grid.sync()`), which is where EXP-077 stopped. The ceiling is the 6 us host gap per launch, about 9 percent of a call at M = 50 and more at 2 tokens. Blocked on nothing but the chunk size: it is a multi-chunk build.
+- [x] Pair the top three int8 tiles at 720 x 1920 and 50 tokens. Done 2026-11-24, EXP-080: the 16 row tile won every repeat of three paired runs, by 1.07x to 1.53x, and the menu now uses it above 32 tokens.
+- [ ] Pair that 16 row tile at 8 tokens and at 1920 x 720 before the rule spreads (EXP-080).
+- [ ] Tile the cooperative body: one shared activation tile per block and tensor core dots, so the fused path can also win at 8 and 50 tokens (EXP-078).
+- [ ] Skip the group scale and the transpose in an int4 test variant, which is the leading suspect for the 5 to 6 percent of peak in EXP-079.
+- [x] A cooperative-launch persistent layer in CUDA C++. Done 2026-11-24, EXP-078: one launch, 3.13x at 1 token, 2.55x at 2, 2.22x at 3, 1.25x at 8, 0.24x at 50. The body, not the launch, is what is left.
 - [ ] A W4A8 rung: int4 weights with int8 activations, then compare cosine at depth 16 against the current int4 down (EXP-036, CUTLASS W4A8, LiquidGEMM).
 - [ ] Replace the hardcoded tile constants with a measured shape table, the way llama.cpp switches kernels per architecture and quant type (EXP-052, EXP-060, docs/PRODUCTION.md).
 - [ ] Cache the VLM prefix KV across calls, which is the RadixAttention idea applied to a fixed policy prefix (docs/PRODUCTION.md).
