@@ -180,3 +180,10 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local read of the batch file, 2026-11-23.
 - Confidence: high.
 - Relevance: every sanitizer command in docs and `agents/` must use the full executable path, and EXP-044 is the first clean kernel pass.
+
+## SmolVLM2 rope settings, the source behind DEC-056  (2026-11-23)
+- Question: what theta and what pairing does the SmolVLA expert rotate with? DEC-054 assumed theta 10000 because the local checkpoint holds weights only.
+- Finding: the policy config at `lerobot/smolvla_base` sets `vlm_model_name` to `HuggingFaceTB/SmolVLM2-500M-Video-Instruct`, and that model's `text_config` carries `rope_theta: 100000`, `rope_interleaved: false`, `rms_norm_eps: 1e-05`, `hidden_size: 960`, `head_dim: 64`, `num_attention_heads: 15`, `num_key_value_heads: 5`. `rope_interleaved: false` means the Llama pairing, element p with element p + head_dim / 2, not adjacent pairs.
+- Source: https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct/raw/main/config.json and https://huggingface.co/lerobot/smolvla_base/raw/main/config.json, both read 2026-11-23.
+- Confidence: high for the numbers, they are raw config files. Medium for the expert using them unchanged: lerobot builds the expert layers from the VLM text config, which is why the shapes already matched, but the rotation is applied by the attention module the expert copies and that module was not read line by line.
+- Relevance to vla.cu: supersedes the theta 10000 assumption in DEC-054 and the adjacent pairing. Cosine in the token sweep does not move, because the fp32 reference rotates identically; the correction matters for matching SmolVLA's scores, not for the cosine against a reference that makes the same mistake.

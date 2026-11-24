@@ -90,14 +90,17 @@ on purpose, not forgotten.
 - [x] Diff the SASS of the Triton and native int4 GEMV at 4096 x 8192, to name what separates 69 percent from 88. Done 2026-11-23, EXP-050: Triton stages the tile through shared memory and loads 4 and 8 bytes at a time, the native kernel uses 16 byte read-only loads and no SMEM.
 - [x] Try a Triton int4 GEMV with 16 byte loads and no shared memory staging. Done 2026-11-23, EXP-052: the wide mapping reached 56.3 percent against 73.1 staged and 87.9 native, and both Triton mappings still allocate shared memory for the reduction.
 - [x] Force per-lane contiguity in the wide mapping with `tl.multiple_of` and `tl.max_contiguous`. Done 2026-11-23, EXP-054: still 0 `LDG.E.128`, LDS 2 to 8, and 3x slower, so it was reverted.
-- [ ] Keep the wide tile in the load's shape and reduce it with `tl.dot` against a ones vector, so no reshape is needed (EXP-054).
+- [x] Keep the wide tile in the load's shape and reduce it with `tl.dot` against a ones vector. Done 2026-11-23, EXP-056: 0.18x of staged, 970 instructions, 264 FFMA, 83 LDS, kept as the measured alternative (DEC-058).
 - [x] Apply rotary rotation to q and k in the two-token block. Done 2026-11-23, EXP-053: interleaved pairs, row index as position, cosine unchanged because the reference rotates identically.
-- [ ] Run the chain at three or more tokens, where the score matrix is no longer 2 x 2 (EXP-053).
+- [x] Run the chain at three or more tokens, where the score matrix is no longer 2 x 2. Done 2026-11-23, EXP-055: 2, 3, 4 and 8 tokens, exact at every depth, cosine 0.99622 to 0.99648 at depth 16.
 - [x] Graph the normed expert chain. Done 2026-11-23, EXP-049: 16 layers 3.475 ms eager against 0.497 ms graphed, exact at every depth, so 186 us of 217 us per layer was dispatch.
 - [x] Add attention to the 16 deep chain. Done 2026-11-23, EXP-049: cosine 0.99795 at depth 16 over 50.78 MB, with the value path only (DEC-050).
 - [x] Run the chain at two tokens so q and k decide the output and a real softmax has to execute. Done 2026-11-23, EXP-051: cosine 0.99622 at depth 16 over 64.59 MB, 15.45 ms eager.
 - [x] Graph the two-token chain. Done 2026-11-23, EXP-053: 24.880 ms eager against 2.818 ms graphed at depth 16, exact at every depth.
-- [ ] Read the real rope theta from the model config, since 10000 is an assumption (DEC-054).
+- [x] Read the real rope theta from the model config. Done 2026-11-23, EXP-055, DEC-056: theta 100000 and `rope_interleaved` false, so the Llama half split pairing. The old adjacent pairing was wrong.
+- [ ] Add a causal mask to `gqa_mix`, so the chain matches the expert at inference where token 0 cannot see later tokens (EXP-055).
+- [ ] Compare the config `rms_norm_eps` 1e-05 against the EPS the RMSNorm kernel uses, and record which one the reference should carry (RESEARCH, 2026-11-23).
+- [ ] Measure the wide kernel at `input_precision="tf32"` to separate the dot's precision cost from its layout cost (EXP-056).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

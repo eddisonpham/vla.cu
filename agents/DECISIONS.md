@@ -426,9 +426,9 @@
 - Context: EXP-053. RoPE has to be applied to q and k before the score, in both the kernel path and the fp32 reference, or the two stop describing the same block.
 - Options considered: (a) rotate inside `GqaTokenBlock.into` and again in the reference; (b) rotate inside `gqa_mix`, which both already call; (c) pre-rotate the k and q weight matrices once at construction.
 - Chosen and why: (b). One implementation means the kernel path and the reference cannot drift, and the block stays a thin wrapper. Row i of the input is position i, which is true for a contiguous prefix of tokens and needs no position tensor.
-- Cost accepted: theta is a module constant of 10000, not read from the checkpoint, because the checkpoint directory holds weights only. Pre-rotating the weights was rejected because it only works when the position of every token is known at packing time.
-- Revisit if: the real config exposes theta, or tokens arrive out of order and positions must be passed in.
-- Status: active
+- Cost accepted: theta is a module constant, not read from the checkpoint, because the checkpoint directory holds weights only. Pre-rotating the weights was rejected because it only works when the position of every token is known at packing time.
+- Revisit if: tokens arrive out of order and positions must be passed in.
+- Status: active, parameters superseded by DEC-056
 
 ## DEC-055: the two token stage quotes the graphed time, like the one token stage  (2026-11-23)
 - Context: EXP-053. The same chain is 24.880 ms eager and 2.818 ms graphed at depth 16, exact at every depth.
@@ -436,4 +436,28 @@
 - Chosen and why: (b), which is DEC-051 applied again. A graph must pass `torch.equal` against the eager run before its time is printed, so a captured path that is wrong cannot be quoted.
 - Consequence: both chain stages now carry an exactness column, and any future stage that captures a graph does the same.
 - Revisit if: a stage contains something a graph cannot capture.
+- Status: active
+
+## DEC-056: the rotation uses theta 100000 and the Llama half split pairing, from the config  (2026-11-23)
+- Context: DEC-054 assumed theta 10000 because the local checkpoint holds weights only. The policy config names the VLM backbone, and that backbone's config file carries the attention settings the expert copies (RESEARCH, 2026-11-23).
+- Options considered: (a) keep the assumption and note it; (b) read theta and the pairing from the published config and correct both; (c) make theta a per-layer argument.
+- Chosen and why: (b). `rotary` now uses 100000 and pairs element p with p + head_dim / 2, because `rope_interleaved` is false. The previous code paired adjacent elements, which is a different rotation that produces different scores for the same weights.
+- Consequence: the two token cosine does not move at five decimals, because the fp32 reference rotates the same way; the change matters for matching SmolVLA, not for the cosine of this chain. A config flag stays a claim about published weights, so the entry in `RESEARCH.md` carries both URLs.
+- Revisit if: the expert's own attention module is read and does something other than copy the text config.
+- Status: active, supersedes the theta in DEC-054
+
+## DEC-057: the token count is a constructor argument, one block per count  (2026-11-23)
+- Context: EXP-055. `GqaTokenBlock` sized its buffers at construction, so a sweep over token counts needs either one class that reallocates or one thin class with the count fixed.
+- Options considered: (a) allocate buffers inside `into` from the input shape; (b) take `tokens` in the constructor and require the input to match; (c) reshape one maximum size buffer per call.
+- Chosen and why: (b). A graph captures fixed addresses, so the buffers have to be allocated before capture and checked at the call, and a mismatch is then a clear error instead of a silent reallocation. The class already loops over tokens, so no arithmetic changed.
+- Consequence: `bench/scale.py` builds one stack per token count in TOKENS and frees it before the next, which keeps peak memory at one stack.
+- Revisit if: a token count must vary inside one captured graph, which a graph cannot express anyway.
+- Status: active
+
+## DEC-058: the wide mapping keeps the dot reduction, and stays the measured alternative  (2026-11-23)
+- Context: EXP-056. The dot reduction is 0.18x the staged mapping at 4096 x 8192, and 5.5x slower than the reshape reduction it replaced.
+- Options considered: (a) revert to the reshape; (b) delete the wide file; (c) keep the dot and record it as the slower of the two alternatives.
+- Chosen and why: (c). The file is not on any path a block uses, and its listing is the evidence for why a dot is the wrong tool for a sum over 64 elements: 264 FFMA and 83 LDS against 18 FFMA. Reverting would erase the comparison; deleting would repeat DEC-053's mistake of losing the trail.
+- Consequence: `plateau` prints a wide row that loses, and its docstring says so. Anyone reading the file sees the negative before the code.
+- Revisit if: a `tf32` measurement shows the cost is precision and not layout, in which case the file may be worth a rewrite rather than a revert.
 - Status: active

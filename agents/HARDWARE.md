@@ -125,3 +125,5 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | depth 16 two-token chain, graphed | 2.818 ms graphed against 24.880 ms eager, exact at every depth, cosine 0.99622 | `python -m vla_cu scale` | EXP-053 |
 | 2026-11-23, pinned clock | depth 16 two-token chain, q and k rotated | cosine 0.99622, rel L2 8.76e-02, rotation costs 49 us per layer inside a graph | `python -m vla_cu scale` | EXP-053 |
 | 2026-11-23, noisier run | wide Triton with contiguity hints | 0.276 ms, 17.8 percent, 0 `LDG.E.128`, LDS 8, reverted | `python -m vla_cu plateau` in vcvars | EXP-054 |
+| 2026-11-23, pinned clock | depth 16 chain at 2, 3, 4 and 8 tokens, config rope | 27.050 / 33.645 / 39.834 / 66.269 ms eager, 2.866 / 3.391 / 3.996 / 7.003 ms graphed, exact, cosine 0.99622 to 0.99648 | `python -m vla_cu scale` | EXP-055 |
+| 2026-11-23, pinned clock | wide Triton with a `tl.dot` reduction, 4096 x 8192 | 0.422 ms, 11.7 percent, 0.18x of staged, 970 instructions, 264 FFMA, 83 LDS | `python -m vla_cu plateau` in vcvars | EXP-056 |

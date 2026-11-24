@@ -810,3 +810,34 @@
 - Verdict: negative. Reading the row as int32 did not buy the 16 byte weight load, and the wide mapping is slower than the staged one at every shape. The gap to 88 percent is not closed by changing the element type Triton loads.
 - Follow-ups: force per-lane contiguity with `tl.multiple_of` and `tl.max_contiguous` hints. Note the corrected premise in EXP-050: the native kernel reads weights 4 bytes at a time too, so matching its weight load width is not the goal, matching its reduction is.
 
+## EXP-055: the expert chain at two, three, four and eight tokens, with the config rope  (2026-11-23)
+- Goal / question: the score matrix was 2 x 2, so the softmax never chose among more than two keys. Does the cosine hold when every token sees every other token, and is theta really 10000?
+- Change (one thing): `GqaTokenBlock` takes a `tokens` argument so its buffers match the count, `bench/scale.py` loops stage 4 over 2, 3, 4 and 8 tokens, and `rotary` uses theta 100000 with the Llama half split pairing read from the model config.
+- Prediction: none filed by the human.
+- Source for the rope: https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct/raw/main/config.json, `text_config.rope_theta` 100000 and `rope_interleaved` false, read 2026-11-23. The policy config at lerobot/smolvla_base names that VLM as `vlm_model_name`, and the expert layers copy its attention settings.
+- Command: `python -m vla_cu scale`, clocks pinned near 1985 MHz, after `pytest -q`.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, 16 real expert layers, int8 q/k/v/o and up, int4 down, fp32 reference.
+- Result (measured), tokens 2, depth, MB, eager ms, graph ms, cos, rel L2: 1, 4.16, 1.860, 0.174, 0.99970, 2.45e-02. 2, 8.07, 3.599, 0.339, 0.99944, 3.34e-02. 4, 16.15, 6.577, 0.676, 0.99880, 4.90e-02. 8, 32.29, 13.249, 1.411, 0.99798, 6.38e-02. 16, 64.59, 27.050, 2.866, 0.99622, 8.76e-02.
+- Result, tokens 3: 1, 4.16, 2.161, 0.197, 0.99967, 2.55e-02. 2, 8.07, 4.442, 0.444, 0.99939, 3.49e-02. 4, 16.15, 8.301, 0.919, 0.99878, 4.94e-02. 8, 32.29, 17.452, 1.740, 0.99791, 6.49e-02. 16, 64.59, 33.645, 3.391, 0.99622, 8.73e-02.
+- Result, tokens 4: 1, 4.16, 2.527, 0.280, 0.99968, 2.54e-02. 2, 8.07, 5.029, 0.551, 0.99939, 3.50e-02. 4, 16.15, 9.571, 0.981, 0.99881, 4.87e-02. 8, 32.29, 20.162, 1.986, 0.99795, 6.42e-02. 16, 64.59, 39.834, 3.996, 0.99641, 8.51e-02.
+- Result, tokens 8: 1, 4.16, 3.886, 0.375, 0.99967, 2.57e-02. 2, 8.07, 7.640, 0.730, 0.99937, 3.56e-02. 4, 16.15, 15.502, 1.637, 0.99881, 4.88e-02. 8, 32.29, 31.449, 3.195, 0.99794, 6.43e-02. 16, 64.59, 66.269, 7.003, 0.99648, 8.41e-02.
+- Exact: yes at every depth, at every token count.
+- Explanation / hypothesis: the cosine does not move with the token count. Every added token adds one more quantized term to a residual that both sides carry, so the error grows with depth and not with the number of keys. Graph replay at depth 16 is 2.866 ms at two tokens and 7.003 ms at eight, 2.4x for 4x the tokens, so the per-launch grid is a real part of the cost at these sizes. Eager grows 2.45x, from 27.050 to 66.269 ms, which is less than 4x because the fixed Python cost per launch is shared across more launches.
+- Caveat: attention is not causal, so token 0 already sees the last token, which the expert at inference does not do. This whole run reads 8 to 25 percent slower on the eager paths than the EXP-053 run (stage 3 depth 16 eager 4.406 against 3.475 ms), so compare token counts inside this run and not against the archived two token times.
+- Verdict: worked. The chain now exercises an n x n score matrix up to 8 x 8, the three-key block has a test, and the rope parameters come from the config instead of an assumption.
+- Follow-ups: add a causal mask, then compare `rms_norm_eps` 1e-05 from the same config against the kernel's EPS.
+
+## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
+- Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
+- Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.
+- Prediction: none filed by the human. The working guess was that removing the reshape from the load path would help.
+- Command: `python -m vla_cu plateau` and `python -m vla_cu sass` in vcvars, median of 5 repeats of 30 iterations, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, Triton 3.9.0, block 1024, 1 warp, group 64, `input_precision="ieee"`.
+- Result (measured), 4096 x 8192: staged Triton 0.077 ms, 244.3 GB/s, 63.6 percent. wide 0.422 ms, 44.8 GB/s, 11.7 percent, 0.18x of staged, max abs diff 1.91e-06. Native baseline 85.1, unroll 87.4, stream 86.7 percent.
+- Result, the whole grid: wide is 0.47x at 2048 x 4096, 0.18x at 4096 x 8192, 0.27x at 8192 x 16384, 0.27x at 16384 x 16384, 0.23x at 16384 x 32768, and its best shape is 16.1 percent. The 256 and 1024 row shapes are inside the noise, at 1.12x and 0.97x. The native variants in the same run read 85 to 87 percent at 4096 x 8192.
+- Result, listing: the dot kernel is 970 instructions, 264 FFMA, 40 LDG, 0 `LDG.E.128`, 83 LDS. The reshape version was 448 instructions with 18 FFMA. The staged kernel in the same run is 416 instructions, 12 LDG, 6 LDS.
+- Explanation / hypothesis: `tl.dot` with `input_precision="ieee"` lowers to plain FMA, and the 16 columns of the ones matrix multiply the arithmetic by 16, which is the 264 against 18. The layout conversion did not vanish either, it moved into 83 LDS, because the dot wants its operands in the MMA layout. Both Triton mappings remain 0 on `LDG.E.128`.
+- Caveat: only `ieee` was measured. `tf32` would put the dot on tensor cores and cut the FMA count, but it rounds the product tile to 10 mantissa bits, which the 1e-4 test tolerance would probably reject.
+- Verdict: negative. The dot is 5.5x slower than the reshape reduction at the measured shape, so the reshape was not what cost the wide mapping its bandwidth.
+- Follow-ups: measure `tf32` to separate the precision cost from the layout cost; decide whether the wide file keeps the dot or returns to the reshape reduction (DEC-058).
+
