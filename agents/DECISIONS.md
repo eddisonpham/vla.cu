@@ -502,6 +502,30 @@
 - Revisit if: a longer chunk is measured, or the kernel gets a K split.
 - Status: active
 
+## DEC-065: the chunk MLP is its own block  (2026-11-23)
+- Context: EXP-067. The chain called `MlpBlock` once per token, so up and down were two launches per token, 100 of 305 launches at 50 tokens.
+- Options considered: (a) give `MlpBlock` a token axis and let its 1D callers pad; (b) a second class, `MlpTokenBlock`, with a [tokens, intermediate] buffer and GEMM projections; (c) keep the loop because the GEMV is the honest batch 1 kernel.
+- Chosen and why: (b). `MlpBlock` is the one-token kernel and its callers, `ActionBlock` and stage 3, pass a single row; making it two dimensional would put a branch in the hot path of the thing the project is about. The chunk block is a different shape, so it is a different object.
+- Cost accepted: two classes with similar validation, and the chunk MLP always uses GEMMs even at two tokens, where a GEMV might be equal. The test compares it against the token loop at 0.9999 cosine.
+- Revisit if: one token also lands on a GEMM, or a shared base class earns its keep.
+- Status: active
+
+## DEC-066: a residual and its norm are one launch  (2026-11-23)
+- Context: EXP-069. Two launches per token for add then norm, and at 50 tokens that was 100 of 208 launches.
+- Options considered: (a) leave the two kernels; (b) one kernel that writes both the sum and its norm; (c) fold the norm into the next projection.
+- Chosen and why: (b). The sum is already in registers when the norm needs it, so the second pass reads memory the kernel just wrote. (c) would make every projection kernel carry a norm mode, which is the kind of shape that stops being explainable.
+- Cost accepted: two output buffers per call, and the pre-attention norm stays a separate launch because there is no residual to add there yet.
+- Revisit if: a two dimensional norm over a whole token chunk removes the rest of the per-token tail.
+- Status: active
+
+## DEC-067: split K stays available and off  (2026-11-23)
+- Context: EXP-068. Splitting K across 2 or 4 programs with a reduce launch was 0.57x to 0.75x the speed of the single launch on both expert shapes, paired.
+- Options considered: (a) remove the code; (b) keep it behind a `splits` parameter defaulting to 1; (c) make it default for narrow output widths.
+- Chosen and why: (b). The kernel and the deterministic reduce are tested and explain a real scheduling idea, and the negative result is more useful with the code still there. (c) is excluded by the measurement.
+- Cost accepted: a parameter that is never the right answer today, and one more test surface.
+- Revisit if: a stream-K schedule is tried, which keeps one launch and needs no partials.
+- Status: active
+
 ## DEC-062: a chunk of tokens belongs to a GEMM, not a GEMV loop  (2026-11-23)
 - Context: EXP-063. At M = 50 the GEMM is 24 to 42x faster than the loop on the expert matrices, and cuBLAS bf16 is another 2.5 to 3.8x faster than our int4 GEMM. EXP-060 counted 500 launches per layer at 50 tokens.
 - Options considered: (a) keep the per-token loop because it is batch 1 code; (b) dispatch the projections to the int4 GEMM above a small token count; (c) always use the GEMM, even at one token.

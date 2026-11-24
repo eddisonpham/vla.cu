@@ -959,6 +959,41 @@
 - Verdict: worked. The chunk path is 18 to 42 percent faster with no accuracy movement.
 - Follow-ups: the MLP still runs two GEMVs per token in this chain, so about 100 launches per layer are still projections; wire it the same way.
 
+## EXP-067: the chunk MLP through the GEMMs  (2026-11-23)
+- Goal / question: EXP-066 left the MLP at two GEMV launches per token, about 100 of the 305 launches in a 50 token layer. What does a chunk MLP cost when up is one int8 GEMM and down is one int4 GEMM?
+- Change (one thing): `MlpTokenBlock` holds a [tokens, intermediate] buffer, reads `x` [tokens, hidden], and runs up GEMM, SiLU over the chunk, down GEMM. The chain calls it once per layer instead of once per token.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, 16 real expert layers, clocks pinned at 1965 MHz.
+- GPU / environment: RTX 5060 Laptop, 74 C, 28 W draw, stage 1 reading 154 GB/s against 298 in the run 90 minutes earlier, so this run is throttled.
+- Result (measured), depth 16 graph ms, tokens 2, 3, 4, 8, 50: 2.319, 3.668, 2.546, 3.072, 10.627. Launches per layer 208 against 305. Eager at 50 tokens 111.161 ms against 215.646.
+- Correctness: exact everywhere, cosine 0.99784 at 2 tokens and 0.99638 at 50 against 0.99783 and 0.99637, the 1e-5 of movement being fp16 activation rounding inside the int8 GEMM.
+- Explanation / hypothesis: the 50 token column fell 1.8x while the GPU was slower, so that gain is the MLP GEMM reading each weight once instead of fifty times. The 2 to 8 token columns rose against the previous run, but the clocks fell far enough that the two cannot be compared across runs; within this run the small token numbers scale smoothly (2.050 to 2.620 for 2 to 8 tokens in EXP-069).
+- Verdict: worked on the long chunk, unresolved at 2 to 8 tokens until a paired run.
+- Follow-ups: pair this against the token loop the way `attncross` pairs the mix, so the small M question stops depending on the clock state.
+
+## EXP-068: split K across programs on the narrow shape, a negative  (2026-11-23)
+- Goal / question: the 720 x 1920 shape runs 12 programs against 26 SMs at 6.3 percent of peak. Does splitting K across two or four programs, with a second launch to sum the partials, fix it?
+- Change (one thing): the int4 GEMM kernel takes `SPLITS`, walks every SPLITS'th K step from its own start, writes [SPLITS, M, N] partials, and a reduce kernel sums them in a fixed order so a graph still replays bit for bit.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu m50`, split verdict paired with `time_pair`, 20 iterations and 5 repeats.
+- Result (measured), speedup of split over the single launch, paired medians: 1920 x 720, 2 splits 0.57x (range 0.28 to 0.81), 4 splits 0.75x (0.31 to 1.10). 720 x 1920, 2 splits 0.68x (0.35 to 1.10), 4 splits 0.75x (0.36 to 0.86).
+- Explanation / hypothesis: the reduce is a whole extra launch at a 48 to 50 us kernel. EXP-061 put the launch floor at about 22 us and the partials add 0.29 to 1.54 MB, so the split has to more than double the kernel to break even, and the single launch is already at 27 GB/s rather than stalling on CTA count.
+- Caveat: these kernels are noisy. The same single launch read 0.048 and 0.170 ms in two runs of the same process shape, at 74 C and a 28 W draw, and single tile rows swung 3x. The paired medians are consistent across two shapes and four configurations, which is why the verdict rests on them and not on the table.
+- Verdict: did not work. The parallelism hypothesis was wrong at this size, and `splits` stays in the kernel with a default of 1 as a measured dead end.
+- Follow-ups: if the narrow shape is pursued, try a stream-K schedule that keeps one launch and hands out K slices dynamically, not a second reduce launch.
+
+## EXP-069: the residual add and its norm in one launch  (2026-11-23)
+- Goal / question: the post-attention residual and the RMSNorm that follows it are two launches per token, 100 of the 208 in a 50 token layer after EXP-067. Can they be one pass?
+- Change (one thing): `add_norm_into` writes the sum to the residual buffer and its norm to the norm buffer from the same registers, and the chain uses it after attention.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, 16 real expert layers, clocks pinned at 1965 MHz.
+- Result (measured), depth 16 graph ms, tokens 2, 3, 4, 8, 50: 2.050, 2.162, 2.241, 2.620, 8.456. Launches per layer 158 against 208. Eager at 50 tokens 105.106 ms against 111.161.
+- Correctness: exact everywhere, cosine identical to five decimals (0.99784 at 2 tokens, 0.99638 at 50).
+- Explanation / hypothesis: fifty launches removed at 50 tokens, each about 20 us eager, which is the 6 ms eager gain; the graphed gain is smaller because a graph node is about 0.6 us (EXP-009), so most of the eager win was dispatch.
+- Caveat: both runs are throttled but not equally (stage 1 154 against 177 GB/s), so the 20 percent graph gain is partly clock.
+- Verdict: worked. What is left per token is the pre-attention norm and the final residual add, both one launch each.
+- Follow-ups: a two-dimensional norm over the token chunk would remove the rest of the tail in one change.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.
