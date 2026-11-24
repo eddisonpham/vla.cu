@@ -34,7 +34,10 @@
 - [x] Read real weights from `lerobot/smolvla_base`. Done 2026-11-23, EXP-043: five matrices, `python -m vla_cu real`. Three layers measured 2026-11-24, EXP-099, `python -m vla_cu realstack`.
 - [x] All 16 backbone layers at int8 and int4, one token, graphed. Done 2026-11-24, EXP-101: cosine 0.99998 at int8 and 0.99965 at int4.
 - [x] The expert stack at 50 tokens. Done 2026-11-24, EXP-102: cosine 0.99996 at int8 and 0.99847 at int4; int4 down is 0.471 ms slower on the GEMM path.
-- [ ] The expert stack at 50 tokens with the real 48 token VLM prefix instead of a random one.
+- [x] The expert stack at 50 tokens with the real VLM prefix instead of a random one. Done 2026-11-24, EXP-104: cosine 0.99997 at int8 and 0.99847 at int4, identical to the random prefix, 1.977 and 2.378 ms.
+- [ ] The full 241 row prefix: 192 image rows through the SigLIP tower and connector, 48 language rows, 1 state row. Needs a tokenizer and three camera frames.
+- [ ] Decide the rope wavelength for the expert and the prefix: LeRobot's `apply_rope` uses 10000 while the config says 100000, and this repo uses 100000 (RESEARCH 2026-11-24).
+- [ ] A state row in the prefix, from `state_proj` on a real robot state instead of no state at all.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
 - [x] A real checkpoint with and without rotation. Done 2026-11-23, EXP-043 and DEC-045: rotation is inconsistent on real weights. A three layer stack at int8 and int4 is done 2026-11-24, EXP-099: cosine 0.99986 at int8 and 0.99505 at int4, 4.2 to 5.5x fp32.
 - [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.

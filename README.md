@@ -90,12 +90,12 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 246 tests on a GPU, 47 passed and 199 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
+| CI and gates | 248 tests on a GPU, 47 passed and 201 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
 | Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094); `fused=True` runs its tail in one launch, measured slower than a captured chain (EXP-097) |
 | Real 16 layer backbone | every backbone layer at one token, every path a captured graph: fp32 629.27 MB and 4.334 ms, int8 down 157.84 MB and 1.176 ms (3.69x), int4 down 140.57 MB and 1.101 ms (3.94x), cosine 0.99998 against 0.99965 (EXP-101) |
-| Real expert at 50 tokens | all 16 expert layers on the GEMM path, cross attention on the odd ones: fp32 392.98 MB and 7.814 ms, int8 down 98.68 MB and 2.260 ms (3.46x), int4 down 88.31 MB and 2.731 ms (2.86x, slower), cosine 0.99996 against 0.99847 (EXP-102) |
+| Real expert at 50 tokens | all 16 expert layers on the GEMM path, cross attention on the odd ones reading the real 48 row VLM key and value cache: fp32 392.98 MB and 6.454 ms, int8 down 98.68 MB and 1.977 ms (3.26x), int4 down 88.31 MB and 2.378 ms (2.71x, slower), cosine 0.99997 against 0.99847 (EXP-102, EXP-104) |
 | int4 attention rung | int4 attention with int8 down reads 0.93242 over four blocks, against 0.90671 with int4 down and 0.97606 with int8 attention, so 4-bit attention costs more accuracy than 4-bit down (EXP-103) |
 | Captured tail at 720 | at one token the cooperative tail reads 0.58x the captured chain at 720/1920 and 0.50x at 960/2560, so the smaller width does not change the verdict (EXP-100) |
 | Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |

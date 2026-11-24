@@ -36,7 +36,7 @@ so an idea enters only when a measurement here can show what it buys.
 | Graph friendly everything | Every chain is a `torch.cuda.CUDAGraph`, checked with `torch.equal` | Already aligned with vLLM, SGLang and TensorRT-LLM practice | EXP-049, DEC-055 |
 | Per-shape dispatch table | Block size fixed at 1024, rows at 4, no shape based choice | `plateau` shows 73 percent at one shape and 38 at another, with no rule | EXP-052, EXP-060 |
 | L2 evict-first for weights | Triton eviction hints on by default | Matches Marlin's policy, but the pipelining that makes it pay is missing | EXP-020, EXP-022 |
-| Prefix reuse | The VLM prefix is a fixed random tensor, recomputed every call | A real policy would cache the VLM KV for the episode | EXP-050, stage 3 note |
+| Prefix reuse | The prefix cache is rebuilt from the 48 language rows every run, and the image and state rows are absent | A real policy would cache the full VLM KV for the episode | EXP-104 |
 | W4A8 rung | int8 weights and int4 weights are separate paths, never mixed in one layer | The rung is open: int4 down with int8 attention already exists, W4A8 does not | EXP-036, backlog |
 | Contiguity and packing for tensor cores | Plain row-major nibbles, unpacked with shifts | A preshuffled layout would let int8 MMA consume int4 without shifts | EXP-056, EXP-059 |
 

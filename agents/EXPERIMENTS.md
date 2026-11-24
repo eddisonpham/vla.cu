@@ -1373,6 +1373,22 @@
 - Verdict: worked. Int4 attention is the rung to avoid before int4 down.
 - Follow-ups: the same mix on real weights, where attention is int8 today; the 0.121 ms ordering needs a repeat before it is believed.
 
+## EXP-104: the expert stack on the real VLM prefix  (2026-11-24)
+- Goal / question: EXP-102 fed the expert N(0,1) prefix rows, which is not what cross attention sees. Each odd expert layer projects the cached keys and values of the same backbone layer, post-rope, over the language prefix. Does the expert cosine hold on that cache, and how do bytes and time move?
+- Change: `GqaTokenBlock` gained a cross mode: keys from `other`, values from `other_value`, no key rotation, no causal mask, and an explicit key row count (`other_tokens`). `gqa_attention_into` and `gqa_mix` gained the key count and `rotate_keys`, and `kernels/triton/gqa_attention.py` skips the key table load in cross mode. New `vla_cu/prefix.py` runs the 16 real backbone layers in fp32 over 48 language rows, bidirectionally, and returns post-rope keys and values. `bench/expert_stack.py` builds odd layers with 48 key rows.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu expertstack` in vcvars, warmup 10, iterations 50.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, 50 action tokens, 48 prefix rows.
+- Result (measured): fp32 392.98 MB, 6.454 ms; int8 down 98.68 MB, 1.977 ms, 3.26x, cosine 0.99997, rel L2 8.10e-03; int4 down 88.31 MB, 2.378 ms, 2.71x, cosine 0.99847, rel L2 5.53e-02. Per layer int8 reads 0.99997 to 1.00000 and int4 falls from 0.99989 to 0.99847. Graphs bit exact. `compute-sanitizer --tool memcheck` on the two new cross tests: 2 passed, 0 errors.
+- Explanation / hypothesis: the real prefix and the random prefix give the same cosine to five decimals, so prefix statistics do not set the quantization error; the down projection and the int4 path do. Every path is faster than EXP-102 (fp32 6.454 against 7.814 ms), which is clock state rather than the two fewer key rows.
+- Caveat: the 48 rows are a fixed slice of the 49280 row embedding table because the repo has no tokenizer, and the 1 state row and 192 image rows are absent, so the deployed prefill is about 241 rows (CORRECTION below). LeRobot's `apply_rope` uses max_wavelength 10000 while the SmolVLM2 config says 100000; the prefix and the expert both use this repo's 100000 here, so q.k stays consistent, and the mismatch is logged in RESEARCH.
+- Verdict: worked. int4 down keeps its accuracy at 0.99847 and stays 0.40 ms slower than int8 at 50 tokens.
+- Follow-ups: the full 241 row prefix with the SigLIP tower and three real frames; the state row; decide theta 10000 against 100000.
+
+### CORRECTION to EXP-102 and STATE (2026-11-24)
+
+EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `prefix_length: 0` and `tokenizer_max_length: 48`, and a prefill is 192 image rows (3 cameras x 64) plus 48 language rows plus 1 state row, so a deployed prefix is about 241 rows. 48 is the language segment only. EXP-104 measures that segment.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

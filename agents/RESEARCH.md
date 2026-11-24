@@ -181,6 +181,12 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Confidence: high.
 - Relevance: every sanitizer command in docs and `agents/` must use the full executable path, and EXP-044 is the first clean kernel pass.
 
+## SmolVLA prefix length and the rope wavelength actually used  (2026-11-24)
+- Finding: `lerobot/smolvla_base/config.json` has `prefix_length: 0`, `tokenizer_max_length: 48`, `resize_imgs_with_padding: [512, 512]`, `empty_cameras: 0`, three cameras, and `attention_mode: cross_attn`. With patch 16 the vision tower sees 1024 patches, and `connector.modality_projection.proj` is [960, 12288] = 960 x 16 x 768, so 4x4 pixel shuffle gives 64 tokens per camera. A prefill is therefore 192 image rows + 48 language rows + 1 state row, about 241 key rows, not 48.
+- Finding: `smolvlm_with_expert.py` defines `apply_rope(x, positions, max_wavelength=10_000)` and calls it without a wavelength, so the LeRobot path rotates at 10_000 even though the SmolVLM2 text config says `rope_theta: 100000`. DEC-056 took the config value; this repo still uses 100000, and the prefix builder matches it so q.k is consistent. The deployed value is the open question.
+- Finding: the expert cross layer reads `past_key_values.layers[layer_idx].keys` and `.values` (post-rope, [batch, kv heads, seq, 64]), applies its own `k_proj` and `v_proj` [320, 320] to each stream, and rotates only its query. Cross attention is unmasked over the whole prefix.
+- Source: https://huggingface.co/lerobot/smolvla_base/raw/main/config.json, https://raw.githubusercontent.com/huggingface/lerobot/main/src/lerobot/policies/smolvla/smolvlm_with_expert.py, and `modeling_smolvla.py`, all read 2026-11-24. Confidence: high, read from the deployed code.
+
 ## SmolVLM2 rope settings, the source behind DEC-056  (2026-11-23)
 - Question: what theta and what pairing does the SmolVLA expert rotate with? DEC-054 assumed theta 10000 because the local checkpoint holds weights only.
 - Finding: the policy config at `lerobot/smolvla_base` sets `vlm_model_name` to `HuggingFaceTB/SmolVLM2-500M-Video-Instruct`, and that model's `text_config` carries `rope_theta: 100000`, `rope_interleaved: false`, `rms_norm_eps: 1e-05`, `hidden_size: 960`, `head_dim: 64`, `num_attention_heads: 15`, `num_key_value_heads: 5`. `rope_interleaved: false` means the Llama pairing, element p with element p + head_dim / 2, not adjacent pairs.

@@ -529,6 +529,18 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-090: cross attention takes two streams and pre-rotated keys  (2026-11-24)
+- Context: EXP-104. The real expert cross layer projects cache keys with `k_proj` and cache values with `v_proj` separately, and rotates only its query (smolvlm_with_expert.py). The block rotated whatever stream it was given and used one stream for both.
+- Decision: a `GqaTokenBlock` is a cross block when `wk` reads a narrower input than `wq`. Its keys come from `other`, its values from `other_value`, neither is rotated again, it is never causal, and the key row count is an explicit `other_tokens` because it differs from the query count. `gqa_attention_into` takes the key count and `rotate_keys`, the kernel skips the key table load in that mode, and `gqa_mix` mirrors it.
+- Consequence: an expert cross layer can be built and graphed for 50 queries against 48 keys. Self layers are unchanged because their widths match, and the kernel has one more constexpr branch.
+- Revisit if: a model cross attends to a stream of its own width, or a cross layer needs rotated keys.
+
+## DEC-091: the prefix cache is real weights over placeholder inputs  (2026-11-24)
+- Context: EXP-104. A deployed SmolVLA prefix is about 241 rows (192 image, 48 language, 1 state), and the repo has no tokenizer, no camera frame, and no vision tower forward.
+- Decision: `vla_cu/prefix.py` builds the 48 language rows from a fixed slice of the real embedding table, runs all 16 real backbone layers in fp32 with a bidirectional mask, and returns post-rope keys and values per layer. It uses this repo's theta 100000 so the expert query and the cached key share one rotation.
+- Consequence: the cache has real weights, depth, width and geometry, and placeholder content. It supports the EXP-104 comparison but is not a full inference prefix.
+- Revisit if: a tokenizer and camera frames are added, or theta 10000 is adopted.
+
 ## DEC-089: the fused layer tail stays off by default (2026-11-24)
 
 - Context: EXP-097 captured both paths and the cooperative tail read 0.59x the chain at 1 token, 0.50x at 8 and 0.15x at 50. EXP-091's 3.49x was an eager comparison, so it measured dispatch.

@@ -140,7 +140,8 @@ kernels, so they are used as references and as performance baselines.
 | 50 | gated tail in the block | `GatedMlpBlock.tail_into` calls the cooperative gated kernel with the block's own packed weights | `vla_cu/blocks.py` | done, host checks for int8 down, group 64, 64 tokens and both widths (EXP-095) |
 | 51 | bound graph capture | capture against the caller's input buffer, copy only when the pointer differs, `replay()` without a copy | `vla_cu/linear.py` | done, 4.18x to 1.02x and the copy cost measured at 5 to 10 us (EXP-096) |
 | 52 | real backbone stack | all 16 backbone layers of `lerobot/smolvla_base` at one token, int8 against int4 down, each stack a captured graph against an fp32 graph | `bench/real_stack.py` | done, cosine 0.99998 at int8 and 0.99965 at int4, 3.69x and 3.94x fp32 (EXP-099, EXP-101) |
-| 53 | real expert stack | all 16 expert layers at 50 tokens, cross attention on the odd layers, int8 against int4 down | `bench/expert_stack.py` | done, cosine 0.99996 at int8 and 0.99847 at int4; int4 is slower, 2.260 against 2.731 ms (EXP-102) |
+| 53 | real expert stack | all 16 expert layers at 50 tokens, cross attention on the odd layers over the real 48 row VLM cache, int8 against int4 down | `bench/expert_stack.py` | done, cosine 0.99997 at int8 and 0.99847 at int4; int4 is slower, 1.977 against 2.378 ms (EXP-102, EXP-104) |
+| 55 | real VLM prefix cache | 16 real backbone layers over 48 language rows, bidirectional, post-rope keys and values at 320 wide per layer | `vla_cu/prefix.py` | done, the expert cosine is unchanged against a random prefix, so prefix statistics are not the error source (EXP-104) |
 | 54 | int4 attention rung | int4 attention with int8 down isolates the attention error from the down error on four blocks | `bench/block.py` | done, 0.93242 at int4 attention and int8 down against 0.97606 at int8 attention and int4 down (EXP-103) |
 
 ## 7. Measurement protocol
