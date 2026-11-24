@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `pairedtail`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `pairedtail`, `int8tiles`, `floor`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -117,6 +117,9 @@ kernels, so they are used as references and as performance baselines.
 | 27 | balanced stream K | one contiguous slice of the flattened (tile, K step) work list per program, boundary partials summed by the last arrival | `kernels/triton/int4_gemm.py` | done, 1.04x on 1920 outputs and 0.89x on 720, bit exact, default off |
 | 28 | paired tail bench | the per-token loops and the chunk kernels alternate inside one process, so one clock state serves both | `bench/paired_tail.py` | done, 61.5x the row kernels and 48.7x the MLP at 50 tokens, 1.97x for the MLP at 2 |
 | 29 | depth sweep | every depth at every token count, graph against eager on the same buffers | `bench/scale.py` | done, graph 3.18x to 5.66x eager at 2 to 8 tokens and 1.41x to 1.86x at 50, exact at all 80 pairs |
+| 30 | int8 tile sweep | every candidate tile timed at the expert widths and token counts | `bench/int8_tiles.py` | done, every candidate inside 0.041 to 0.052 ms, so the tile sits inside the launch floor's noise |
+| 31 | launch floor | a launch loop against a one node graph, an empty kernel against the int4 GEMM | `bench/launch_floor.py` | done, 6 us host gap and a 9 us empty kernel, so the 47 us GEMM body is the cost |
+| 32 | persistent layer | a grid barrier and five fused stages | not kept | negative, a two program sense barrier never exits, so Triton here has no usable device barrier |
 
 ## 7. Measurement protocol
 

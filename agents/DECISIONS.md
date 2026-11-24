@@ -511,6 +511,18 @@
 - Status: active
 
 ## DEC-066: a residual and its norm are one launch  (2026-11-23)
+## DEC-073: the int8 GEMM menu is not retuned from a sequential sweep (2026-11-23)
+
+- Context: EXP-075. Twelve candidates at three widths sit inside 0.041 to 0.052 ms, a band the shared GPU can produce on its own, and the menu's pick is inside it.
+- Decision: the int8 menu stays as it is, and `int8tiles` is the tool for the next question rather than a licence to retune now.
+- Consequence: a tile change needs a paired run at one shape, not a table of single readings.
+
+## DEC-074: no Triton device-side grid barriers, no persistent layer until a cooperative launch (2026-11-23)
+
+- Context: EXP-077. A two program sense barrier never exits, while scalar atomics alone and a pre-visible flag both work, so the spin does not re-read its condition in Triton 3.9 here.
+- Decision: remove the fused kernel, its bench and its tests, and add no device barrier to this repo.
+- Consequence: the whole-layer persistent kernel waits for a CUDA C++ cooperative launch, which `torch.utils.cpp_extension` can build, and its ceiling is the 6 us host gap per launch, about 9 percent of a call at M = 50.
+
 ## DEC-070: the balanced stream K stays available and off (2026-11-23)
 
 - Context: EXP-073. A contiguous work slice per program fills all 26 SMs, and it measured 1.04x on the 1920 output shape and 0.89x on the 720 output one.

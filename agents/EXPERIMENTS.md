@@ -1057,6 +1057,42 @@
 - Verdict: the graph win is uniform in depth, not a 16 layer artifact, and it is the dispatch share rather than the depth that sets its size.
 - Follow-ups: the 50 token graph is still 3.665 ms for 64.59 MB, 17.6 GB/s, so the kernels themselves, not the dispatch, are now the question.
 
+## EXP-075: the int8 GEMM gets its own tile sweep  (2026-11-23)
+- Goal / question: the int8 GEMM has run an unswept menu at 16, 32, 64 and 128 rows. Does a different tile beat it at the widths the chunk uses?
+- Change (one thing): `bench/int8_tiles.py`, task `int8tiles`, times twelve candidates at 1920 x 720, 720 x 720 and 720 x 1920 for 2, 8 and 50 tokens, checks each against its exact dequantized product and marks the menu's pick.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu int8tiles`, 10 warmup and 50 iterations per candidate.
+- GPU / environment: RTX 5060 Laptop, clocks pinned at 1972 MHz, but a browser and a game held 24 percent of the GPU during the run, which matters below.
+- Result (measured): the best candidate per shape and token count is 0.031 ms at 1920 x 720 with 2 tokens and 0.041 to 0.047 ms for the other eight cases. Every candidate, winners and losers, lands between 0.041 and 0.052 ms, and the worst are 0.096 to 0.115 ms. The current menu pick is inside the band everywhere and is the outright winner at 1920 x 720 with 2 tokens.
+- Correctness: every candidate reads cosine 0.9999999 to 1.0000000 against the exact dequantized product, so the sweep is comparing equal answers.
+- Explanation / hypothesis: at 1.3 to 2.5 MB the kernel is at the launch floor EXP-076 names, so a tile that halves the grid or halves the staged bytes cannot show up. The 2x losers are the ones whose grid or staging falls off a cliff, not a smooth ordering.
+- Caveat: the sweep is sequential, not paired, on a GPU that other processes were using, so a 0.001 to 0.008 ms spread cannot separate tiles. The menu is kept, not retuned, and any retune needs `time_pair`.
+- Verdict: the int8 GEMM now has its own sweep and its own evidence, and that evidence says the tile does not matter below about 2.5 MB.
+- Follow-ups: pair the top three candidates at 720 x 1920 and 50 tokens, where the single best reading was 0.047 against the menu's 0.049.
+
+## EXP-076: naming the 0.05 ms cost at M = 50  (2026-11-23)
+- Goal / question: every int4 path sits near 0.05 ms for 1.3 to 1.7 MB and ignores the program count. Is that the launch, or the kernel body?
+- Change (one thing): `bench/launch_floor.py`, task `floor`, times each case as a back to back launch loop and as a one node graph replay, adds an empty kernel as the floor of a launch, and measures the marginal cost of a node by replaying eleven copies of one GEMM.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu floor`, 20 warmup and 200 iterations per case.
+- GPU / environment: RTX 5060 Laptop, clocks pinned at 1972 MHz, other processes holding 24 percent of the GPU.
+- Result (measured), loop and one node graph: empty kernel with 1 program 0.016 against 0.009 ms, so a 6.4 us host gap and a 9.2 us GPU floor. Empty with 26 programs 0.015 against 0.009. int4 gemm 1920 x 720 0.064 against 0.047, gap 16.4 us. bf16 gemm same shape 0.039 against 0.018. int4 gemm 720 x 1920 0.067 against 0.047. bf16 gemm same shape 0.048 against 0.041. Eleven int4 nodes replay in 0.733 ms against 0.092 for one, so the marginal node is 64 us.
+- Explanation / hypothesis: the launch itself is about 6 us of host gap and 9 us of GPU floor, which leaves 38 to 47 us of kernel body in the 47 us GEMM. cuBLAS bf16 reaches 18.5 us on the same shape in a graph, so the floor is not the hardware. Filling the SMs with stream K changed nothing (EXP-073), so the body is latency bound inside each K step: one byte load per weight, a dequant to fp32, then two fp16 dots, at a row tile of 32 to 64 that has to re-fetch the activation tile for every output tile.
+- Caveat: the single node graph in the marginal section read 92 us against 47 us for the same shape earlier in the same process, so the GPU was changing under the bench. Only comparisons inside one section are trusted, and the 64 us marginal is a shared GPU reading.
+- Verdict: the fixed cost is the kernel body at this shape, not the launch. The launch gap a persistent kernel would save is 6 us of a 64 us call, about 9 percent.
+- Follow-ups: the body needs the profiler. `ncu` from the elevated shell on this shape is the next step, and a CUDA C++ port is the alternative path since the native GEMV already beats Triton by 88 to 69 percent (EXP-050).
+
+## EXP-077: a persistent layer, stopped by the device barrier  (2026-11-23)
+- Goal / question: one launch for the layer's stages instead of 11, so the 6 us host gap and the 9 us GPU floor are paid once.
+- Change (one thing): `kernels/triton/fused_mlp.py`, a persistent kernel for the residual tail and the MLP. One program per SM walks add-norm, the int8 up GEMM, SiLU, the int4 down GEMM and the residual add, with a sense-reversing barrier between stages: each program raises an arrival counter, the last arrival flips a sense word, and the others spin until they see it.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu persistent`, plus probes for the barrier at 1, 2 and 26 programs.
+- Result (measured): the fused launch never returns. The log prints `launching`, then nothing, at 1 program and at 26. A minimal two program barrier hangs the same way. The pieces were then isolated: a kernel that only does `tl.atomic_add(counter, 1)` on two programs returns with the counter at 2, and a two program kernel where one program stores a flag and the other spins on `tl.load(flag, volatile=True)` returns with both outputs set. The spin only misbehaves inside the barrier, where the release depends on the peer's arrival. Retested with a fresh `TRITON_CACHE_DIR` in case a killed process had left the compile cache locked: same hang.
+- Explanation / hypothesis: the spin loop never observes the release. Triton 3.9 compiles the loop condition from a global load in a way that does not re-read it, or hoists it above the atomic, so the waiting program spins forever; the standalone spin probe passed only because the store was already visible when the loop was entered, not because the loop waited. The one program case hangs at the final departure gate for the same reason: the load of the departure counter can be ordered before the increment that precedes it.
+- Caveat: this is a Triton code generation finding on this stack, not a statement about the hardware. A CUDA kernel with `__threadfence()` and a `volatile` read, or a cooperative launch with `grid.sync()`, does not go through that path.
+- Verdict: dropped. The kernel, its bench and its tests were removed, so the suite never hangs, and no device-side spin barrier goes into this repo until a cooperative launch is available.
+- Follow-ups: a CUDA C++ port of the layer with `cudaLaunchCooperativeKernel` and `cooperative_groups::grid_group::sync()`, which `torch.utils.cpp_extension` can build; the measured ceiling for that idea is the 6 us host gap per launch, about 9 percent of a 64 us call at M = 50 and more at 2 tokens.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.
