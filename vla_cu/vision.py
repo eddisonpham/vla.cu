@@ -18,6 +18,7 @@ from torch.nn import functional as F
 from kernels.triton.int4_gemm import int4_gemm_into
 from kernels.triton.int8_gemm import int8_gemm_into
 from vla_cu.checkpoint import Checkpoint
+from vla_cu.packfile import PACK_BITS, load_pack, pack_path
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4, quantize_int8
 from vla_cu.validate import require
 
@@ -143,6 +144,38 @@ class _Projection:
             int4_gemm_into(self.codes, self.scales, values.contiguous(), out, group_size=self.group_size)
         return out + self.bias
 
+    def state(self) -> dict[str, Tensor]:
+        """Return this projection's stored tensors, named so `from_state` can rebuild it."""
+        if self.bits == 32:
+            return {"weight": self.weight, "bias": self.bias}
+        return {"codes": self.codes, "scales": self.scales, "bias": self.bias}
+
+    @classmethod
+    def from_state(cls, state: dict[str, Tensor], bits: int, group_size: int = GROUP_SIZE) -> "_Projection":
+        """Rebuild a projection from `state()` by copying to the GPU, with no read and no quantize."""
+        held = object.__new__(cls)
+        held.bits = bits
+        held.group_size = group_size
+        held.activation_bits = 16
+        held.exact = None
+        held.bias = state["bias"].to(device="cuda", dtype=torch.float32)
+        if bits == 32:
+            held.weight = state["weight"].to(device="cuda", dtype=torch.float32)
+            held.out_features, held.in_features = held.weight.shape
+            held.bytes = held.weight.numel() * 4
+        else:
+            held.codes = state["codes"].to(device="cuda")
+            held.scales = state["scales"].to(device="cuda", dtype=torch.float32)
+            held.out_features = held.codes.shape[0]
+            held.in_features = held.codes.shape[1] if bits == 8 else held.codes.shape[1] * 2
+            held.bytes = held.codes.numel() + held.scales.numel() * 4
+        return held
+
+
+def _slice(state: dict[str, Tensor], prefix: str) -> dict[str, Tensor]:
+    """Return the entries of `state` under `prefix`, with the prefix removed."""
+    return {name[len(prefix) :]: value for name, value in state.items() if name.startswith(prefix)}
+
 
 class Tower:
     """The 12 SigLIP layers and the connector, read once from the checkpoint at `bits`.
@@ -171,10 +204,7 @@ class Tower:
         self.post_weight = _read(checkpoint, f"{BASE}.post_layernorm.weight")
         self.post_bias = _read(checkpoint, f"{BASE}.post_layernorm.bias")
         self.connector = _Projection(_read(checkpoint, CONNECTOR), None, bits, group_size, activation_bits)
-        self.bytes = self.patch_weight.numel() * 4 + self.patch_bias.numel() * 4 + self.position.numel() * 4
-        self.bytes += self.post_weight.numel() * 4 + self.post_bias.numel() * 4 + self.connector.bytes
-        self.bytes += sum(layer[index].bytes for layer in self.layers for index in (2, 3, 4, 5, 8, 9))
-        self.bytes += sum(tensor.numel() * 4 for layer in self.layers for tensor in (layer[0], layer[1], layer[6], layer[7]))
+        self.bytes = self._weigh()
 
     def _read_layer(self, checkpoint: Checkpoint, index: int) -> tuple:
         """Return one encoder layer as two norms and four projections, in run order."""
@@ -228,6 +258,68 @@ class Tower:
             ),
         )
 
+    def _weigh(self) -> int:
+        """Return the bytes this tower holds, counting packed codes, fp32 norms and biases."""
+        total = self.patch_weight.numel() * 4 + self.patch_bias.numel() * 4 + self.position.numel() * 4
+        total += self.post_weight.numel() * 4 + self.post_bias.numel() * 4 + self.connector.bytes
+        total += sum(layer[index].bytes for layer in self.layers for index in (2, 3, 4, 5, 8, 9))
+        total += sum(tensor.numel() * 4 for layer in self.layers for tensor in (layer[0], layer[1], layer[6], layer[7]))
+        return total
+
+    def state(self) -> dict[str, Tensor]:
+        """Return every tensor this tower holds, named so `from_state` can rebuild it."""
+        state = {
+            "patch_weight": self.patch_weight,
+            "patch_bias": self.patch_bias,
+            "position": self.position,
+            "post_weight": self.post_weight,
+            "post_bias": self.post_bias,
+        }
+        state.update({f"connector.{name}": value for name, value in self.connector.state().items()})
+        for index, layer in enumerate(self.layers):
+            norm1_weight, norm1_bias, q_proj, k_proj, v_proj, out_proj, norm2_weight, norm2_bias, fc1, fc2 = layer
+            head = f"layer{index}."
+            state[f"{head}norm1_weight"] = norm1_weight
+            state[f"{head}norm1_bias"] = norm1_bias
+            state[f"{head}norm2_weight"] = norm2_weight
+            state[f"{head}norm2_bias"] = norm2_bias
+            for label, projection in (("q", q_proj), ("k", k_proj), ("v", v_proj), ("out", out_proj), ("fc1", fc1), ("fc2", fc2)):
+                state.update({f"{head}{label}.{name}": value for name, value in projection.state().items()})
+        return state
+
+    @classmethod
+    def from_state(cls, state: dict[str, Tensor], bits: int = PACK_BITS, group_size: int = GROUP_SIZE) -> "Tower":
+        """Rebuild the tower from `state()` by copying each tensor to the GPU, with no read and no quantize."""
+        held = object.__new__(cls)
+        held.bits = bits
+        held.group_size = group_size
+        held.activation_bits = 16
+        held.patch_weight = state["patch_weight"].to(device="cuda", dtype=torch.float32)
+        held.patch_bias = state["patch_bias"].to(device="cuda", dtype=torch.float32)
+        held.position = state["position"].to(device="cuda", dtype=torch.float32)
+        held.post_weight = state["post_weight"].to(device="cuda", dtype=torch.float32)
+        held.post_bias = state["post_bias"].to(device="cuda", dtype=torch.float32)
+        held.connector = _Projection.from_state(_slice(state, "connector."), bits, group_size)
+        held.layers = []
+        for index in range(LAYERS):
+            head = f"layer{index}."
+            held.layers.append(
+                (
+                    state[f"{head}norm1_weight"].to(device="cuda", dtype=torch.float32),
+                    state[f"{head}norm1_bias"].to(device="cuda", dtype=torch.float32),
+                    _Projection.from_state(_slice(state, f"{head}q."), bits, group_size),
+                    _Projection.from_state(_slice(state, f"{head}k."), bits, group_size),
+                    _Projection.from_state(_slice(state, f"{head}v."), bits, group_size),
+                    _Projection.from_state(_slice(state, f"{head}out."), bits, group_size),
+                    state[f"{head}norm2_weight"].to(device="cuda", dtype=torch.float32),
+                    state[f"{head}norm2_bias"].to(device="cuda", dtype=torch.float32),
+                    _Projection.from_state(_slice(state, f"{head}fc1."), bits, group_size),
+                    _Projection.from_state(_slice(state, f"{head}fc2."), bits, group_size),
+                )
+            )
+        held.bytes = held._weigh()
+        return held
+
     def hidden(self, frame: Tensor) -> Tensor:
         """Return the tower's normalized patch outputs [1024, 768] for one frame [3, 512, 512].
 
@@ -256,18 +348,28 @@ _CACHED: dict[tuple[str, int, int, int], Tower] = {}
 
 
 def tower_for(checkpoint: Checkpoint, bits: int = 32, group_size: int = GROUP_SIZE) -> Tower:
-    """Return this checkpoint's tower, building it only on the first call in a process.
+    """Return this checkpoint's tower, from the pack file when it fits, else from the checkpoint.
 
     A prefill re-reads 172.87 MB of bf16 whenever it builds a tower, so a server builds it
-    once and holds it. The cache keeps one tower: a different checkpoint, header length,
-    width or group drops the previous one, which bounds the GPU memory held between calls.
+    once and holds it. The pack file holds the same tensors a build produces, so a new
+    process copies instead of reading and quantizing. The cache keeps one tower: a different
+    checkpoint, header length, width or group drops the previous one.
     """
     key = (str(checkpoint.path), checkpoint.header_bytes, bits, group_size)
     held = _CACHED.get(key)
     if held is None:
         _CACHED.clear()
-        held = _CACHED[key] = Tower(checkpoint, bits, group_size)
+        path = pack_path(checkpoint)
+        if bits == PACK_BITS and group_size == GROUP_SIZE and path.exists():
+            held = _CACHED[key] = Tower.from_state(_slice(load_pack(path), "tower."), bits, group_size)
+        else:
+            held = _CACHED[key] = Tower(checkpoint, bits, group_size)
     return held
+
+
+def forget_tower() -> None:
+    """Drop the held tower, so the next call pays the read again, which is how a cold start is timed."""
+    _CACHED.clear()
 
 
 def embed_frame(checkpoint: Checkpoint, frame: Tensor, bits: int = 32) -> Tensor:

@@ -18,6 +18,7 @@ from torch.nn import functional as F
 from kernels.triton.rmsnorm import EPS
 from vla_cu.blocks import gqa_mix, rotary
 from vla_cu.checkpoint import Checkpoint
+from vla_cu.packfile import PACKED_LAYERS, load_pack, pack_path
 from vla_cu.vision import FRAME_ROWS, image_tokens
 
 LAYERS = 16
@@ -53,7 +54,7 @@ _WEIGHTS: dict[tuple[str, int, int], list[list[Tensor]]] = {}
 
 
 def backbone_weights(checkpoint: Checkpoint, layers: int = LAYERS) -> list[list[Tensor]]:
-    """Return the fp32 tensors of every backbone layer, read once per process.
+    """Return the fp32 tensors of every backbone layer, from the pack file when it exists.
 
     A prefill re-reads about 315 MB of bf16 to rebuild the key and value cache, so the
     layer weights are held the way `vision.tower_for` holds the tower. One entry, keyed by
@@ -64,10 +65,36 @@ def backbone_weights(checkpoint: Checkpoint, layers: int = LAYERS) -> list[list[
     held = _WEIGHTS.get(key)
     if held is None:
         _WEIGHTS.clear()
-        held = _WEIGHTS[key] = [
-            [_read(checkpoint, f"{BASE}.layers.{index}.{name}") for name in WEIGHTS] for index in range(layers)
-        ]
+        path = pack_path(checkpoint)
+        if layers == PACKED_LAYERS and path.exists():
+            state = load_pack(path)
+            held = _WEIGHTS[key] = [
+                [state[f"text.{index}.{name}"].to(device="cuda").to(torch.float32) for name in WEIGHTS]
+                for index in range(layers)
+            ]
+        else:
+            held = _WEIGHTS[key] = [
+                [_read(checkpoint, f"{BASE}.layers.{index}.{name}") for name in WEIGHTS] for index in range(layers)
+            ]
     return held
+
+
+def weights_state(held: list[list[Tensor]]) -> dict[str, Tensor]:
+    """Return held layer tensors named the way a pack file stores them, as bf16.
+
+    The checkpoint stores these weights in bf16, so casting back is exact and the pack file
+    carries half the bytes to the GPU that the fp32 cache holds.
+    """
+    return {
+        f"text.{index}.{name}": tensor.to(torch.bfloat16)
+        for index, layer in enumerate(held)
+        for name, tensor in zip(WEIGHTS, layer)
+    }
+
+
+def forget_backbone() -> None:
+    """Drop the held backbone layers, so the next call pays the read again."""
+    _WEIGHTS.clear()
 
 
 def prefix_inputs(checkpoint: Checkpoint, tokens: int = TOKENS) -> Tensor:
