@@ -511,6 +511,24 @@
 - Status: active
 
 ## DEC-066: a residual and its norm are one launch  (2026-11-23)
+## DEC-070: the balanced stream K stays available and off (2026-11-23)
+
+- Context: EXP-073. A contiguous work slice per program fills all 26 SMs, and it measured 1.04x on the 1920 output shape and 0.89x on the 720 output one.
+- Decision: `int4_stream_k_into` and `splits` both remain, and the default is still the single tiled launch.
+- Consequence: the split family is closed. Three schedules (strided split, in launch recombine, balanced stream K) all land near parity, so the next question is the fixed cost per launch, not the grid shape.
+
+## DEC-071: small M is quoted from the paired bench (2026-11-23)
+
+- Context: EXP-067 and EXP-070 changed the 2 to 8 token columns only across runs, on a GPU that throttles between them.
+- Decision: `python -m vla_cu pairedtail` is the source for any claim about a chunk kernel against its per-token predecessor, and small-M numbers from separate `scale` runs are recorded as clock state.
+- Consequence: EXP-072 answers the question the backlog carried since EXP-067: the chunk path wins at 2 tokens by 1.97x to 2.57x, and the row kernels stay bit exact.
+
+## DEC-072: `scale` times every depth at one setting (2026-11-23)
+
+- Context: the 50 token stage used 5 warmup and 10 iterations to keep the run short, while the smaller token counts used 20 and 100.
+- Decision: every token count sweeps depths 1 to 16 at 20 warmup and 100 iterations, and prints the eager to graph ratio per row.
+- Consequence: depths and token counts are comparable inside one table, and a 50 token number is not quoted from a shorter timing window than the rest.
+
 - Context: EXP-069. Two launches per token for add then norm, and at 50 tokens that was 100 of 208 launches.
 - Options considered: (a) leave the two kernels; (b) one kernel that writes both the sum and its norm; (c) fold the norm into the next projection.
 - Chosen and why: (b). The sum is already in registers when the norm needs it, so the second pass reads memory the kernel just wrote. (c) would make every projection kernel carry a norm mode, which is the kind of shape that stops being explainable.

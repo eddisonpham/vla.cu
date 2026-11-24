@@ -1019,6 +1019,44 @@
 - Verdict: parity, not a win. `splits` stays default 1 and the kernel keeps the one launch recombine, which is strictly better than the two launch version it replaced.
 - Follow-ups: a real stream-K (contiguous K ranges across tiles, with boundary handoff) would balance the grid instead of multiplying it, which is the only version of this idea left with upside.
 
+## EXP-072: the paired tail, chunk kernels against the per-token loops  (2026-11-23)
+- Goal / question: the 2 to 8 token columns of EXP-067 and EXP-070 moved across runs on a throttling GPU, so small M had no trustworthy comparison. Does one process, with the two paths alternating, show the chunk kernels ahead at small M too?
+- Change (one thing): `bench/paired_tail.py`, task `pairedtail`, times the old per-token loop and the chunk kernel through `time_pair` inside one process, on one set of buffers, after checking both paths agree.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu pairedtail`, 100 iterations per row path, 20 per MLP, 5 repeats, 5 warmup.
+- GPU / environment: RTX 5060 Laptop, clocks not pinned in this run, which is why the two paths alternate instead.
+- Result (measured), speedup of the chunk over the loop, tokens 2, 3, 4, 8, 50: norm 2.42x, 3.58x, 4.61x, 9.41x, 61.51x. add 2.50x, 3.59x, 4.71x, 10.17x, 62.31x. add norm 2.57x, 3.93x, 4.97x, 9.91x, 61.60x. mlp 1.97x, 2.83x, 3.89x, 7.97x, 48.72x (45.60 to 52.68 at 50 tokens).
+- Correctness: the three row kernels are bit exact at every token count, because the chunk launch runs the same kernel with `tokens` programs. The MLP agrees within 1e-3 of the token loop, which is the GEMV to GEMM rounding, and reads `close`.
+- Explanation / hypothesis: a row kernel's loop is `tokens` launches plus the Python dispatch around them, and at 50 tokens that is 1.91 ms against 0.031 ms for one launch. The MLP loop reads both weight matrices once per token, so 50 tokens move about 48x the bytes the chunk moves, and the ratio grows with the token count by construction.
+- Caveat: the 50 token MLP ratio is a bytes story, not a dispatch story; the honest small-M number is the 2 token one, 1.97x with 6 launches against 3.
+- Verdict: worked. Small M now has a paired answer, and the chunk path wins at every token count including 2.
+- Follow-ups: none needed, this closes the small-M gap.
+
+## EXP-073: a balanced stream K with a boundary handoff, parity again  (2026-11-23)
+- Goal / question: EXP-071 split K by multiplying the grid. A true stream-K gives each program one contiguous slice of the flattened (tile, K step) work list, so the program count comes from the SM count, not from a split factor. Does filling all 26 SMs beat the single launch?
+- Change (one thing): `int4_stream_k_kernel` plus `int4_gemm_into`'s dequant step factored into `_int4_step`. A program walks `CEIL(units / programs)` units, so it touches at most two tiles. Whole tiles store directly; partial tiles write a slot named by their first K step and raise the tile counter, and the last arrival sums the slots in ascending program order, which is ascending K, then resets the counter.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu m50`, paired with `time_pair` at 20 iterations and 5 repeats, plus a match check and a bit repeat check per shape.
+- Result (measured), speedup of stream K over the single launch: 1920 outputs, 15 tiles and 90 units, 26 programs at one wave 0.053 ms 1.04x (0.62 to 1.05), 52 programs 0.99x (0.32 to 1.07). 720 outputs, 60 tiles and 360 units, 26 programs 0.057 ms 0.89x (0.72 to 1.53), 52 programs 0.71x (0.31 to 0.96).
+- Correctness: both shapes match the single launch within 1e-3 and repeat bit for bit, the counters return to zero, and the new tests cover waves 1, 2 and 64 (per = 1, one unit per program), a graph capture and its replay.
+- Explanation / hypothesis: the 1920 output shape has 15 tiles against 26 SMs, so the single launch leaves 11 SMs idle and stream K fills them; that bought 4 percent, which says the kernel is not SM bound. The 720 output shape already has 60 tiles, so a 26 program grid is less parallel than the single launch, and it lost 11 percent.
+- Caveat: the ranges are wide (0.62 to 1.05 and 0.72 to 1.53), so only the medians are being read.
+- Verdict: parity, default off. With EXP-068 and EXP-071 this is the third split schedule to fail on the same shape, so the split family is exhausted; the shared term is a fixed cost near 0.05 ms per launch at this size, 26 to 37 GB/s for 1.3 to 1.7 MB, against 0.021 to 0.027 ms for cuBLAS bf16.
+- Follow-ups: name that fixed cost with `ncu` from the elevated shell, and test one persistent kernel for a whole layer, which would pay it once instead of 11 times.
+
+## EXP-074: the graph against eager at every depth and token count  (2026-11-23)
+- Goal / question: the graph win was quoted at five depths. Does it hold at every depth, and does it shrink as the kernels get larger at 50 tokens?
+- Change (one thing): `scale` sweeps depths 1 to 16 at 2, 3, 4, 8 and 50 tokens with one warmup and iteration setting (20 and 100), and prints the eager to graph ratio per row.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`.
+- GPU / environment: RTX 5060 Laptop, 11 launches per layer, depths 1 to 16.
+- Result (measured): at 2 tokens eager and graph at depth 16 are 6.511 and 1.601 ms, ratio 3.77x to 5.66x across depths. At 3 tokens 6.487 and 1.837 ms, 3.40x to 4.38x. At 4 tokens 6.464 and 1.880 ms, 3.30x to 4.01x. At 8 tokens 6.573 and 1.854 ms, 3.18x to 5.20x. At 50 tokens 6.568 and 3.665 ms, 1.41x to 1.86x.
+- Correctness: exact at all 80 depth and token pairs. Cosines at depth 16 are 0.99784, 0.99766, 0.99756, 0.99712 and 0.99638 for 2, 3, 4, 8 and 50 tokens.
+- Explanation / hypothesis: at 2 to 8 tokens the work per kernel is small, so dispatch is most of the eager time and the graph removes about three quarters of it. At 50 tokens each kernel does 25 times the rows, so the kernel time grows while the dispatch cost does not, and the ratio falls to under 2x.
+- Caveat: the depth 1 rows read higher than the trend at 2 and 8 tokens (5.66x and 5.20x); a single layer is where the 16 layer graph's own overhead per node is smallest relative to the work, so the first row is the most sensitive to clock state.
+- Verdict: the graph win is uniform in depth, not a 16 layer artifact, and it is the dispatch share rather than the depth that sets its size.
+- Follow-ups: the 50 token graph is still 3.665 ms for 64.59 MB, 17.6 GB/s, so the kernels themselves, not the dispatch, are now the question.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

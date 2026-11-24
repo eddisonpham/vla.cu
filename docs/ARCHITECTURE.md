@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `pairedtail`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -114,6 +114,9 @@ kernels, so they are used as references and as performance baselines.
 | 25 | fused residual norm | one program per row writes the residual sum and its RMSNorm from the same registers | `kernels/triton/rmsnorm.py` | done, 11 launches per layer and 4.468 ms at 50 tokens and 16 layers |
 | 26 | stream K | K split across programs, partials summed by the last arrival through an acquire release counter, one launch | `kernels/triton/int4_gemm.py` | done, bit exact and racecheck clean, parity with the single launch so default off |
 | 24 | fused grouped attention | program per (token, kv head), rope inside, cos and sine tables shared with the einsum path | `kernels/triton/gqa_attention.py` | done, 20 to 24x the einsums at 1 to 50 tokens, max diff 8.34e-07 |
+| 27 | balanced stream K | one contiguous slice of the flattened (tile, K step) work list per program, boundary partials summed by the last arrival | `kernels/triton/int4_gemm.py` | done, 1.04x on 1920 outputs and 0.89x on 720, bit exact, default off |
+| 28 | paired tail bench | the per-token loops and the chunk kernels alternate inside one process, so one clock state serves both | `bench/paired_tail.py` | done, 61.5x the row kernels and 48.7x the MLP at 50 tokens, 1.97x for the MLP at 2 |
+| 29 | depth sweep | every depth at every token count, graph against eager on the same buffers | `bench/scale.py` | done, graph 3.18x to 5.66x eager at 2 to 8 tokens and 1.41x to 1.86x at 50, exact at all 80 pairs |
 
 ## 7. Measurement protocol
 
