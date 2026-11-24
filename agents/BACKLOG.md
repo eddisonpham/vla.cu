@@ -120,8 +120,11 @@ on purpose, not forgotten.
 - [ ] Try the cooperative kernel on the attention widths, 960 and 2560, where M is larger and the GEMV body loses sooner (EXP-085).
 - [x] One-command public API and demo. Done 2026-11-24, EXP-086.
 - [x] One-command memcheck over every CUDA kernel. Done 2026-11-24, EXP-087: cooperative kernel clean, the extension cannot be attached on Windows.
-- [ ] A checkpoint to block builder, so a real SmolVLA layer is three lines instead of a bench file.
-- [ ] A graph wrapper for `Int4Linear`, since the eager layer pays dispatch per call (EXP-086).
+- [x] A checkpoint to block builder, so a real SmolVLA layer is three lines instead of a bench file. Done 2026-11-24, EXP-088, gated MLP included.
+- [x] A graph wrapper for `Int4Linear`, since the eager layer pays dispatch per call. Done 2026-11-24, EXP-089, `layer.graphed()`.
+- [ ] Time `GraphedInt4Linear` standalone at 960 x 2560 and 8192 x 4096, to say where it pays and where the bytes dominate.
+- [ ] A layer index to prefix helper for the two SmolVLA naming schemes, so the builder can take `layer=3`.
+- [ ] Explain the 0.073 against 0.194 ms spread on the same matrix row across sessions (L2 residency or clock state) before quoting a matrix speedup.
 - [ ] Instrument the CUDA extension on Linux or WSL2, where the sanitizer may attach (EXP-087).
 - [ ] A self-hosted GPU runner would let CI run the 169 device tests instead of skipping them (EXP-083).
 - [ ] Skip the group scale and the transpose in an int4 test variant, which is the leading suspect for the 5 to 6 percent of peak in EXP-079.

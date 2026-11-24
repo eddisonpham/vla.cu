@@ -529,6 +529,18 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-083: a CUDA graph is opt in, and its output buffer is reused (2026-11-24)
+
+- Context: EXP-089. Capture removes 3x to 5x of dispatch on a block, but a graph fixes the grid, the input address and the output address.
+- Decision: `Int4Linear.graphed()` is the only graph entry point, and it copies the input and returns the captured output. The eager `forward` stays the default.
+- Consequence: a caller at a fixed token count can skip capture code and gets an exact replay, while a caller who stores the result must clone it, which the docstring says.
+
+## DEC-082: the builder takes a prefix, and gate_proj selects the gated block (2026-11-24)
+
+- Context: EXP-088. A real SmolVLA MLP stores gate, up and down, so a two-matrix block built from a real checkpoint would silently drop a third of the layer. Naming also differs between SmolVLA and its backbone.
+- Decision: `mlp_from_checkpoint` takes the prefix that ends at the block, reads gate_proj when it exists and builds `GatedMlpBlock` then, and falls back to the two-matrix block otherwise. Every stored dtype is cast to fp32 on the target device.
+- Consequence: a real layer is three lines with no name guessing at build time, a missing prefix fails loudly on the first key, and the gated shape is measured rather than assumed.
+
 ## DEC-077: CI covers what a CPU runner can prove, and device tests skip with a reason (2026-11-24)
 
 - Context: EXP-083. Hosted runners have no GPU, and `torch.cuda.is_available()` reports true on a machine whose visible device count is zero.

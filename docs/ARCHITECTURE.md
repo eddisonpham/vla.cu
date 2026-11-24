@@ -125,11 +125,14 @@ kernels, so they are used as references and as performance baselines.
 | 35 | int8 paired tiles | menu pick against three challengers, alternating inside one process | `bench/int8_pair.py` | done, a 16 row tile won every repeat by 1.07x to 1.53x, so the menu changed |
 | 36 | cooperative hardening | device-aware shared memory setup, occupancy bound, alignment checks, token boundaries 1 to 64 | `csrc/coop_layer.cu` | done, memcheck 0 errors, 10 tests pass |
 | 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 35 passed and 169 skipped with no device |
-| 38 | fused scaling sweep | 1 to 64 tokens, fused against the five launches, paired | `bench/coop.py` | done, 2.91x at 1 token, 1.15x at 8, 0.70x at 16, 0.25x at 64 |
+| 38 | fused scaling sweep | 1 to 64 tokens, fused against the five launches, paired | `bench/coop.py` | done, 2.91x at 1 token, 1.15x at 8, 0.70x at 16, 0.25x at 64; two widths in EXP-090 |
 | 39 | tensor core body | 16 x 16 WMMA tiles over a shared activation tile, at two K staging depths | `csrc/coop_layer_kernel.cuh`, not kept | negative, 0.247 and 0.427 ms at 1 token against 0.042 for the GEMV body, reverted (EXP-084) |
 | 40 | runtime widths | hidden and intermediate from the tensors, shared memory and tile counts sized from them | `csrc/coop_layer.cu`, `vla_cu/cuda_coop.py` | done, tested at 720/1920, 256/640 and 384/768 |
 | 41 | public layer | `Int4Linear` holds the packed weight, dispatches to the GEMV at one token and the GEMM above it | `vla_cu/linear.py` | done, exported from `vla_cu`, tested at both ranks |
 | 42 | one-command gate | memcheck over the int4 variants and the cooperative kernel, with an attach failure reported separately from a memory error | `bench/sanitize.py` | done, cooperative kernel clean, extension unattachable (EXP-087) |
+| 43 | checkpoint builder | a layer prefix resolves q, k, v, o or gate, up, down, and gate_proj selects the SwiGLU block | `vla_cu/build.py`, `vla_cu/blocks.py` | done, five tests, gated and plain at one token and a chunk (EXP-088) |
+| 44 | graph wrapper | one captured `Int4Linear` call, input copied into the static buffer, output reused | `vla_cu/linear.py` | done, replay matches eager bit for bit, wrong shape refused (EXP-089) |
+| 45 | two-width tail sweep | 1 to 64 tokens at 720/1920 and 960/2560, first losing token count printed | `bench/coop.py` | done, both cross at 10 tokens, 0.44x against 0.67x at 16 (EXP-090) |
 
 ## 7. Measurement protocol
 

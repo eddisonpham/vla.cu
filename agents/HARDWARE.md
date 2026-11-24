@@ -160,3 +160,5 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-24, pinned clock | cooperative widths as parameters | 15 tests at 720/1920, 256/640 and 384/768; 0.042 against 0.123 ms at 1 token, crossover near 9 to 10 tokens | `python -m vla_cu coop` | EXP-085 |
 | 2026-11-24, same shell | public API demo | one matrix 0.194 against 0.492 ms (2.54x), one block graphed 0.021 against 0.074 (3.5x), four block stack 0.075 against 0.420 (5.58x) | `python -m vla_cu demo` | EXP-086 |
 | 2026-11-24, same shell | one-command memcheck | cooperative layer 0 errors; int4 extension attach failure, not instrumented | `python -m vla_cu sanitize` | EXP-087 |
+| 2026-11-24, same shell | cooperative tail at two widths | 720/1920 and 960/2560 both cross at 10 tokens; 0.67x against 0.44x at 16, 0.23x against 0.15x at 64 | `python -m vla_cu coop` | EXP-090 |
+| 2026-11-24, same shell | demo after the buffer fix | 8192 x 4096 matrix 0.443 against 0.073 ms (6.07x), block graphed 0.021 against 0.076 (3.6x), four block stack 0.076 against 0.346 (4.55x) | `python -m vla_cu demo` | EXP-088, EXP-089 |

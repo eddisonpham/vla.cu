@@ -1191,6 +1191,40 @@
 - Caveat: the first demo build aliased the fp32 reference buffer (`torch.mv` with `out` equal to its own input) and printed a 0.978 block cosine against a wrong reference, and the stack compared the wrong parity buffer; both were fixed and the numbers above are from the fixed run. A pre-existing `test_mlp_matches_the_fp32_chain` was flaky because it drew `x` from the global RNG and gated cosine at 0.99 on a 64 x 128 int4 shape that measures 0.9885; it now seeds and gates at 0.98.
 - Verdict: worked. The surface is `Int4Linear` plus the blocks plus `open_checkpoint`, and the demo is the one command to run first.
 - Follow-ups: a graph wrapper for a caller who wants the 3.5x without writing capture code; a checkpoint to block builder so a real layer is three lines.
+- CORRECTION (2026-11-24): the demo timings above are one run, and the same command measured again gives one matrix 0.443 ms fp32 against 0.073 to 0.119 ms int4 (3.7x to 6.1x) and the stack 0.309 to 0.346 ms against 0.076 ms (4.0x to 4.6x). Read those ratios as this laptop's drift, not as a stable claim; the cosines and the bit exact graph result reproduced every time.
+
+## EXP-088: a checkpoint becomes a block, gated MLP included  (2026-11-24)
+- Goal / question: the repo could read one tensor, but a real SmolVLA MLP stores three matrices (gate, up, down) and the blocks only modeled two. Can a layer go from safetensors to a runnable object without a bench file?
+- Change: `vla_cu/blocks.py` adds `GatedMlpBlock`, which computes down(silu(gate x) * (up x)) with int8 gate and up, two GEMV at one token or two GEMM above it, and int4 or int8 down. `vla_cu/build.py` adds `mlp_from_checkpoint` and `attention_from_checkpoint`: each names the projections under a prefix the caller supplies, casts stored fp16 or bf16 to fp32, and picks the gated block when `gate_proj.weight` is present. `tests/test_build.py` writes a real safetensors header by hand and builds gated, plain and grouped-head attention layers, at one token and at three.
+- Prediction: none filed by the human.
+- Command: `pytest -q`, `CUDA_VISIBLE_DEVICES= pytest -q`.
+- Result (measured): 230 tests pass on the RTX 5060 Laptop GPU, 40 pass and 190 skip with no device, style 0. The gated block matches the fp32 SwiGLU chain at cosine above 0.99 at one token and at three, a zero gate silences the output exactly, and a down matrix that does not undo the gate is refused at construction.
+- Explanation / hypothesis: the builder carries no new kernel. It is a name lookup plus a cast, and all the care is in the shape checks and in not dropping gate_proj, because a two-matrix block built from a three-matrix checkpoint would have run and been wrong by a large silent factor.
+- Caveat: the prefix must end at the block (`...layers.3.mlp`), which the builder does not derive from a layer index because SmolVLA and its backbone use different prefixes. A checkpoint with no gate_proj gets the old two-matrix block, which is correct for that checkpoint and not for a Llama MLP.
+- Verdict: worked. Three lines is `open_checkpoint`, `mlp_from_checkpoint`, `block.into(x, out)`.
+- Follow-ups: a layer index to prefix helper for the two known naming schemes; the same gated shape inside the cooperative kernel.
+
+## EXP-089: a captured call behind Int4Linear.graphed  (2026-11-24)
+- Goal / question: the graph is worth 3x to 5x on a block, but every caller had to write capture code. Can the layer carry it without changing the eager default?
+- Change: `vla_cu/linear.py` adds `GraphedInt4Linear` and `Int4Linear.graphed()`. The wrapper owns one static input buffer, copies each call into it, replays the captured launch and returns the captured output. `tests/test_linear.py` adds two tests: replay picks up a new input and equals the eager layer bit for bit, and a shape that differs from the capture is refused instead of broadcast by `copy_`.
+- Prediction: none filed by the human.
+- Command: `pytest -q`.
+- Result (measured): both tests pass. In the demo the same block is 0.098 ms eager and 0.021 ms graphed in one run, and the graph reproduces the eager chain bit for bit. The wrapper itself was not timed separately, so no speedup is claimed for it here.
+- Explanation / hypothesis: the wrapper removes Python and Triton dispatch per call, which is the same saving the demo already showed. It cannot help a DRAM bound matrix, where the bytes are the time.
+- Caveat: the returned tensor is the captured buffer and the next call overwrites it, so a caller that keeps it must clone. A different token count needs its own wrapper, because the captured grid depends on the shape.
+- Verdict: worked, opt in with `layer.graphed()`.
+- Follow-ups: time the wrapper standalone at 960 x 2560 and at 8192 x 4096 to say where it pays; a block level equivalent would remove the manual `torch.cuda.graph` in the demo.
+
+## EXP-090: the cooperative tail at 960 and 2560  (2026-11-24)
+- Goal / question: BACKLOG asked whether the one-launch tail keeps its advantage at the attention widths, where each launch does more work. Where does the crossover move?
+- Change: `bench/coop.py` now sweeps both width pairs, 720/1920 and 960/2560, over 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 32, 50 and 64 tokens, and prints the first token count where the fused path is slower. Nothing in the kernel changed; widths were already launch parameters (EXP-085).
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu coop` from a vcvars shell.
+- Result (measured), RTX 5060 Laptop GPU, hidden 720/intermediate 1920: 2.77x at 1 token, 1.73x at 4, 1.31x at 6, 1.11x at 8, 0.90x at 10, 0.67x at 16, 0.23x at 64. Hidden 960/intermediate 2560: 2.65x at 1 token, 1.64x at 4, 1.25x at 6, 1.11x at 8, 0.86x at 10, 0.44x at 16, 0.15x at 64. Both crossed at 10 tokens; the fused path agreed with the five launch path at every row, worst difference 1.5e-03.
+- Explanation / hypothesis: the crossover is set by the five launches' fixed cost, about 0.05 ms here, which does not grow with width, so both widths cross in the same 8 to 10 token band. Past the crossover the larger width loses faster, 0.44x against 0.67x at 16 tokens, because the GEMV body's per-byte cost is unchanged while the eager GEMMs get more parallel work.
+- Caveat: the paired ratios are noisy at 10 and 12 tokens (0.48 to 0.93 at 720 and 0.54 to 1.25 at 960), so the crossover is a band, not a point. Earlier records put it near 9 to 10 tokens at 720/1920 (EXP-085), which agrees within that noise.
+- Verdict: the answer is that the crossover does not move at this granularity, but the fused path's headroom past it shrinks with width. Use one launch below about 8 tokens.
+- Follow-ups: sweep 9, 10 and 11 with more repeats to tighten the band; test whether the tail can keep the GEMM body above 8 tokens instead of losing to it.
 
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?

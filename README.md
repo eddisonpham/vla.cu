@@ -85,13 +85,15 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Seeded fuzz gate | 160 cases across five kernels, zero failures (EXP-037) |
 | Versioned weight bundle | bit-exact round trip, 5.81x smaller than fp32 at int4, 5.68 ms to load four blocks (EXP-038) |
 | Model widths | hidden 960 and intermediate 2560 confirmed from the SmolVLM2-500M config, expert 720 and 1920 from the 0.75 multiplier (RESEARCH 2026-11-23) |
-| Cooperative layer tail | one launch instead of five, widths as launch parameters: 2.91x at 1 token, 1.15x at 8, 0.70x at 16 (EXP-078, EXP-085) |
+| Cooperative layer tail | one launch instead of five, widths as launch parameters: 2.77x at 1 token, 1.11x at 8, 0.67x at 16 at 720/1920; both that width and 960/2560 cross at 10 tokens, and the larger width is 0.44x at 16 (EXP-090) |
 | Tensor core body | tried as 16 x 16 WMMA tiles, 2x to 4x slower than the GEMV body, reverted (EXP-084) |
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 220 tests on a GPU, 40 passed and 180 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-086) |
-| Public API | `Int4Linear`, the block classes and the checkpoint reader import from `vla_cu`; `python -m vla_cu demo` runs all of it at 2.5x to 5.6x over fp32 (EXP-086) |
+| CI and gates | 230 tests on a GPU, 40 passed and 190 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088) |
+| Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
+| Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk (EXP-088) |
+| Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused (EXP-089) |
 | One-command sanitizer gate | `python -m vla_cu sanitize` runs memcheck over every CUDA kernel and returns nonzero on an error |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -124,10 +126,10 @@ Windows, because the official wheel has no Windows build.
 
 ```python
 import torch
-from vla_cu import Int4Linear, MlpBlock, open_checkpoint, pack_int4, int4_gemv
+from vla_cu import Int4Linear, mlp_from_checkpoint, open_checkpoint, pack_int4, int4_gemv
 
-weight = torch.randn((768, 1920)) * 0.02
-x = torch.randn(1920)
+weight = torch.randn((768, 1920), device="cuda") * 0.02
+x = torch.randn(1920, device="cuda")
 
 packed, scales = pack_int4(weight)
 y = int4_gemv(packed, scales, x)
@@ -136,14 +138,20 @@ layer = Int4Linear(weight)
 y = layer(x)
 y = layer(x.expand(8, -1))
 
+fast = layer.graphed()
+y = fast(x)
+
 checkpoint = open_checkpoint("model.safetensors")
-up = checkpoint.read("model.layers.0.mlp.up_proj.weight").cuda().float()
+block = mlp_from_checkpoint(checkpoint, "model.language_model.layers.0.mlp")
+out = torch.empty(block.hidden_width, device="cuda")
+block.into(x, out)
 ```
 
 `python -m vla_cu demo` runs all three levels on synthetic weights at the SmolVLA
 widths and prints time and accuracy side by side. Every object here is inference only:
-fp32 activations, one CUDA device, no bias, no backward. Graphs are the caller's job,
-and `bench/demo.py` shows the capture that makes a block faster than the dispatch.
+fp32 activations, one CUDA device, no bias, no backward. `graphed()` is opt in and
+returns the captured buffer, so clone it to keep it. The builder takes the prefix that
+ends at the block; `gate_proj` in the checkpoint selects the gated block.
 
 ## How to run
 
