@@ -756,3 +756,29 @@
 - Caveat: these are static counts per function, and one Triton body covers 4 rows x 1024 columns while one native unroll body covers 1024 columns of one row, so the two instruction totals are not per-weight comparable. Counters are still needed to name the stall.
 - Verdict: worked as an explanation, not as proof. The code shape difference is now named and reproducible in one command.
 - Follow-ups: read the two loop bodies line by line; try a 16 byte load and no shared memory in a Triton rewrite.
+
+## EXP-051: the expert stack at two tokens, with q, k and a real softmax  (2026-11-23)
+- Goal / question: at one token the softmax is 1 and q and k cancel, so does the chain still hold its cosine once the tokens mix? What does a layer cost when q and k have to be computed?
+- Change (one thing): added `gqa_mix` and `GqaTokenBlock` to `vla_cu/blocks.py` and a stage 4 to `bench/scale.py`. Every projection is one GEMV per token, so a layer issues eight launches.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, clocks pinned near 1985 MHz.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, 16 real expert layers, two tokens, int8 q/k/v/o and int8 up, int4 down, fp32 reference with the same weights.
+- Result (measured), depth, MB, ms, cos, rel L2: 1, 4.16, 0.980, 0.99970, 2.45e-02. 2, 8.07, 1.939, 0.99944, 3.34e-02. 4, 16.15, 3.855, 0.99880, 4.90e-02. 8, 32.29, 7.666, 0.99798, 6.38e-02. 16, 64.59, 15.450, 0.99622, 8.76e-02.
+- Explanation / hypothesis: cosine falls from 0.99795 at one token to 0.99622 at two, because the second token adds a second quantized contribution to every residual. A layer costs 0.97 ms against 0.27 ms at one token, which is 3.6x for twice the GEMV work: the extra cost is dispatch at 8 launches per layer, the same 186 us per launch that EXP-049 graphed away.
+- Caveat: no rotary rotation is applied on either side, so the scores carry content but not position (DEC-052). Cross layers read a fixed random prefix of two tokens, not the VLM stream. This stage is eager only, no graph.
+- Verdict: worked. The chain now prices real attention, and the cosine is stable to 16 layers.
+- Follow-ups: apply RoPE to q and k; graph this stage to remove the dispatch the table is now dominated by.
+
+## EXP-052: a wide-load Triton int4 GEMV, and why it did not reach 88 percent  (2026-11-23)
+- Goal / question: if the 18 point gap is Triton staging a tile through shared memory with 4 and 8 byte loads (EXP-050), can reading the packed row as int32 close it?
+- Change (one thing): added `kernels/triton/int4_gemv_wide.py`, a second Triton mapping, plus a `wide` row in `plateau` and a second listing in `sass`.
+- Prediction: none filed by the human. The hypothesis was that 16 byte loads plus no shared memory would land near the native 88 percent.
+- Command: `python -m vla_cu plateau` inside vcvars, median of 5 repeats of 30 iterations, clocks pinned; `python -m vla_cu sass` for the listing.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, Triton 3.9.0, 4096 x 8192, group 64.
+- Result (measured), 4096 x 8192: staged Triton 0.067 ms, 280.9 GB/s, 73.1 percent. wide Triton 0.088 ms, 216.1 GB/s, 56.3 percent, 0.77x of staged, max abs diff 1.43e-06 against the staged output. native baseline 87.7, unroll 87.9, stream 87.5 percent. Best shape per implementation: staged 73.1 at 4096 x 8192, wide 56.3 at the same shape, native unroll 87.9.
+- Result, the sweep behind that number: block 1024 and 1 warp gave 53.9 percent, 2048 and 2 warps 50.5, 4096 and 1 warp 39.8 with 254 registers and 10 spills. The shipped defaults are block 1024 and 1 warp.
+- Explanation / hypothesis: the first version shaped the weight tile as [groups, words per group], and Triton then gave each lane one word: the listing shows 8 x `LDG.E.EF` and 2 x `LDG.E.EF.64` for weights, while only the activation stream reached `LDG.E.EL.128`. The second version loads one flat run of words, so a lane owns four consecutive words, and it still reports 18 LDG with 0 `LDG.E.128` in the listing: the reshape into [groups, words] puts the layout conversion back. Both versions allocate shared memory, 512 to 2048 bytes, with 4 `BAR.SYNC`, for the cross-lane reduction, so the no shared memory half of the hypothesis was not reachable with this mapping either.
+- Caveat: a static count of 0 `LDG.E.128` is read from the wide listing; the compiler was not asked why. The instruction totals are not per-weight comparable, the staged body covers 4 rows x 1024 columns.
+- Verdict: negative. Reading the row as int32 did not buy the 16 byte weight load, and the wide mapping is slower than the staged one at every shape. The gap to 88 percent is not closed by changing the element type Triton loads.
+- Follow-ups: force per-lane contiguity with `tl.multiple_of` and `tl.max_contiguous` hints, or write the 16 byte load by hand in CUDA, which already does it.
+

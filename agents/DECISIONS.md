@@ -405,3 +405,19 @@
 - Consequence: every future layer level table carries both columns, and a graph must pass an exactness check before its time is printed.
 - Revisit if: a path cannot be captured, as with a data dependent shape, in which case eager becomes the honest number again.
 - Status: active
+
+## DEC-052: two token attention is its own block, and it has no rotary rotation yet  (2026-11-23)
+- Context: EXP-051. `GqaValueBlock` skips q and k because at one token they cancel. Measuring a full attention block needs a second token, and that cannot be bolted onto the value block without making its one-token path pay for work with no effect.
+- Options considered: (a) add a token count to `GqaValueBlock` and branch inside; (b) a second class, `GqaTokenBlock`, that always computes q, k and v; (c) fold attention into one matrix per layer, valid only at one token.
+- Chosen and why: (b). The one-token path stays the cheapest thing that is correct at one token, and the two-token path is explicit about computing q and k. `gqa_mix` holds the score, softmax and value mix once, so the kernel path and the fp32 reference cannot drift.
+- Cost accepted: the two-token block fixes its token count at two, a shared buffer shape, and no RoPE is applied, so the score q.k carries content only. RoPE would need per-head cos and sin tables and would change both the kernel path and the reference.
+- Revisit if: the chain moves to three or more tokens, or the scores need to match SmolVLA's positional behaviour rather than its content mixing.
+- Status: active
+
+## DEC-053: the staged Triton mapping ships, the wide one stays as a measured alternative  (2026-11-23)
+- Context: EXP-052. The wide mapping exists to test whether 16 byte weight loads close the gap to the native kernel, and it measured 56.3 percent against 73.1 for the staged mapping and 87.9 for the native unroll at 4096 x 8192.
+- Options considered: (a) delete the wide kernel as a failed experiment; (b) keep it and switch the default to it if it wins; (c) keep it, keep the staged default, and record why it loses.
+- Chosen and why: (c). A negative result with a listing is the cheapest way to remember that the element type a Triton kernel loads does not decide the load width, the layout does. Deleting it would leave the next session free to repeat the experiment.
+- Consequence: `int4_gemv_into` stays the path every block uses; `int4_gemv_wide_into` is called only by `plateau` and `sass`.
+- Revisit if: a hint or a rewrite makes the wide mapping beat the staged one, in which case the default flips and this decision is superseded.
+- Status: active
