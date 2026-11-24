@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from vla_cu.blocks import GatedMlpBlock, GqaTokenBlock, MlpBlock, MlpTokenBlock
+from vla_cu.blocks import GatedMlpBlock, GqaTokenBlock, LayerBlock, MlpBlock, MlpTokenBlock
 from vla_cu.checkpoint import Checkpoint, open_checkpoint
 from vla_cu.quant import GROUP_SIZE
 from vla_cu.validate import require
@@ -33,6 +33,13 @@ def _open(checkpoint: Checkpoint | str | Path) -> Checkpoint:
 def _matrix(checkpoint: Checkpoint, name: str, device: torch.device | str) -> Tensor:
     """Read one matrix from the checkpoint as contiguous fp32 on `device`."""
     return checkpoint.read(name).to(device=device, dtype=torch.float32).contiguous()
+
+
+def _vector(checkpoint: Checkpoint, name: str, device: torch.device | str) -> Tensor:
+    """Read one norm weight as a contiguous fp32 vector on `device`."""
+    weight = checkpoint.read(name).to(device=device, dtype=torch.float32).contiguous()
+    require(weight.dim() == 1, f"expected a 1D norm weight at {name}, got {tuple(weight.shape)}")
+    return weight
 
 
 def _held_layers(source: Checkpoint, template: str) -> list[int]:
@@ -115,4 +122,38 @@ def attention_from_checkpoint(
         head_dim=head_dim,
         tokens=tokens,
         causal=causal,
+    )
+
+
+def layer_from_checkpoint(
+    checkpoint: Checkpoint | str | Path,
+    layer: str | int,
+    tokens: int = 1,
+    down_bits: int = 4,
+    group_size: int = GROUP_SIZE,
+    head_dim: int = 64,
+    causal: bool = True,
+    device: torch.device | str = "cuda",
+    part: str = "vlm",
+) -> LayerBlock:
+    """Build one whole layer at `layer`, a full prefix or an index under `part`.
+
+    Reads both RMSNorm weights, the four attention projections and the MLP, so `into`
+    runs norm, attention, residual, norm, MLP and residual. `head_dim` sizes the attention
+    heads, 64 in SmolVLA, and `causal` keeps the attention mask a decoder needs.
+    """
+    source = _open(checkpoint)
+    if isinstance(layer, int):
+        layer = layer_prefix(source, layer, part)
+    attention = attention_from_checkpoint(
+        source, f"{layer}.self_attn", tokens=tokens, causal=causal, head_dim=head_dim, device=device
+    )
+    mlp = mlp_from_checkpoint(
+        source, f"{layer}.mlp", tokens=tokens, down_bits=down_bits, group_size=group_size, device=device
+    )
+    return LayerBlock(
+        attention,
+        mlp,
+        _vector(source, f"{layer}.input_layernorm.weight", device),
+        _vector(source, f"{layer}.post_attention_layernorm.weight", device),
     )

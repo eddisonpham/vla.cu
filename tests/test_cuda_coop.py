@@ -198,3 +198,32 @@ def test_rejects_more_tokens_than_the_kernel_holds() -> None:
             torch.empty_like(x), torch.empty_like(x), torch.empty((tokens, INTERMEDIATE), device="cuda"),
             torch.empty_like(x),
         )
+
+
+def test_gated_block_tail_is_one_launch() -> None:
+    """The block's fused tail must equal add_norm, into and add on the same weights."""
+    tokens, hidden, intermediate = 3, 256, 640
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    weight = torch.randn(hidden, device="cuda", generator=generator) + 1.0
+    gate = torch.randn((intermediate, hidden), device="cuda", generator=generator) * (1.0 / hidden**0.5)
+    up = torch.randn((intermediate, hidden), device="cuda", generator=generator) * (1.0 / hidden**0.5)
+    down = torch.randn((hidden, intermediate), device="cuda", generator=generator) * (1.0 / intermediate**0.5)
+    x = torch.randn((tokens, hidden), device="cuda", generator=generator)
+    other = torch.randn((tokens, hidden), device="cuda", generator=generator)
+    block = GatedMlpBlock(gate, up, down, down_bits=4, group_size=GROUP, tokens=tokens)
+    added = torch.empty_like(x)
+    normed = torch.empty_like(x)
+    tail = torch.empty_like(x)
+    expected = torch.empty_like(x)
+    add_norm_into(x, other, weight, added, normed)
+    block.into(normed, tail)
+    add_into(added, tail, expected)
+    fused_added = torch.empty_like(x)
+    fused_normed = torch.empty_like(x)
+    fused_out = torch.empty_like(x)
+
+    block.tail_into(x, other, weight, fused_added, fused_normed, fused_out)
+
+    torch.testing.assert_close(fused_added, added, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(fused_normed, normed, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(fused_out, expected, rtol=2e-2, atol=2e-2)

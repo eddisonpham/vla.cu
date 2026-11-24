@@ -10,7 +10,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vla_cu import attention_from_checkpoint, gqa_mix, layer_prefix, mlp_from_checkpoint, open_checkpoint
+from kernels.triton.rmsnorm import EPS
+from vla_cu import (
+    attention_from_checkpoint,
+    gqa_mix,
+    layer_from_checkpoint,
+    layer_prefix,
+    mlp_from_checkpoint,
+    open_checkpoint,
+)
 
 HIDDEN = 64
 INTERMEDIATE = 128
@@ -209,3 +217,43 @@ def test_a_prefix_without_the_block_raises_a_key_error(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError, match="up_proj"):
         mlp_from_checkpoint(open_checkpoint(path), "other.mlp")
+
+
+def test_a_whole_layer_carries_both_norms_and_residuals(tmp_path: Path) -> None:
+    """One index must give norm, attention, residual, post norm, gated MLP, residual."""
+    generator = torch.Generator().manual_seed(15)
+    head_dim = 32
+    wq = torch.randn((HIDDEN, HIDDEN), generator=generator) * 0.2
+    wk = torch.randn((32, HIDDEN), generator=generator) * 0.2
+    wv = torch.randn((32, HIDDEN), generator=generator) * 0.2
+    wo = torch.randn((HIDDEN, HIDDEN), generator=generator) * 0.2
+    gate, up, down = matrices(16)
+    input_norm = torch.rand(HIDDEN, generator=generator) + 0.5
+    post_norm = torch.rand(HIDDEN, generator=generator) + 0.5
+    prefix = "model.vlm_with_expert.lm_expert.layers.1"
+    path = write_checkpoint(tmp_path / "whole.safetensors", {
+        f"{prefix}.input_layernorm.weight": input_norm,
+        f"{prefix}.post_attention_layernorm.weight": post_norm,
+        f"{prefix}.self_attn.q_proj.weight": wq,
+        f"{prefix}.self_attn.k_proj.weight": wk,
+        f"{prefix}.self_attn.v_proj.weight": wv,
+        f"{prefix}.self_attn.o_proj.weight": wo,
+        f"{prefix}.mlp.gate_proj.weight": gate,
+        f"{prefix}.mlp.up_proj.weight": up,
+        f"{prefix}.mlp.down_proj.weight": down,
+    })
+    block = layer_from_checkpoint(open_checkpoint(path), 1, part="expert", tokens=3, head_dim=head_dim)
+    x = torch.randn((3, HIDDEN), device="cuda", generator=torch.Generator(device="cuda").manual_seed(17))
+    out = torch.empty((3, HIDDEN), device="cuda")
+
+    block.into(x, out)
+
+    normalized = x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + EPS) * input_norm.cuda()
+    mixed = gqa_mix(
+        normalized @ wq.cuda().T, normalized @ wk.cuda().T, normalized @ wv.cuda().T, head_dim=head_dim
+    ) @ wo.cuda().T
+    residual = x + mixed
+    normed = residual * torch.rsqrt(residual.square().mean(dim=-1, keepdim=True) + EPS) * post_norm.cuda()
+    exact = residual + (F.silu(normed @ gate.cuda().T) * (normed @ up.cuda().T)) @ down.cuda().T
+    assert (block.tokens, block.hidden_width) == (3, HIDDEN)
+    assert cosine(out, exact) > 0.99

@@ -3,8 +3,8 @@
 Concept: a block is a fixed set of projections plus one elementwise step, and every
 projection is a packed matrix with its own scale layout. Holding the packed weights and
 the scratch buffers in one object is what lets a benchmark, a CUDA graph and a future
-model call the same code. Norms and residuals are not modelled, so a block here means
-its projections only.
+model call the same code. `LayerBlock` puts the two norms and the residual pair around
+those projections, and `GatedMlpBlock.tail_into` runs the whole tail in one launch.
 
 Attention at one visible token reduces to the value path, so the block is v = Wv x and
 out = Wo v. The three qkv matrices share x, which is what the grouped launch exploits.
@@ -28,6 +28,8 @@ from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
 from kernels.triton.int8_gemm import int8_gemm_into
 from kernels.triton.int8_gemv import int8_gemv_into
 from kernels.triton.int8_grouped_gemv import int8_grouped_gemv_into
+from kernels.triton.rmsnorm import add_into, rmsnorm_into
+from vla_cu.cuda_coop import GROUP as COOP_GROUP, MAX_TOKENS as COOP_MAX_TOKENS, coop_gated_into
 from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
 from vla_cu.validate import require
 
@@ -413,3 +415,89 @@ class GatedMlpBlock:
             int4_gemm_into(self.down, self.down_scales, self.activated, out, group_size=self.group_size)
         else:
             int8_gemm_into(self.down, self.down_scales, self.activated, out)
+
+    def tail_into(
+        self,
+        x: Tensor,
+        other: Tensor,
+        weight: Tensor,
+        added: Tensor,
+        normed: Tensor,
+        out: Tensor,
+        blocks: int = 0,
+    ) -> None:
+        """Write the residual, norm and gated MLP tail with one cooperative launch.
+
+        Computes the same result as `add_norm_into`, then `into`, then `add_into`, over
+        [tokens, hidden] fp32 buffers, with `weight` the [hidden] RMSNorm scale. Needs an
+        int4 down at group 64, hidden divisible by 16, intermediate by 64 and 1 to 64
+        tokens; the kernel's act buffer is `self.activated`.
+        """
+        require(self.down_bits == 4, f"the fused tail needs an int4 down, got {self.down_bits} bits")
+        require(self.group_size == COOP_GROUP, f"the fused tail needs group size {COOP_GROUP}, got {self.group_size}")
+        require(self.tokens <= COOP_MAX_TOKENS, f"the fused tail holds {COOP_MAX_TOKENS} tokens, got {self.tokens}")
+        require(self.hidden_width % 16 == 0, f"the fused tail needs hidden divisible by 16, got {self.hidden_width}")
+        require(
+            self.intermediate % COOP_GROUP == 0,
+            f"the fused tail needs intermediate divisible by {COOP_GROUP}, got {self.intermediate}",
+        )
+        coop_gated_into(
+            x,
+            other,
+            weight,
+            self.gate,
+            self.gate_scales,
+            self.up,
+            self.up_scales,
+            self.down,
+            self.down_scales,
+            added,
+            normed,
+            self.activated,
+            out,
+            blocks,
+        )
+
+
+class LayerBlock:
+    """One transformer layer: input norm, attention, residual, post norm, MLP, residual.
+
+    `input_norm` and `post_norm` are [hidden] fp32 RMSNorm weights and `tokens` comes from
+    the attention block. `into` reads `x` [tokens, hidden], takes the cross stream `other`
+    when it is given, and owns the buffers between the stages, so it is not reentrant.
+    """
+
+    def __init__(self, attention: GqaTokenBlock, mlp: GatedMlpBlock | MlpTokenBlock | MlpBlock, input_norm: Tensor, post_norm: Tensor) -> None:
+        hidden = attention.hidden_width
+        require(attention.input_width == hidden, f"a layer block needs self attention, got input width {attention.input_width}")
+        require(mlp.hidden_width == hidden, f"MLP width {mlp.hidden_width} does not match attention width {hidden}")
+        for name, norm in (("input_norm", input_norm), ("post_norm", post_norm)):
+            require(norm.shape == (hidden,), f"expected {name} [{hidden}], got {tuple(norm.shape)}")
+            require(norm.dtype == torch.float32, f"expected fp32 {name}, got {norm.dtype}")
+            require(norm.device == attention.q.device, f"expected {name} on {attention.q.device}, got {norm.device}")
+        self.tokens = attention.tokens
+        self.hidden_width = hidden
+        self.attention = attention
+        self.mlp = mlp
+        self.input_norm = input_norm
+        self.post_norm = post_norm
+        device = attention.q.device
+        self.normed = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
+        self.attention_out = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
+        self.residual = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
+        self.mlp_out = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
+        self.bytes = attention.bytes + mlp.bytes
+
+    def into(self, x: Tensor, out: Tensor, other: Tensor | None = None) -> None:
+        """Write one layer into `out`, reading `x` [tokens, hidden] and the cross stream `other`."""
+        require(x.shape == (self.tokens, self.hidden_width), f"expected x {(self.tokens, self.hidden_width)}, got {tuple(x.shape)}")
+        require(out.shape == x.shape, f"expected out {tuple(x.shape)}, got {tuple(out.shape)}")
+        rmsnorm_into(x, self.input_norm, self.normed)
+        self.attention.into(self.normed, other, self.attention_out)
+        add_into(x, self.attention_out, self.residual)
+        rmsnorm_into(self.residual, self.post_norm, self.normed)
+        if self.tokens == 1:
+            self.mlp.into(self.normed[0], self.mlp_out[0])
+        else:
+            self.mlp.into(self.normed, self.mlp_out)
+        add_into(self.residual, self.mlp_out, out)
