@@ -119,6 +119,6 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | native against Triton, median of 5 repeats | unroll 338.0 GB/s, 88.0 percent at 4096 x 8192; Triton 266.4, 69.4 percent; stream 307.2, 80.0 at 8192 x 16384 | `python -m vla_cu plateau` in vcvars | EXP-047 |
 | 2026-11-23, pinned clock | depth 16 normed chain | 37.0 MB, 1.534 ms, cosine 0.99548 | `python -m vla_cu scale` | EXP-048 |
 | 2026-11-23, pinned clock | depth 16 layer chain, attention plus MLP | 50.78 MB, 3.475 ms eager, 0.497 ms graphed, cosine 0.99795, exact | `python -m vla_cu scale` | EXP-049 |
-| 2026-11-23, pinned clock | int4 SASS at 4096 x 8192 | Triton 416 instructions, 12 LDG, no 16 byte loads, 8 shared memory ops; native unroll 544, 16 `LDG.E.128`, no SMEM | `python -m vla_cu sass` in vcvars | EXP-050 |
+| 2026-11-23, pinned clock | int4 SASS at 4096 x 8192 | Triton 416 instructions, 12 LDG, 8 shared memory ops, 12 butterfly shuffles; native unroll 544, 32 LDG where the 16 `LDG.E.128` are fp32 activations, no SMEM, 5 shuffle-downs | `python -m vla_cu sass` in vcvars | EXP-050 |
 | 2026-11-23, pinned clock | depth 16 chain at two tokens, q and k included | 64.59 MB, 15.450 ms eager, cosine 0.99622, rel L2 8.76e-02 | `python -m vla_cu scale` | EXP-051 |
 | 2026-11-23, pinned clock | wide-load Triton int4 at 4096 x 8192 | 0.088 ms, 216.1 GB/s, 56.3 percent, 0.77x of the staged mapping, 448 instructions, 0 `LDG.E.128` | `python -m vla_cu plateau` in vcvars | EXP-052 |

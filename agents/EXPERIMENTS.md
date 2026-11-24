@@ -756,6 +756,7 @@
 - Caveat: these are static counts per function, and one Triton body covers 4 rows x 1024 columns while one native unroll body covers 1024 columns of one row, so the two instruction totals are not per-weight comparable. Counters are still needed to name the stall.
 - Verdict: worked as an explanation, not as proof. The code shape difference is now named and reproducible in one command.
 - Follow-ups: read the two loop bodies line by line; try a 16 byte load and no shared memory in a Triton rewrite.
+- CORRECTION (2026-11-23): the line above that says the native kernel loads weights with `LDG.E.128` is wrong. `csrc/int4_gemv_kernel.cuh` loads one 4-byte word per lane for the 8 weights, and the 16 `LDG.E.128` are the two `float4` activation loads per lane per step. The counts stand, the label does not. The real native advantage is no shared memory, no barrier and one five-step shuffle at the end; Triton stages a 4-row tile through SMEM with 4 barriers and 12 butterfly shuffles. Nothing in EXP-052 depended on the wrong label.
 
 ## EXP-051: the expert stack at two tokens, with q, k and a real softmax  (2026-11-23)
 - Goal / question: at one token the softmax is 1 and q and k cancel, so does the chain still hold its cosine once the tokens mix? What does a layer cost when q and k have to be computed?
@@ -780,5 +781,5 @@
 - Explanation / hypothesis: the first version shaped the weight tile as [groups, words per group], and Triton then gave each lane one word: the listing shows 8 x `LDG.E.EF` and 2 x `LDG.E.EF.64` for weights, while only the activation stream reached `LDG.E.EL.128`. The second version loads one flat run of words, so a lane owns four consecutive words, and it still reports 18 LDG with 0 `LDG.E.128` in the listing: the reshape into [groups, words] puts the layout conversion back. Both versions allocate shared memory, 512 to 2048 bytes, with 4 `BAR.SYNC`, for the cross-lane reduction, so the no shared memory half of the hypothesis was not reachable with this mapping either.
 - Caveat: a static count of 0 `LDG.E.128` is read from the wide listing; the compiler was not asked why. The instruction totals are not per-weight comparable, the staged body covers 4 rows x 1024 columns.
 - Verdict: negative. Reading the row as int32 did not buy the 16 byte weight load, and the wide mapping is slower than the staged one at every shape. The gap to 88 percent is not closed by changing the element type Triton loads.
-- Follow-ups: force per-lane contiguity with `tl.multiple_of` and `tl.max_contiguous` hints, or write the 16 byte load by hand in CUDA, which already does it.
+- Follow-ups: force per-lane contiguity with `tl.multiple_of` and `tl.max_contiguous` hints. Note the corrected premise in EXP-050: the native kernel reads weights 4 bytes at a time too, so matching its weight load width is not the goal, matching its reduction is.
 

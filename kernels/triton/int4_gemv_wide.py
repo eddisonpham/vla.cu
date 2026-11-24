@@ -1,9 +1,9 @@
 """int4 GEMV over int32 words: wide weight loads and no shared memory staging.
 
-Concept: the nibble math is not what costs this kernel, the shape of the loads is.
-Reading the packed buffer as int32 puts four bytes in a lane and lets the weight traffic
-widen to 16 byte loads, and keeping the tile in the shape the reduction wants means it
-never has to be staged through shared memory.
+Concept: reading the packed buffer as int32, so a lane owns four consecutive words, is
+the cheapest way to ask Triton for 16 byte weight loads. At 4096 x 8192 it does not get
+them: the listing still shows 4 and 8 byte weight loads and a shared memory reduction,
+so this mapping is a measured alternative and not the default (EXP-052).
 
 Task: python -m vla_cu plateau
 """
@@ -43,7 +43,8 @@ def int4_gemv_wide_kernel(
     a step are one flat run of BLOCK_K // 8 words, so a lane owns four consecutive words
     and the load can reach 16 bytes, then the run is reshaped to [groups, words per
     group] and broadcast against a shift vector to unpack eight nibbles per word. The
-    group scale multiplies the group's finished sum.
+    group scale multiplies the group's finished sum. The reshape is what keeps the
+    weights narrow in practice: it drives the layout Triton picks for the tile.
     Expected bottleneck: memory, one weight stream plus one cached activation stream.
     """
     row = tl.program_id(axis=0)

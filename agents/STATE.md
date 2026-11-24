@@ -22,9 +22,10 @@ failed for a named reason.
   EXP-046, 0 errors and 0 leaks each.
 - **Dispatch is measured.** 16 layers at one token cost 4.335 ms eager and 0.541 ms
   graphed, so 186 us of each 217 us layer is Python (EXP-049, DEC-051).
-- **The Triton gap is a memory path fact.** Staged Triton keeps 4 and 8 byte weight loads
-  and an SMEM reduction; the native unroll issues 16 `LDG.E.128` and reduces with five
-  shuffles (EXP-050).
+- **The Triton gap is a reduction fact.** Both kernels read weights 4 or 8 bytes at a
+  time; the native one has no shared memory, no barrier and five shuffles at the end,
+  while Triton stages a 4-row tile through SMEM with 4 barriers and 12 butterflies
+  (EXP-050, corrected: its 16 `LDG.E.128` are activations).
 - **Reading the row as int32 does not fix it.** The wide mapping reached 56.3 percent
   against 73.1 staged and 87.9 native, with 0 `LDG.E.128` and SMEM still allocated
   (EXP-052, DEC-053).
