@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from kernels.triton.int4_gemm import block_m_for, int4_gemm, int4_gemm_into
+from kernels.triton.int4_gemm import (
+    SHARED_LIMIT_BYTES,
+    TILES,
+    block_m_for,
+    int4_gemm,
+    int4_gemm_into,
+    shared_memory_bytes,
+    tile_for,
+)
 from kernels.triton.int4_gemv import int4_gemv_into
 from vla_cu.quant import dequantize_int4, pack_int4
 
@@ -61,7 +69,20 @@ def test_rejects_step_that_breaks_the_group() -> None:
     out = torch.zeros((2, 4), device="cuda")
 
     with pytest.raises(ValueError):
-        int4_gemm_into(packed, scales, x, out, group_size=64, block_k=48)
+        int4_gemm_into(packed, scales, x, out, group_size=64, tile=(16, 64, 48, 2))
+
+
+def test_every_tile_preset_fits_shared_memory() -> None:
+    """A menu entry that stages more than the GPU has would fail at launch, not in review."""
+    assert all(shared_memory_bytes(tile) <= SHARED_LIMIT_BYTES for tile in TILES)
+
+
+def test_tile_for_covers_the_token_count_with_the_smallest_row_tile() -> None:
+    """A chunk pads to the next preset, and a long one keeps the last preset of its family."""
+    assert [tile_for(tokens, 1920)[0] for tokens in (1, 16, 17, 50, 64, 200)] == [16, 16, 32, 64, 64, 64]
+    assert [tile_for(tokens, 720)[0] for tokens in (1, 17, 50, 200)] == [16, 32, 32, 32]
+    assert [tile_for(tokens, 1920)[1] for tokens in (1, 50)] == [128, 128]
+    assert [tile_for(tokens, 720)[1] for tokens in (1, 50)] == [64, 64]
 
 
 def test_rejects_shape_mismatch() -> None:

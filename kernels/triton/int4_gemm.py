@@ -15,11 +15,11 @@ The group scale is expanded to one value per weight before the dot, because the 
 core sums over k and would otherwise mix groups. Dequantization happens in fp32 and is
 rounded to fp16 once, at the dot, so the weight carries one rounding instead of two.
 
-The step width is set by shared memory, not by taste: a 512-wide step needs two 64-wide
-fp16 tiles per stage and 3 stages of that is 224 KB against this GPU's 101 KB limit. A
-64-wide step with 2 stages fits, which is what the launch asks for.
+The tile is chosen from a menu, not from taste: shared memory decides which tile and
+stage count fit, and `m50` sweeps the menu at the expert shapes. Long K steps amortize
+the loop, and deeper stages hide the load latency that a 12 to 30 step loop cannot.
 
-Task: python -m vla_cu crossover
+Task: python -m vla_cu m50
 """
 
 from __future__ import annotations
@@ -32,9 +32,19 @@ from vla_cu.quant import GROUP_SIZE
 from vla_cu.validate import check_int4_gemm, check_power_of_two, require
 
 BLOCK_N = 64
-BLOCK_K = 64
+BLOCK_K = 128
 NUM_STAGES = 2
 MAX_BLOCK_M = 128
+SHARED_LIMIT_BYTES = 101376
+WIDE_ROWS = 1024
+Tile = tuple[int, int, int, int]
+TILES: tuple[Tile, ...] = (
+    (16, 128, 128, 2),
+    (32, 128, 128, 2),
+    (64, 128, 128, 2),
+    (16, 64, 128, 3),
+    (32, 64, 128, 3),
+)
 
 
 @triton.jit
@@ -107,6 +117,28 @@ def int4_gemm_kernel(
     tl.store(out_ptr + m_offsets[:, None] * N + n_offsets[None, :], acc, mask=m_mask[:, None] & n_mask[None, :])
 
 
+def shared_memory_bytes(tile: Tile) -> int:
+    """Return the fp16 operand bytes one tile stages through its pipeline."""
+    block_m, block_n, block_k, stages = tile
+    return (2 * block_m * block_k + 2 * block_k * block_n) * stages
+
+
+def tile_for(tokens: int, n_rows: int) -> Tile:
+    """Return the measured preset for a shape, and the smallest row tile that covers `tokens`.
+
+    The `m50` sweep splits the menu by output width: 1920 outputs want a 128 wide output
+    tile at two stages, while 720 outputs want 64 wide at three stages, because at M = 50
+    the grid has to keep 26 SMs busy. Row tile is the smallest preset covering the tokens,
+    so a 50 token chunk pads to 64 rows and not to 128. The narrow family stops at 32 rows:
+    a 64 row, 3 stage tile asks for 106496 bytes against this GPU's 101376 limit.
+    """
+    family = [tile for tile in TILES if (tile[1] == 128) == (n_rows >= WIDE_ROWS)]
+    for tile in family:
+        if tokens <= tile[0] and shared_memory_bytes(tile) <= SHARED_LIMIT_BYTES:
+            return tile
+    return family[-1]
+
+
 def block_m_for(m_rows: int) -> int:
     """Return the smallest power-of-two token tile at least as tall as `m_rows`.
 
@@ -127,26 +159,27 @@ def int4_gemm_into(
     x: torch.Tensor,
     out: torch.Tensor,
     group_size: int = GROUP_SIZE,
-    block_k: int = BLOCK_K,
-    block_n: int = BLOCK_N,
+    tile: Tile | None = None,
 ) -> None:
     """Write (packed weights dequantized) @ x transpose into `out`, no fp32 weights.
 
     Assumptions: packed uint8 [N, K // 2] contiguous, scales fp32 or fp16
     [N, K // group_size] contiguous, x fp32 [M, K] contiguous, out fp32 [M, N]
-    contiguous, all on one CUDA device. K must be divisible by group_size and block_k
-    must be a multiple of group_size, which is a power of two. block_n is a power of two
-    of at least 16. M is padded up to the next power of two.
+    contiguous, all on one CUDA device. K must be divisible by group_size, the tile's K
+    step must be a multiple of group_size, and its row count pads M. `tile` overrides the
+    menu, which is what the `m50` sweep varies.
     """
     n_tokens, n_rows, n_cols, _ = check_int4_gemm(packed, scales, x, out, group_size)
+    block_m, block_n, block_k, stages = tile_for(n_tokens, n_rows) if tile is None else tile
     check_power_of_two("block size", block_k)
     require(block_k % group_size == 0, f"block size {block_k} must be a multiple of group size {group_size}")
     check_power_of_two("output tile", block_n)
     require(block_n >= 16, f"expected an output tile of at least 16, got {block_n}")
+    staged = shared_memory_bytes((block_m, block_n, block_k, stages))
+    require(staged <= SHARED_LIMIT_BYTES, f"tile stages {staged} bytes against a {SHARED_LIMIT_BYTES} byte limit")
     if n_tokens == 0 or n_rows == 0:
         return
 
-    block_m = block_m_for(n_tokens)
     grid = (triton.cdiv(n_tokens, block_m), triton.cdiv(n_rows, block_n))
     int4_gemm_kernel[grid](
         packed,
@@ -160,7 +193,7 @@ def int4_gemm_into(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
-        num_stages=NUM_STAGES,
+        num_stages=stages,
     )
 
 
@@ -169,8 +202,9 @@ def int4_gemm(
     scales: torch.Tensor,
     x: torch.Tensor,
     group_size: int = GROUP_SIZE,
+    tile: Tile | None = None,
 ) -> torch.Tensor:
     """Allocate the output and return the dequantized GEMM."""
     out = torch.empty((x.shape[0], packed.shape[0]), device=x.device, dtype=torch.float32)
-    int4_gemm_into(packed, scales, x, out, group_size=group_size)
+    int4_gemm_into(packed, scales, x, out, group_size=group_size, tile=tile)
     return out

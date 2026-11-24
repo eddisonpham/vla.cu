@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import torch
 
-from kernels.triton.int4_gemm import int4_gemm_into
+from kernels.triton.int4_gemm import SHARED_LIMIT_BYTES, int4_gemm_into, shared_memory_bytes, tile_for
 from kernels.triton.int4_gemv import int4_gemv_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
@@ -39,6 +39,17 @@ GROUP_FOR_INTERMEDIATE = 64
 SHAPES = ((EXPERT_INTERMEDIATE, EXPERT_HIDDEN, GROUP_FOR_HIDDEN), (EXPERT_HIDDEN, EXPERT_INTERMEDIATE, GROUP_FOR_INTERMEDIATE))
 WARMUP = 5
 ITERATIONS = 20
+CANDIDATES = (
+    (16, 64, 64, 2),
+    (16, 64, 128, 3),
+    (32, 64, 128, 3),
+    (64, 64, 64, 2),
+    (64, 64, 64, 3),
+    (64, 64, 128, 2),
+    (64, 128, 128, 2),
+    (128, 64, 64, 2),
+    (128, 64, 128, 2),
+)
 
 
 def main() -> int:
@@ -99,6 +110,22 @@ def main() -> int:
             f"bytes {gemv_bytes / int4_bytes:.1f}x; bf16 gemm / gemv {gemv_seconds / gemm_seconds:.1f}x, "
             f"bytes {gemv_bytes / gemm_bytes:.1f}x"
         )
+        chosen = tile_for(TOKENS, n_out)
+        print(f"tile sweep, int4 gemm only, menu picks {chosen}")
+        print(f"{'block_m':>7}  {'block_n':>7}  {'block_k':>7}  {'stages':>6}  {'MB shared':>9}  {'ms':>8}  {'menu':>5}")
+        for candidate in CANDIDATES:
+            staged = shared_memory_bytes(candidate)
+            if staged > SHARED_LIMIT_BYTES:
+                continue
+            seconds = time_call(
+                lambda c=candidate: int4_gemm_into(packed, scales, activations, out, group_size=group, tile=c),
+                WARMUP,
+                ITERATIONS,
+            )
+            print(
+                f"{candidate[0]:>7}  {candidate[1]:>7}  {candidate[2]:>7}  {candidate[3]:>6}  "
+                f"{staged / 1e6:>9.2f}  {seconds * 1e3:>8.3f}  {'yes' if candidate == chosen else '':>5}"
+            )
         print()
         del w, packed, scales, activations, half, half_activations, out, half_out
 

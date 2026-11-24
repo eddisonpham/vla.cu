@@ -66,7 +66,13 @@ def test_int4_gemm_rejects_a_block_n_that_is_not_a_power_of_two() -> None:
     """The step tiles are masked with a power of two, so 96 is not a width the kernel can express."""
     t = valid_tensors()
     with pytest.raises(ValueError, match="power of two"):
-        int4_gemm_into(t["packed"], t["scales"], torch.zeros((1, N_COLS), device="cuda"), torch.empty((1, N_ROWS), device="cuda"), block_n=96)
+        int4_gemm_into(
+            t["packed"],
+            t["scales"],
+            torch.zeros((1, N_COLS), device="cuda"),
+            torch.empty((1, N_ROWS), device="cuda"),
+            tile=(16, 96, 64, 2),
+        )
 
 
 def test_cuda_wrapper_rejects_an_unaligned_row_width() -> None:
