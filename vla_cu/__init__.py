@@ -36,6 +36,7 @@ _EXPORTS: dict[str, str] = {
     "int8_gemv": "kernels.triton.int8_gemv",
     "int8_grouped_gemv_into": "kernels.triton.int8_grouped_gemv",
     "attention_from_checkpoint": "vla_cu.build",
+    "layer_prefix": "vla_cu.build",
     "load_bundle": "vla_cu.bundle",
     "mlp_from_checkpoint": "vla_cu.build",
     "open_checkpoint": "vla_cu.checkpoint",
