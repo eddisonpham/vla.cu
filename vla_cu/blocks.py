@@ -47,6 +47,20 @@ def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
     return quantize_int8(w)
 
 
+def _padded_width(width: int, bits: int, group_size: int) -> int:
+    """Return `width` rounded up to whole 4-bit groups, or `width` at int8."""
+    return width + (-width) % group_size if bits == 4 else width
+
+
+def _pack_columns(w: Tensor, bits: int, group_size: int) -> tuple[int, Tensor, Tensor]:
+    """Quantize one matrix, padding K to whole groups, and return the padded width with its codes."""
+    width = _padded_width(w.shape[1], bits, group_size)
+    if width != w.shape[1]:
+        w = torch.nn.functional.pad(w, (0, width - w.shape[1]))
+    codes, scales = _pack(w, bits, group_size)
+    return width, codes, scales
+
+
 def matrix_bytes(rows: int, cols: int, bits: int, group_size: int) -> int:
     """Return the stored bytes of one matrix at `bits`, scales included."""
     weights = rows * cols * bits // 8
@@ -277,7 +291,8 @@ class GqaTokenBlock:
     stream than q: it takes keys from `other` [keys, other_width] and values from
     `other_value`, which defaults to `other`, and its keys arrive already rotated. `tokens`
     and `other_tokens` fix the buffer shapes, so one block serves one token count and a
-    graph captures that count.
+    graph captures that count. Attention weights are int8 by default and int4 at `bits=4`,
+    where each K width pads up to whole groups, so the 720 wide expert stream reads 768.
     """
 
     def __init__(
@@ -290,13 +305,19 @@ class GqaTokenBlock:
         tokens: int = 2,
         causal: bool = True,
         other_tokens: int | None = None,
+        bits: int = 8,
+        group_size: int = GROUP_SIZE,
     ) -> None:
         require(wq.dim() == 2 and wk.shape == wv.shape and wo.dim() == 2, f"expected 2D matrices, got {tuple(wq.shape)} and {tuple(wo.shape)}")
         require(wo.shape[1] == wq.shape[0], f"o input {wo.shape[1]} does not match q output {wq.shape[0]}")
         require(wq.shape[0] % head_dim == 0 and wk.shape[0] % head_dim == 0, "head_dim must divide both head counts")
         require(tokens > 0, f"token count {tokens} must be positive")
+        require(bits in BITS, f"expected 4 or 8 bits, got {bits}")
+        require(bits == 8 or wo.shape[1] % group_size == 0, f"o input {wo.shape[1]} is not whole {group_size} weight groups")
         self.tokens = tokens
         self.causal = causal
+        self.bits = bits
+        self.group_size = group_size
         self.cross = wk.shape[1] != wq.shape[1]
         self.rotate_keys = not self.cross
         self.other_tokens = tokens if other_tokens is None else other_tokens
@@ -305,19 +326,52 @@ class GqaTokenBlock:
         self.input_width = wq.shape[1]
         self.other_width = wk.shape[1]
         self.head_dim = head_dim
-        self.q, self.q_scales = quantize_int8(wq)
-        self.k, self.k_scales = quantize_int8(wk)
-        self.v, self.v_scales = quantize_int8(wv)
-        self.o, self.o_scales = quantize_int8(wo)
+        self.q_input, self.q, self.q_scales = _pack_columns(wq, bits, group_size)
+        self.other_input, self.k, self.k_scales = _pack_columns(wk, bits, group_size)
+        _, self.v, self.v_scales = _pack_columns(wv, bits, group_size)
+        _, self.o, self.o_scales = _pack_columns(wo, bits, group_size)
         device = wq.device
         self.cosine, self.sine = rotary_tables(tokens, head_dim, device=device)
         self.q_out = torch.empty(tokens, wq.shape[0], device=device, dtype=torch.float32)
         self.k_out = torch.empty(self.other_tokens, wk.shape[0], device=device, dtype=torch.float32)
         self.v_out = torch.empty(self.other_tokens, wv.shape[0], device=device, dtype=torch.float32)
         self.context = torch.empty(tokens, wo.shape[1], device=device, dtype=torch.float32)
-        self.bytes = sum(
-            matrix_bytes(rows, cols, 8, GROUP_SIZE) for rows, cols in (wq.shape, wk.shape, wv.shape, wo.shape)
+        self.padded_query = (
+            torch.empty(tokens, self.q_input, device=device, dtype=torch.float32)
+            if self.q_input != wq.shape[1]
+            else None
         )
+        self.padded_other = (
+            torch.empty(self.other_tokens, self.other_input, device=device, dtype=torch.float32)
+            if self.other_input != wk.shape[1]
+            else None
+        )
+        self.bytes = sum(
+            matrix_bytes(rows, _padded_width(cols, bits, group_size), bits, group_size)
+            for rows, cols in (wq.shape, wk.shape, wv.shape, wo.shape)
+        )
+
+    def _pad(self, x: Tensor, buffer: Tensor | None) -> Tensor:
+        """Return `x` with K padded to whole groups, copying into `buffer` when one exists."""
+        if buffer is None:
+            return x
+        buffer.zero_()
+        buffer[:, : x.shape[1]].copy_(x)
+        return buffer
+
+    def _project(self, packed: Tensor, scales: Tensor, x: Tensor, out: Tensor) -> None:
+        """Write one attention projection, a GEMM over the chunk or a GEMV per token."""
+        if self.tokens >= GEMM_MIN_TOKENS:
+            if self.bits == 4:
+                int4_gemm_into(packed, scales, x, out, group_size=self.group_size)
+            else:
+                int8_gemm_into(packed, scales, x, out)
+        elif self.bits == 4:
+            for token in range(self.tokens):
+                int4_gemv_into(packed, scales, x[token], out[token], group_size=self.group_size)
+        else:
+            for token in range(self.tokens):
+                int8_gemv_into(packed, scales, x[token], out[token])
 
     def into(self, x: Tensor, other: Tensor | None, out: Tensor, other_value: Tensor | None = None) -> None:
         """Write the attention output into `out`, reading `x` and the cross streams.
@@ -330,15 +384,12 @@ class GqaTokenBlock:
         source = x if other is None else other
         values = source if other_value is None else other_value
         require(source.shape[0] == self.other_tokens, f"block was built for {self.other_tokens} key rows, got {source.shape[0]}")
-        if self.tokens >= GEMM_MIN_TOKENS:
-            int8_gemm_into(self.q, self.q_scales, x, self.q_out)
-            int8_gemm_into(self.k, self.k_scales, source, self.k_out)
-            int8_gemm_into(self.v, self.v_scales, values, self.v_out)
-        else:
-            for token in range(self.tokens):
-                int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
-                int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
-                int8_gemv_into(self.v, self.v_scales, values[token], self.v_out[token])
+        query = self._pad(x, self.padded_query)
+        source = self._pad(source, self.padded_other)
+        values = source if other_value is None else values
+        self._project(self.q, self.q_scales, query, self.q_out)
+        self._project(self.k, self.k_scales, source, self.k_out)
+        self._project(self.v, self.v_scales, values, self.v_out)
         causal = self.causal and not self.cross
         if self.tokens <= FUSED_MAX_TOKENS:
             gqa_attention_into(
@@ -354,11 +405,7 @@ class GqaTokenBlock:
             )
         else:
             self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, causal, self.rotate_keys))
-        if self.tokens >= GEMM_MIN_TOKENS:
-            int8_gemm_into(self.o, self.o_scales, self.context, out)
-        else:
-            for token in range(self.tokens):
-                int8_gemv_into(self.o, self.o_scales, self.context[token], out[token])
+        self._project(self.o, self.o_scales, self.context, out)
 
 
 class ActionBlock:

@@ -277,6 +277,24 @@ def test_gqa_token_block_mixes_three_keys() -> None:
     assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995
 
 
+def test_int4_attention_block_pads_a_wide_input() -> None:
+    """4-bit q, k, v and o on a 48 wide stream must pad to whole groups and stay near fp32."""
+    generator = torch.Generator(device="cuda").manual_seed(12)
+    scale = 1.0 / 64**0.5
+    wq = torch.randn((64, 48), device="cuda", generator=generator) * scale
+    wk = torch.randn((32, 48), device="cuda", generator=generator) * scale
+    wv = torch.randn((32, 48), device="cuda", generator=generator) * scale
+    wo = torch.randn((48, 64), device="cuda", generator=generator) * scale
+    x = torch.randn((6, 48), device="cuda", generator=generator)
+    out = torch.empty((6, 48), device="cuda")
+
+    GqaTokenBlock(wq, wk, wv, wo, head_dim=8, tokens=6, bits=4, group_size=32).into(x, None, out)
+
+    exact = gqa_mix(x @ wq.T, x @ wk.T, x @ wv.T, head_dim=8) @ wo.T
+    assert out.shape == (6, 48)
+    assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.98
+
+
 def test_gqa_mix_masks_future_keys() -> None:
     """A causal block lets token 0 see one key, so its context is that key's value alone."""
     generator = torch.Generator(device="cuda").manual_seed(9)

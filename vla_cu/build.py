@@ -106,6 +106,7 @@ def attention_from_checkpoint(
     device: torch.device | str = "cuda",
     part: str = "vlm",
     other_tokens: int | None = None,
+    bits: int = 8,
 ) -> GqaTokenBlock:
     """Build the attention block at `layer`, a full prefix or an index under `part`.
 
@@ -124,6 +125,7 @@ def attention_from_checkpoint(
         tokens=tokens,
         causal=causal,
         other_tokens=other_tokens,
+        bits=bits,
     )
 
 
@@ -138,6 +140,7 @@ def layer_from_checkpoint(
     device: torch.device | str = "cuda",
     part: str = "vlm",
     other_tokens: int | None = None,
+    attention_bits: int = 8,
 ) -> LayerBlock:
     """Build one whole layer at `layer`, a full prefix or an index under `part`.
 
@@ -149,7 +152,14 @@ def layer_from_checkpoint(
     if isinstance(layer, int):
         layer = layer_prefix(source, layer, part)
     attention = attention_from_checkpoint(
-        source, f"{layer}.self_attn", tokens=tokens, causal=causal, head_dim=head_dim, device=device, other_tokens=other_tokens
+        source,
+        f"{layer}.self_attn",
+        tokens=tokens,
+        causal=causal,
+        head_dim=head_dim,
+        device=device,
+        other_tokens=other_tokens,
+        bits=attention_bits,
     )
     mlp = mlp_from_checkpoint(
         source, f"{layer}.mlp", tokens=tokens, down_bits=down_bits, group_size=group_size, device=device
