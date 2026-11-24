@@ -142,3 +142,5 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | chunk MLP as GEMMs | depth 16 graph 2.319 / 3.668 / 2.546 / 3.072 / 10.627 ms at 2, 3, 4, 8 and 50 tokens, 208 launches per layer, exact | `python -m vla_cu scale` | EXP-067 |
 | 2026-11-23, pinned clock | split K, paired | 2 and 4 splits are 0.57x to 0.75x the single launch on both expert shapes, so the narrow shape is not CTA bound | `python -m vla_cu m50` | EXP-068 |
 | 2026-11-23, pinned clock | fused residual norm | depth 16 graph 2.050 / 2.162 / 2.241 / 2.620 / 8.456 ms at 2, 3, 4, 8 and 50 tokens, 158 launches per layer, exact | `python -m vla_cu scale` | EXP-069 |
+| 2026-11-23, pinned clock | row kernels for norm, add and add-norm | depth 16 graph 2.439 / 2.434 / 2.354 / 2.300 / 4.468 ms at 2, 3, 4, 8 and 50 tokens, 11 launches per layer, exact | `python -m vla_cu scale` | EXP-070 |
+| 2026-11-23, pinned clock | stream K in one launch | parity with the single launch: 0.86x and 1.00x at 1920 x 720, 0.93x and 1.15x at 720 x 1920, bit exact, racecheck clean | `python -m vla_cu m50` | EXP-071 |

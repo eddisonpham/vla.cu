@@ -109,14 +109,15 @@ on purpose, not forgotten.
 - [x] Group the attention program by kv head and fuse rope into it. Done 2026-11-23, EXP-065, DEC-064: 20 to 24x faster than the einsums at every token count, so the threshold moved from 4 to 64.
 - [x] Add `num_stages` and a tile menu to the int4 GEMM. Done 2026-11-23, EXP-064: 0.048 and 0.054 ms at M = 50, 8.7 and 6.3 percent of peak, still behind cuBLAS bf16.
 - [x] Split K across programs for the narrow expert shape. Done 2026-11-23, EXP-068, DEC-067: a negative, 0.57x to 0.75x the single launch, because the reduce is a whole extra launch.
-- [ ] A stream-K schedule for the narrow GEMM: one launch, K slices handed out dynamically, no partials (EXP-068).
+- [x] A one launch K split with in launch recombine. Done 2026-11-23, EXP-071, DEC-069: deterministic and racecheck clean, but parity at best, so default off.
+- [ ] A true stream-K: contiguous K ranges across tiles with boundary handoff, one launch and a balanced grid (EXP-071).
 - [ ] Give the int8 GEMM its own sweep. It runs the int4 menu's shapes today, and nothing has timed its tiles (EXP-066).
 - [ ] A W4A8 rung: int4 weights with int8 activations, then compare cosine at depth 16 against the current int4 down (EXP-036, CUTLASS W4A8, LiquidGEMM).
 - [ ] Replace the hardcoded tile constants with a measured shape table, the way llama.cpp switches kernels per architecture and quant type (EXP-052, EXP-060, docs/PRODUCTION.md).
 - [ ] Cache the VLM prefix KV across calls, which is the RadixAttention idea applied to a fixed policy prefix (docs/PRODUCTION.md).
 - [x] Run both attention paths paired in one process. Done 2026-11-23, `python -m vla_cu attncross`, EXP-065: the fused kernel wins at 1 through 50 tokens by 20 to 24x.
 - [x] Wire the MLP's two projections to the GEMMs. Done 2026-11-23, EXP-067, DEC-065: 208 launches per layer and 10.627 ms at 50 tokens.
-- [ ] A two-dimensional RMSNorm over the whole token chunk, so the pre-attention norm and the final add stop scaling with the token count (EXP-069).
+- [x] Row kernels for the chunk norm, add and fused add-norm. Done 2026-11-23, EXP-070, DEC-068: 11 launches per layer at any token count, 4.468 ms at 50 tokens.
 - [ ] Pair the MLP chunk against the token loop the way `attncross` pairs the mix, since the small M columns depend on the clock state (EXP-067).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches

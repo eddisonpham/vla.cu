@@ -526,6 +526,22 @@
 - Revisit if: a stream-K schedule is tried, which keeps one launch and needs no partials.
 - Status: active
 
+## DEC-068: the norm, add and add-norm are row kernels  (2026-11-23)
+- Context: EXP-070. Three launches per token on the residual tail kept the layer at 158 launches at 50 tokens.
+- Options considered: (a) keep the per-token calls; (b) one program per row, with the wrappers accepting 1D or 2D; (c) a single kernel for the whole tail in one program.
+- Chosen and why: (b). The reduction runs over one row and never over the chunk, so a row is the natural unit, the 1D callers keep working unchanged, and the layer becomes 11 launches at any token count. (c) would put a whole chunk in one program and give up the parallelism the row grid buys.
+- Cost accepted: the wrappers now branch on rank, and the shared memory and lane count are still set by the widest row.
+- Revisit if: the tail ever matters next to the projections, which at 11 launches it does not.
+- Status: active
+
+## DEC-069: a K split recombines inside its own launch, and stays off  (2026-11-23)
+- Context: EXP-068 lost 0.57x to 0.75x because of a reduce launch; EXP-071 recombined in launch and read 0.86x to 1.15x, with a bit exact repeat and no racecheck hazards.
+- Options considered: (a) keep the two launch split; (b) in launch recombine with arrival counters, default off; (c) default on for narrow output widths; (d) delete the code.
+- Chosen and why: (b). The in launch recombine is strictly better than what it replaced and it is the piece worth understanding, but it is parity at best, so nothing defaults to it. (a) is superseded, (c) is excluded by the measurement, (d) throws away the mechanism the next stream-K attempt needs.
+- Cost accepted: atomics, a counter buffer and a graph capture test for a path no benchmark uses by default.
+- Revisit if: a true stream-K schedule, with contiguous K ranges across tiles and boundary handoff, is tried.
+- Status: active
+
 ## DEC-062: a chunk of tokens belongs to a GEMM, not a GEMV loop  (2026-11-23)
 - Context: EXP-063. At M = 50 the GEMM is 24 to 42x faster than the loop on the expert matrices, and cuBLAS bf16 is another 2.5 to 3.8x faster than our int4 GEMM. EXP-060 counted 500 launches per layer at 50 tokens.
 - Options considered: (a) keep the per-token loop because it is batch 1 code; (b) dispatch the projections to the int4 GEMM above a small token count; (c) always use the GEMM, even at one token.

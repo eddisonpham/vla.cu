@@ -111,7 +111,8 @@ kernels, so they are used as references and as performance baselines.
 | 21 | fuzz gate | seeded random shapes against float64 | `bench/fuzz.py` | done, 160 cases, zero failures |
 | 22 | weight bundle | versioned archive of packed matrices, CPU load | `vla_cu/bundle.py` | done, bit exact, 5.81x smaller than fp32 |
 | 23 | chunk projections | one GEMM per projection instead of one GEMV per token, int8 twin of the int4 GEMM, MLP included | `kernels/triton/int8_gemm.py`, `vla_cu/blocks.py` | done, 158 launches per 50 token layer against 500, exact |
-| 25 | fused residual norm | one program writes the residual sum and its RMSNorm from the same registers | `kernels/triton/rmsnorm.py` | done, 8.456 ms at 50 tokens and 16 layers against 10.627 |
+| 25 | fused residual norm | one program per row writes the residual sum and its RMSNorm from the same registers | `kernels/triton/rmsnorm.py` | done, 11 launches per layer and 4.468 ms at 50 tokens and 16 layers |
+| 26 | stream K | K split across programs, partials summed by the last arrival through an acquire release counter, one launch | `kernels/triton/int4_gemm.py` | done, bit exact and racecheck clean, parity with the single launch so default off |
 | 24 | fused grouped attention | program per (token, kv head), rope inside, cos and sine tables shared with the einsum path | `kernels/triton/gqa_attention.py` | done, 20 to 24x the einsums at 1 to 50 tokens, max diff 8.34e-07 |
 
 ## 7. Measurement protocol
