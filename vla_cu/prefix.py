@@ -89,16 +89,20 @@ def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAY
     return cache_from_rows(checkpoint, prefix_inputs(checkpoint, tokens), layers=layers)
 
 
-def full_prefix_inputs(checkpoint: Checkpoint, frames: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
+def full_prefix_inputs(
+    checkpoint: Checkpoint, frames: Tensor, state: Tensor, tower_bits: int = 32
+) -> tuple[Tensor, Tensor]:
     """Return the 241 prefix rows and their visibility mask: 3 frames, 48 language, 1 state.
 
     The state row sees every row and no other row sees it, which is the block mask the
     prefill's att_masks produce. `frames` is [3, 3, 512, 512] in [-1, 1] and `state` is a
-    32 wide padded robot state, so both are inputs the caller supplies.
+    32 wide padded robot state, so both are inputs the caller supplies. The tower runs
+    once for all three frames, at `tower_bits`.
     """
+    image_rows = image_tokens(checkpoint, frames, tower_bits)
     rows = torch.cat(
         (
-            image_tokens(checkpoint, frames).reshape(-1, image_tokens(checkpoint, frames).shape[-1]),
+            image_rows.reshape(-1, image_rows.shape[-1]),
             prefix_inputs(checkpoint, TOKENS),
             (state @ _read(checkpoint, f"{STATE}.weight").T + _read(checkpoint, f"{STATE}.bias"))[None],
         ),
