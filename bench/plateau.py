@@ -50,7 +50,7 @@ def main() -> int:
         f"{'% DRAM':>7}  {'vs triton':>10}  {'max abs diff':>12}"
     )
     best: dict[str, tuple[float, str]] = {}
-    labels = ("triton", "wide") + tuple(f"cuda:{variant}" for variant in VARIANTS)
+    labels = ("triton", "wide", "wide tf32") + tuple(f"cuda:{variant}" for variant in VARIANTS)
 
     for n_out, n_in in SHAPES:
         generator = torch.Generator(device="cuda").manual_seed(0)
@@ -72,11 +72,16 @@ def main() -> int:
                     samples[name].append(
                         time_call(lambda: int4_gemv_into(packed, scales, x, reference), warmup, ITERATIONS)
                     )
-                elif name == "wide":
+                elif name.startswith("wide"):
                     if n_in % 32:
                         continue
+                    precision = "ieee" if name == "wide" else "tf32"
                     samples[name].append(
-                        time_call(lambda: int4_gemv_wide_into(packed, scales, x, out), warmup, ITERATIONS)
+                        time_call(
+                            lambda p=precision: int4_gemv_wide_into(packed, scales, x, out, precision=p),
+                            warmup,
+                            ITERATIONS,
+                        )
                     )
                     diffs[name] = max(diffs[name], torch.max(torch.abs(out - reference)).item())
                     out.zero_()

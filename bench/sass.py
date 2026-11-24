@@ -100,9 +100,11 @@ def triton_listing() -> str:
     return cubin_listing(compiled, "int4_gemv_triton")
 
 
-def wide_listing() -> str:
+def wide_listing(precision: str = "") -> str:
     """Compile the wide-load Triton kernel at the measured shape and return its SASS."""
     from kernels.triton.int4_gemv_wide import BLOCK_K, DOT_LANES, PRECISION, WARPS, int4_gemv_wide_kernel
+
+    precision = precision or PRECISION
 
     generator = torch.Generator(device="cuda").manual_seed(0)
     x = torch.randn(N_COLS, device="cuda", generator=generator)
@@ -119,12 +121,12 @@ def wide_listing() -> str:
         GROUP=GROUP_SIZE,
         BLOCK_K=BLOCK_K,
         DOT_LANES=DOT_LANES,
-        PRECISION=PRECISION,
+        PRECISION=precision,
         num_warps=WARPS,
         W_EVICT="evict_first",
         X_EVICT="evict_last",
     )
-    return cubin_listing(compiled, "int4_gemv_wide_triton")
+    return cubin_listing(compiled, f"int4_gemv_wide_{precision}_triton")
 
 
 def cuda_listing() -> str:
@@ -148,9 +150,11 @@ def main() -> int:
     RESULTS.mkdir(parents=True, exist_ok=True)
     triton_text = triton_listing()
     wide_text = wide_listing()
+    wide_tf32_text = wide_listing("tf32")
     cuda_text = cuda_listing()
     (RESULTS / "sass_triton.txt").write_text(triton_text, encoding="utf-8")
     (RESULTS / "sass_wide.txt").write_text(wide_text, encoding="utf-8")
+    (RESULTS / "sass_wide_tf32.txt").write_text(wide_tf32_text, encoding="utf-8")
     (RESULTS / "sass_cuda.txt").write_text(cuda_text, encoding="utf-8")
     print(f"GPU {torch.cuda.get_device_name(0)} | int4 GEMV {N_ROWS} x {N_COLS}, group {GROUP_SIZE}, fp32 activations")
     print("listings: bench/results/sass_triton.txt, sass_wide.txt and sass_cuda.txt")
@@ -160,6 +164,8 @@ def main() -> int:
         print(row("triton staged", counts))
     for counts in histograms(wide_text).values():
         print(row("triton wide", counts))
+    for counts in histograms(wide_tf32_text).values():
+        print(row("triton wide tf32", counts))
     for name, counts in histograms(cuda_text).items():
         if "int4_gemv_kernel" not in name:
             continue
