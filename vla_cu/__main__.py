@@ -35,6 +35,7 @@ TASKS: dict[str, str] = {
     "scale": "bench.scale",
     "plateau": "bench.plateau",
     "ncu": "bench.ncu_profile",
+    "sass": "bench.sass",
     "style": "scripts.style_check",
 }
 
