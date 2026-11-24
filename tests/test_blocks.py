@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from kernels.triton.gqa_attention import gqa_attention_into
-from vla_cu.blocks import ActionBlock, AttentionBlock, GqaTokenBlock, MlpBlock, gqa_mix, rotary
+from vla_cu.blocks import ActionBlock, AttentionBlock, GqaTokenBlock, MlpBlock, gqa_mix, rotary, rotary_tables
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -142,23 +142,36 @@ def test_gqa_mix_masks_future_keys() -> None:
     assert not torch.allclose(full[0], v[0].repeat(2))
 
 
-def test_attention_kernel_matches_the_einsum_reference() -> None:
-    """The kernel must reproduce the masked softmax over positions, not over heads."""
+@pytest.mark.parametrize("tokens", (3, 5, 8, 17))
+def test_attention_kernel_matches_the_einsum_reference(tokens: int) -> None:
+    """The kernel must reproduce rope and the masked softmax over positions, not heads."""
     generator = torch.Generator(device="cuda").manual_seed(10)
-    tokens, heads, kv_heads, head_dim = 5, 4, 2, 8
+    heads, kv_heads, head_dim = 4, 2, 8
     q = torch.randn((tokens, heads * head_dim), device="cuda", generator=generator)
     k = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
     v = torch.randn((tokens, kv_heads * head_dim), device="cuda", generator=generator)
-    share = torch.arange(heads, device="cuda") // (heads // kv_heads)
-    query = q.reshape(tokens, heads, head_dim)
-    key = k.reshape(tokens, kv_heads, head_dim).index_select(1, share)
-    value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
-    scores = torch.einsum("thd,shd->hts", query, key) / head_dim**0.5
-    future = torch.ones(tokens, tokens, dtype=torch.bool, device="cuda").triu(1)
-    weights = torch.softmax(scores.masked_fill(future[None], float("-inf")), dim=-1)
-    expected = torch.einsum("hts,shd->thd", weights, value).reshape(tokens, heads * head_dim)
+    cosine_table, sine_table = rotary_tables(tokens, head_dim)
 
     out = torch.empty_like(q)
-    gqa_attention_into(q, k, v, out, head_dim=head_dim)
+    gqa_attention_into(q, k, v, cosine_table, sine_table, out, head_dim=head_dim)
 
-    torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(out, gqa_mix(q, k, v, head_dim=head_dim), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("tokens", (8, 65))
+def test_gqa_token_block_above_the_loop_matches_the_reference(tokens: int) -> None:
+    """A chunk past the projection loop must cross the same chain, fused mix or not."""
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    scale = 1.0 / 16**0.5
+    wq = torch.randn((16, 16), device="cuda", generator=generator) * scale
+    wk = torch.randn((8, 16), device="cuda", generator=generator) * scale
+    wv = torch.randn((8, 16), device="cuda", generator=generator) * scale
+    wo = torch.randn((32, 16), device="cuda", generator=generator) * scale
+    x = torch.randn((tokens, 16), device="cuda", generator=generator)
+    out = torch.empty((tokens, 32), device="cuda")
+
+    GqaTokenBlock(wq, wk, wv, wo, head_dim=8, tokens=tokens).into(x, None, out)
+
+    exact = gqa_mix(x @ wq.T, x @ wk.T, x @ wv.T, head_dim=8) @ wo.T
+    assert out.shape == (tokens, 32)
+    assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995

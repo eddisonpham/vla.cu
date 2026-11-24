@@ -28,6 +28,7 @@ TASKS: dict[str, str] = {
     "fastpath": "bench.fastpath",
     "crossover": "bench.crossover",
     "attn": "bench.attention",
+    "attncross": "bench.attention_cross",
     "block": "bench.block",
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",

@@ -24,6 +24,7 @@ from torch import Tensor
 from kernels.triton.gqa_attention import gqa_attention_into
 from kernels.triton.int4_gemv import int4_gemv_into
 from kernels.triton.int4_grouped_gemv import int4_grouped_gemv_into
+from kernels.triton.int8_gemm import int8_gemm_into
 from kernels.triton.int8_gemv import int8_gemv_into
 from kernels.triton.int8_grouped_gemv import int8_grouped_gemv_into
 from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
@@ -32,7 +33,8 @@ from vla_cu.validate import require
 BITS = (4, 8)
 HEAD_DIM = 64
 THETA = 100000.0
-FUSED_MAX_TOKENS = 4
+FUSED_MAX_TOKENS = 64
+GEMM_MIN_TOKENS = 2
 
 
 def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
@@ -49,6 +51,20 @@ def matrix_bytes(rows: int, cols: int, bits: int, group_size: int) -> int:
     return weights + scales
 
 
+def rotary_tables(
+    tokens: int, head_dim: int = HEAD_DIM, theta: float = THETA, device: torch.device | str = "cuda"
+) -> tuple[Tensor, Tensor]:
+    """Return the cos and sin tables [tokens, head_dim // 2] for positions 0 to tokens - 1.
+
+    The fused kernel and `rotary` read the same tables, so a rotation is defined once and
+    the two attention paths differ only in where the multiply happens.
+    """
+    half = head_dim // 2
+    frequencies = theta ** (-2.0 * torch.arange(half, device=device, dtype=torch.float32) / head_dim)
+    angles = torch.arange(tokens, device=device, dtype=torch.float32)[:, None] * frequencies[None, :]
+    return torch.cos(angles).contiguous(), torch.sin(angles).contiguous()
+
+
 def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     """Return `x` [tokens, heads * head_dim] with each row rotated to its own position.
 
@@ -61,14 +77,14 @@ def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     tokens = x.shape[0]
     heads = x.shape[1] // head_dim
     half = head_dim // 2
-    frequencies = theta ** (-2.0 * torch.arange(half, device=x.device, dtype=torch.float32) / head_dim)
-    angles = torch.arange(tokens, device=x.device, dtype=torch.float32)[:, None] * frequencies[None, :]
-    cosine = torch.cos(angles)[:, None, :]
-    sine = torch.sin(angles)[:, None, :]
+    cosine, sine = rotary_tables(tokens, head_dim, theta, x.device)
     pairs = x.reshape(tokens, heads, 2, half)
     first = pairs[:, :, 0]
     second = pairs[:, :, 1]
-    rotated = torch.stack((first * cosine - second * sine, first * sine + second * cosine), dim=2)
+    rotated = torch.stack(
+        (first * cosine[:, None] - second * sine[:, None], first * sine[:, None] + second * cosine[:, None]),
+        dim=2,
+    )
     return rotated.reshape(tokens, heads * head_dim)
 
 
@@ -200,15 +216,15 @@ class GqaTokenBlock:
     """One grouped-query attention block at two or more tokens, q and k included.
 
     `wq` is [heads * 64, input_width], `wk` and `wv` are [kv_heads * 64, other_width] and
-    `wo` is [hidden, heads * 64]. Every projection is one GEMV per token, so the block
-    costs four launches per token; q and k rotate by their row's position, the softmax is
-    causal so a token reads only itself and earlier tokens, and the score and value mix
-    are either one fused Triton kernel or two [heads, tokens, tokens] einsums. The kernel
-    wins up to FUSED_MAX_TOKENS and the einsums win above it, because the kernel reloads
-    its key and value tiles per query head (EXP-062). `into`
-    reads `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
-    `other` [tokens, other_width] when it is given. `tokens` fixes the buffer shapes, so
-    one block serves one token count and a graph captures that count.
+    `wo` is [hidden, heads * 64]. Above GEMM_MIN_TOKENS each projection is one int8 GEMM
+    over the chunk, so the weights are read once instead of once per token; at one token
+    the four GEMVs remain, because a GEMM would pad that row to 16. The score and value
+    mix, rope included, is one fused Triton kernel up to FUSED_MAX_TOKENS and two
+    [heads, tokens, tokens] einsums above it, because BLOCK_T stops fitting registers past
+    a 64 token row tile (EXP-062, EXP-064). `into` reads `x` [tokens, input_width] and
+    writes `out` [tokens, hidden], taking k and v from `other` [tokens, other_width] when
+    it is given. `tokens` fixes the buffer shapes, so one block serves one token count and
+    a graph captures that count.
     """
 
     def __init__(
@@ -236,6 +252,7 @@ class GqaTokenBlock:
         self.v, self.v_scales = quantize_int8(wv)
         self.o, self.o_scales = quantize_int8(wo)
         device = wq.device
+        self.cosine, self.sine = rotary_tables(tokens, head_dim, device=device)
         self.q_out = torch.empty(tokens, wq.shape[0], device=device, dtype=torch.float32)
         self.k_out = torch.empty(tokens, wk.shape[0], device=device, dtype=torch.float32)
         self.v_out = torch.empty(tokens, wv.shape[0], device=device, dtype=torch.float32)
@@ -248,18 +265,24 @@ class GqaTokenBlock:
         """Write the attention output into `out` [tokens, hidden], reading `x` and `other`."""
         require(x.shape[0] == self.tokens, f"block was built for {self.tokens} tokens, got {x.shape[0]}")
         source = x if other is None else other
-        for token in range(x.shape[0]):
-            int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
-            int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
-            int8_gemv_into(self.v, self.v_scales, source[token], self.v_out[token])
+        if self.tokens >= GEMM_MIN_TOKENS:
+            int8_gemm_into(self.q, self.q_scales, x, self.q_out)
+            int8_gemm_into(self.k, self.k_scales, source, self.k_out)
+            int8_gemm_into(self.v, self.v_scales, source, self.v_out)
+        else:
+            for token in range(self.tokens):
+                int8_gemv_into(self.q, self.q_scales, x[token], self.q_out[token])
+                int8_gemv_into(self.k, self.k_scales, source[token], self.k_out[token])
+                int8_gemv_into(self.v, self.v_scales, source[token], self.v_out[token])
         if self.tokens <= FUSED_MAX_TOKENS:
-            query = rotary(self.q_out, self.head_dim)
-            key = rotary(self.k_out, self.head_dim)
-            gqa_attention_into(query, key, self.v_out, self.context, self.head_dim, self.causal)
+            gqa_attention_into(self.q_out, self.k_out, self.v_out, self.cosine, self.sine, self.context, self.head_dim, self.causal)
         else:
             self.context.copy_(gqa_mix(self.q_out, self.k_out, self.v_out, self.head_dim, self.causal))
-        for token in range(x.shape[0]):
-            int8_gemv_into(self.o, self.o_scales, self.context[token], out[token])
+        if self.tokens >= GEMM_MIN_TOKENS:
+            int8_gemm_into(self.o, self.o_scales, self.context, out)
+        else:
+            for token in range(self.tokens):
+                int8_gemv_into(self.o, self.o_scales, self.context[token], out[token])
 
 
 class ActionBlock:

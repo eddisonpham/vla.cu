@@ -25,7 +25,7 @@ from vla_cu.bench_utils import (
     time_call,
     warm_gpu,
 )
-from vla_cu.blocks import THETA, GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
+from vla_cu.blocks import GEMM_MIN_TOKENS, THETA, GqaTokenBlock, GqaValueBlock, MlpBlock, gqa_mix
 from vla_cu.checkpoint import open_checkpoint
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
@@ -218,14 +218,21 @@ def stack_scale(checkpoint) -> None:
     print()
 
 
+def layer_launches(tokens: int) -> int:
+    """Return the launches one layer issues at `tokens`: projections, mix, norms and adds."""
+    projections = 4 if tokens >= GEMM_MIN_TOKENS else 4 * tokens
+    return projections + 1 + 6 * tokens
+
+
 def token_chain(
     checkpoint, tokens: int, depths: tuple[int, ...] = STACKS, warmup: int = WARMUP, iterations: int = ITERATIONS
 ) -> None:
     """Run the 16 real expert layers at `tokens` visible tokens.
 
     Two tokens make the softmax choose between two keys, up to eight make it choose among
-    eight, so every token feeds every other one and a layer pays for q, k and v. Every
-    projection is one GEMV per token, so a layer issues four launches per token. The
+    eight, so every token feeds every other one and a layer pays for q, k and v. Above
+    GEMM_MIN_TOKENS the four attention projections are one GEMM each, so their launch
+    count stops growing with the token count. The
     reference is the same chain in fp32 with the same weights, the same fixed
     cross-attention prefix and the same rotation. Attention is causal, so token i reads
     keys 0 to i, which is the schedule the expert runs. Each depth is also captured as one
@@ -233,7 +240,10 @@ def token_chain(
     """
     print(f"stage 4: {tokens} tokens through the expert stack, q and k included")
     if depths != STACKS:
-        print(f"subset of depths {depths}, {warmup} warmup and {iterations} iterations because a layer is {4 * tokens} launches")
+        print(
+            f"subset of depths {depths}, {warmup} warmup and {iterations} iterations "
+            f"because a layer is {layer_launches(tokens)} launches"
+        )
     print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
     generator = torch.Generator(device="cuda").manual_seed(0)
     names = (
@@ -320,7 +330,10 @@ def token_chain(
             f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
             f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
-    print(f"note: {4 * tokens} launches per layer, theta {THETA:.0f} with the Llama pairing, attention is causal")
+    print(
+        f"note: {layer_launches(tokens)} launches per layer, theta {THETA:.0f} with the Llama pairing, "
+        "attention is causal"
+    )
     print()
 
 
