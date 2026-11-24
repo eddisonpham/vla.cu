@@ -33,6 +33,8 @@ TASKS: dict[str, str] = {
     "bundle": "bench.bundle_bench",
     "real": "bench.real_layers",
     "scale": "bench.scale",
+    "plateau": "bench.plateau",
+    "ncu": "bench.ncu_profile",
     "style": "scripts.style_check",
 }
 
