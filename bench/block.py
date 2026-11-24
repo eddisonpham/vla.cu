@@ -1,4 +1,4 @@
-"""A stack of full action blocks: attention plus MLP, at three precision mixes.
+"""A stack of full action blocks: attention plus MLP, at four precision mixes.
 
 Concept: one block says little about a model, because quantization error compounds
 through a stack. This task runs the same fp32 weights through four blocks in three
@@ -32,7 +32,12 @@ INTERMEDIATE = 2560
 STACK_BLOCKS = 4
 WARMUP = 10
 ITERATIONS = 50
-MIXES = ((4, 4, "int4 attn, int4 down"), (8, 4, "int8 attn, int4 down"), (8, 8, "int8 attn, int8 down"))
+MIXES = (
+    (4, 4, "int4 attn, int4 down"),
+    (4, 8, "int4 attn, int8 down"),
+    (8, 4, "int8 attn, int4 down"),
+    (8, 8, "int8 attn, int8 down"),
+)
 
 
 def cosine(approx: torch.Tensor, exact: torch.Tensor) -> float:
