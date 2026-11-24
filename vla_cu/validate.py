@@ -107,6 +107,23 @@ def check_int4_gemv(
     return n_rows, n_cols, n_groups
 
 
+def check_int8_gemm(w: Tensor, scales: Tensor, x: Tensor, out: Tensor) -> tuple[int, int, int]:
+    """Validate an int8 GEMM call and return (tokens, N, K).
+
+    Assumes w int8 [N, K], scales fp32 [N], x fp32 [M, K], out fp32 [M, N].
+    """
+    require(w.dim() == 2 and scales.dim() == 1 and x.dim() == 2 and out.dim() == 2, f"expected w [N, K], scales [N], x [M, K], out [M, N]; got {tuple(w.shape)}, {tuple(scales.shape)}, {tuple(x.shape)}, {tuple(out.shape)}")
+    require(w.dtype == torch.int8, f"expected int8 weights, got {w.dtype}")
+    require(scales.dtype == torch.float32 and x.dtype == torch.float32 and out.dtype == torch.float32, f"expected fp32 scales, x and out; got {scales.dtype}, {x.dtype}, {out.dtype}")
+    n_rows, n_cols = w.shape
+    n_tokens = x.shape[0]
+    require(scales.shape == (n_rows,), f"expected one scale per output row, got {tuple(scales.shape)} for {n_rows} rows")
+    require(x.shape == (n_tokens, n_cols), f"expected x [(M), {n_cols}], got {tuple(x.shape)}")
+    require(out.shape == (n_tokens, n_rows), f"expected out [{(n_tokens)}, {n_rows}], got {tuple(out.shape)}")
+    check_tensors(w, scales, x, out)
+    return n_tokens, n_rows, n_cols
+
+
 def check_int4_gemm(
     packed: Tensor,
     scales: Tensor,
