@@ -45,6 +45,13 @@ def _norm(x: Tensor, weight: Tensor) -> Tensor:
     return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + EPS) * weight
 
 
+def prefix_inputs(checkpoint: Checkpoint, tokens: int = TOKENS) -> Tensor:
+    """Return the prefix rows [tokens, 960]: real embedding rows scaled as the prefill scales them."""
+    embed = checkpoint.read(f"{BASE}.embed_tokens.weight")
+    ids = torch.arange(tokens, dtype=torch.long)
+    return embed.index_select(0, ids).to(device="cuda", dtype=torch.float32) * math.sqrt(embed.shape[1])
+
+
 def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAYERS) -> tuple[list[Tensor], list[Tensor]]:
     """Return post-rope keys and values [tokens, 320] for each backbone layer.
 
@@ -52,9 +59,7 @@ def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAY
     uses, and row i is position i. `rotary` runs at this repo's theta, not the 10000 in
     LeRobot's own `apply_rope`, so the cache matches this repo's expert queries.
     """
-    embed = checkpoint.read(f"{BASE}.embed_tokens.weight")
-    ids = torch.arange(tokens, dtype=torch.long)
-    x = embed.index_select(0, ids).to(device="cuda", dtype=torch.float32) * math.sqrt(embed.shape[1])
+    x = prefix_inputs(checkpoint, tokens)
     keys: list[Tensor] = []
     values: list[Tensor] = []
     for index in range(layers):
