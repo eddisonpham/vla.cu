@@ -31,6 +31,7 @@ TASKS: dict[str, str] = {
     "block": "bench.block",
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",
+    "real": "bench.real_layers",
     "style": "scripts.style_check",
 }
 
