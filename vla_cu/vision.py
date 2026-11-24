@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from kernels.triton.int4_gemm import int4_gemm_into
 from kernels.triton.int8_gemm import int8_gemm_into
 from vla_cu.checkpoint import Checkpoint
-from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
+from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4, quantize_int8
 from vla_cu.validate import require
 
 BASE = "model.vlm_with_expert.vlm.model.vision_model"
@@ -71,6 +71,19 @@ def _layer_norm(x: Tensor, weight: Tensor, bias: Tensor) -> Tensor:
     return F.layer_norm(x, (x.shape[-1],), weight, bias, EPS)
 
 
+def _rounded(x: Tensor, activation_bits: int) -> Tensor:
+    """Return `x` rounded to int8 with one scale per row, or unchanged at 16 and 32 bits.
+
+    This is the activation half of a W4A8 kernel, done in torch so the measurement can hold
+    the weight fixed: 32 is exact, 16 is the fp16 operand a tensor core already rounds to,
+    and 8 is what an int8 activation bound would cost.
+    """
+    if activation_bits != 8:
+        return x
+    codes, scales = quantize_int8(x.contiguous())
+    return codes.to(torch.float32) * scales[:, None]
+
+
 class _Projection:
     """One tower matmul, held as fp32 weights or as packed codes with their scales.
 
@@ -78,12 +91,27 @@ class _Projection:
     row, and 4 stores two codes per byte with a scale per `group_size` inputs, so K must
     be whole groups. The bias stays fp32, because it is one add and packing it buys nothing.
     `bytes` is the stored size, which is what a caller counts when it compares precisions.
+    `activation_bits` 16 runs the packed kernel, which rounds both operands to fp16 at the
+    dot; 32 and 8 dequantize the 4-bit weight to fp32 and run an fp32 matmul instead, with
+    the activation exact at 32 and rounded to int8 per row at 8. Those two are measurements
+    of the format, not a fast path.
     """
 
-    def __init__(self, weight: Tensor, bias: Tensor | None, bits: int, group_size: int = GROUP_SIZE) -> None:
+    def __init__(
+        self,
+        weight: Tensor,
+        bias: Tensor | None,
+        bits: int,
+        group_size: int = GROUP_SIZE,
+        activation_bits: int = 16,
+    ) -> None:
         require(bits in BITS, f"expected 32, 8 or 4 bits, got {bits}")
+        require(activation_bits in (8, 16, 32), f"expected 8, 16 or 32 activation bits, got {activation_bits}")
+        require(bits == 4 or activation_bits == 16, "activation rounding is measured on the 4-bit weight only")
         self.bits = bits
         self.group_size = group_size
+        self.activation_bits = activation_bits
+        self.exact: Tensor | None = None
         self.out_features, self.in_features = weight.shape
         self.bias = (
             torch.zeros(self.out_features, device=weight.device, dtype=torch.float32) if bias is None else bias
@@ -98,16 +126,21 @@ class _Projection:
             require(weight.shape[1] % group_size == 0, f"K {weight.shape[1]} is not whole {group_size} weight groups")
             self.codes, self.scales = pack_int4(weight, group_size=group_size)
             self.bytes = self.codes.numel() + self.scales.numel() * 4
+            if activation_bits != 16:
+                self.exact = dequantize_int4(self.codes, self.scales, group_size)
 
     def __call__(self, x: Tensor) -> Tensor:
         """Return x @ weight.T + bias for x [tokens, in_features], as [tokens, out_features]."""
+        values = _rounded(x, self.activation_bits)
+        if self.exact is not None:
+            return values @ self.exact.T + self.bias
         if self.bits == 32:
-            return x @ self.weight.T + self.bias
+            return values @ self.weight.T + self.bias
         out = torch.empty((x.shape[0], self.out_features), device=x.device, dtype=torch.float32)
         if self.bits == 8:
-            int8_gemm_into(self.codes, self.scales, x.contiguous(), out)
+            int8_gemm_into(self.codes, self.scales, values.contiguous(), out)
         else:
-            int4_gemm_into(self.codes, self.scales, x.contiguous(), out, group_size=self.group_size)
+            int4_gemm_into(self.codes, self.scales, values.contiguous(), out, group_size=self.group_size)
         return out + self.bias
 
 
@@ -120,17 +153,24 @@ class Tower:
     `bytes` reports the stored size of every matrix and norm the tower holds.
     """
 
-    def __init__(self, checkpoint: Checkpoint, bits: int = 32, group_size: int = GROUP_SIZE) -> None:
+    def __init__(
+        self,
+        checkpoint: Checkpoint,
+        bits: int = 32,
+        group_size: int = GROUP_SIZE,
+        activation_bits: int = 16,
+    ) -> None:
         require(bits in BITS, f"expected 32, 8 or 4 bits, got {bits}")
         self.bits = bits
         self.group_size = group_size
+        self.activation_bits = activation_bits
         self.patch_weight = _read(checkpoint, f"{BASE}.embeddings.patch_embedding.weight")
         self.patch_bias = _read(checkpoint, f"{BASE}.embeddings.patch_embedding.bias")
         self.position = _read(checkpoint, f"{BASE}.embeddings.position_embedding.weight")
         self.layers = [self._read_layer(checkpoint, index) for index in range(LAYERS)]
         self.post_weight = _read(checkpoint, f"{BASE}.post_layernorm.weight")
         self.post_bias = _read(checkpoint, f"{BASE}.post_layernorm.bias")
-        self.connector = _Projection(_read(checkpoint, CONNECTOR), None, bits, group_size)
+        self.connector = _Projection(_read(checkpoint, CONNECTOR), None, bits, group_size, activation_bits)
         self.bytes = self.patch_weight.numel() * 4 + self.patch_bias.numel() * 4 + self.position.numel() * 4
         self.bytes += self.post_weight.numel() * 4 + self.post_bias.numel() * 4 + self.connector.bytes
         self.bytes += sum(layer[index].bytes for layer in self.layers for index in (2, 3, 4, 5, 8, 9))
@@ -147,24 +187,28 @@ class Tower:
                 _read(checkpoint, f"{prefix}.self_attn.q_proj.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
             _Projection(
                 _read(checkpoint, f"{prefix}.self_attn.k_proj.weight"),
                 _read(checkpoint, f"{prefix}.self_attn.k_proj.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
             _Projection(
                 _read(checkpoint, f"{prefix}.self_attn.v_proj.weight"),
                 _read(checkpoint, f"{prefix}.self_attn.v_proj.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
             _Projection(
                 _read(checkpoint, f"{prefix}.self_attn.out_proj.weight"),
                 _read(checkpoint, f"{prefix}.self_attn.out_proj.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
             _read(checkpoint, f"{prefix}.layer_norm2.weight"),
             _read(checkpoint, f"{prefix}.layer_norm2.bias"),
@@ -173,12 +217,14 @@ class Tower:
                 _read(checkpoint, f"{prefix}.mlp.fc1.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
             _Projection(
                 _read(checkpoint, f"{prefix}.mlp.fc2.weight"),
                 _read(checkpoint, f"{prefix}.mlp.fc2.bias"),
                 self.bits,
                 self.group_size,
+                self.activation_bits,
             ),
         )
 

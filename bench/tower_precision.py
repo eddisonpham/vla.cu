@@ -24,11 +24,13 @@ from vla_cu.quant import GROUP_SIZE
 from vla_cu.vision import BASE, Tower, tower_for
 
 VARIANTS = (
-    ("fp32", 32, GROUP_SIZE),
-    ("int8", 8, GROUP_SIZE),
-    ("int4 g64", 4, 64),
-    ("int4 g32", 4, 32),
-    ("int4 g16", 4, 16),
+    ("fp32", 32, GROUP_SIZE, 16),
+    ("int8", 8, GROUP_SIZE, 16),
+    ("int4 g64 A16", 4, 64, 16),
+    ("int4 g32 A16", 4, 32, 16),
+    ("int4 g16 A16", 4, 16, 16),
+    ("int4 g16 A8", 4, 16, 8),
+    ("int4 g16 A32", 4, 16, 32),
 )
 FRAMES = 3
 REPEATS = 3
@@ -58,21 +60,24 @@ def main() -> int:
     stored = sum(info.nbytes for name, info in checkpoint.tensors.items() if name.startswith(f"{BASE}."))
     print(f"wall clock, median of {REPEATS} calls, file reads included; the tower is {stored / 1e6:.2f} MB of bf16 in the checkpoint")
     print(f"patch cosine is one frame at the 1024 patches, row cosine is all {FRAMES} frames at the 64 connector rows")
+    print("A16 is the packed kernel, A32 and A8 dequantize the weight and run fp32 with exact or int8 activations")
 
     rows: dict[str, torch.Tensor] = {}
     patches: dict[str, torch.Tensor] = {}
-    towers: dict[str, Tower] = {}
     builds: dict[str, float] = {}
     frame_times: dict[str, float] = {}
     print()
     print(f"{'variant':>9}  {'build':>9}  {'3 frames':>9}  {'rebuilt':>9}  {'MB':>7}  {'patch cos':>9}  {'row cos':>8}  {'rel L2':>8}")
-    for label, bits, group in VARIANTS:
-        tower = Tower(checkpoint, bits, group_size=group)
+    for label, bits, group, activation in VARIANTS:
+        tower = Tower(checkpoint, bits, group_size=group, activation_bits=activation)
         torch.cuda.synchronize()
-        builds[label] = elapsed(lambda: Tower(checkpoint, bits, group_size=group))
+        builds[label] = elapsed(
+            lambda: Tower(checkpoint, bits, group_size=group, activation_bits=activation)
+        )
         frame_times[label] = elapsed(lambda: [tower.rows(frame) for frame in frames])
-        rebuild_seconds = elapsed(lambda: [Tower(checkpoint, bits, group_size=group).rows(frame) for frame in frames])
-        towers[label] = tower
+        rebuild_seconds = elapsed(
+            lambda: [Tower(checkpoint, bits, group_size=group, activation_bits=activation).rows(frame) for frame in frames]
+        )
         rows[label] = torch.stack([tower.rows(frame) for frame in frames])
         patches[label] = tower.hidden(frames[0])
         print(
@@ -85,13 +90,17 @@ def main() -> int:
     cold = elapsed(lambda: tower_for(checkpoint, 8, group_size=GROUP_SIZE), repeats=1)
     warm = elapsed(lambda: tower_for(checkpoint, 8, group_size=GROUP_SIZE))
     prefix_rows, visible = full_prefix_inputs(checkpoint, frames, state, tower_bits=8)
+    text_first = elapsed(lambda: cache_from_rows(checkpoint, prefix_rows, visible), repeats=1)
     text_seconds = elapsed(lambda: cache_from_rows(checkpoint, prefix_rows, visible))
     print()
     print(f"tower cache, int8: first call {cold * 1e3:.2f} ms, later calls in the same process {warm * 1e3:.3f} ms")
-    print(f"text cache, 16 backbone layers over {FULL_TOKENS} rows: {text_seconds * 1e3:.2f} ms, weights read included")
+    print(
+        f"text cache, 16 backbone layers over {FULL_TOKENS} rows: {text_first * 1e3:.2f} ms first call, "
+        f"{text_seconds * 1e3:.2f} ms after it, weights held"
+    )
     print(f"warm prefill is what an observation pays after the first, with the tower already held")
     print(f"{'variant':>9}  {'frames':>9}  {'text':>9}  {'first':>9}  {'warm':>9}")
-    for label, _, _ in VARIANTS:
+    for label, _, _, _ in VARIANTS:
         frames_seconds = frame_times[label]
         print(
             f"{label:>9}  {frames_seconds * 1e3:>8.2f}ms  {text_seconds * 1e3:>8.2f}ms  "
