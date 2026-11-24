@@ -93,9 +93,11 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | CI and gates | 230 tests on a GPU, 40 passed and 190 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
+| Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094) |
+| Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |
 | Gated cooperative tail | one launch for a three-matrix SwiGLU MLP, gate and up computed in one pass over the staged norm: 3.49x at 1 token at 720/1920 and 2.36x at 960/2560, crossing at 12 and 8 tokens (EXP-091) |
-| Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused (EXP-089) |
-| Where capture pays | 2.20x at 0.09 MB of packed weights, 1.79x at 1.38 MB, 0.93x at 9.44 MB and 0.94x at 18.87 MB, so the win is a fixed host cost, not a big-matrix one (EXP-092) |
+| Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused; `graphed(x)` binds the input buffer and drops the copy (EXP-089, EXP-096) |
+| Where capture pays | with a copied input, 2.20x at 0.09 MB of packed weights down to 0.94x at 18.87 MB (EXP-092); bound to the caller's buffer, 4.18x down to 1.00 to 1.02x, so the copy was the loss (EXP-096) |
 | One-command sanitizer gate | `python -m vla_cu sanitize` runs memcheck over every CUDA kernel and returns nonzero on an error |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
@@ -128,7 +130,7 @@ Windows, because the official wheel has no Windows build.
 
 ```python
 import torch
-from vla_cu import Int4Linear, mlp_from_checkpoint, open_checkpoint, pack_int4, int4_gemv
+from vla_cu import Int4Linear, layer_from_checkpoint, mlp_from_checkpoint, open_checkpoint, pack_int4, int4_gemv
 
 weight = torch.randn((768, 1920), device="cuda") * 0.02
 x = torch.randn(1920, device="cuda")
@@ -147,6 +149,8 @@ checkpoint = open_checkpoint("model.safetensors")
 block = mlp_from_checkpoint(checkpoint, 3, part="expert")
 out = torch.empty(block.hidden_width, device="cuda")
 block.into(x, out)
+
+whole = layer_from_checkpoint(checkpoint, 3, part="expert")
 ```
 
 `python -m vla_cu demo` runs all three levels on synthetic weights at the SmolVLA
@@ -154,7 +158,11 @@ widths and prints time and accuracy side by side. Every object here is inference
 fp32 activations, one CUDA device, no bias, no backward. `graphed()` is opt in and
 returns the captured buffer, so clone it to keep it. The builder takes a layer index and
 a stack name, `part="vlm"` for the SmolVLM2 backbone or `part="expert"` for the action
-expert, and a full prefix still works. `gate_proj` in the checkpoint selects the gated block.
+expert, and a full prefix still works; `layer_from_checkpoint` returns the whole layer,
+both norms and both residual adds included, and `gate_proj` selects the gated block.
+`GatedMlpBlock.tail_into` runs the gated tail in one cooperative launch, and
+`graphed(x)` binds the capture to that buffer, so a caller who writes it in place skips
+the copy.
 
 ## How to run
 
@@ -182,7 +190,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 |---|---|---|
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
-| Test suite | `python -m pytest -q` | a CUDA device, except the 35 tests marked `cpu` |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 44 tests marked `cpu` |
 | CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 

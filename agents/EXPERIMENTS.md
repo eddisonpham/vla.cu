@@ -1258,6 +1258,38 @@
 - Verdict: worked. A real layer is `mlp_from_checkpoint(checkpoint, 3, part="expert")`.
 - Follow-ups: resolve norms and the residual pair from the same index, so a whole layer is one call; read the stack names from a config instead of a constant table.
 
+## EXP-094: one layer index returns a whole transformer layer  (2026-11-24)
+- Goal / question: EXP-093 stopped the builder at the projections. A residual stream only makes sense with both RMSNorms, so can one index return the layer the checkpoint actually runs?
+- Change (one thing): `vla_cu/blocks.py` adds `LayerBlock`, which runs input norm, causal attention, residual add, post attention norm, MLP and residual add, owning the four buffers between the stages. `vla_cu/build.py` adds `layer_from_checkpoint`, which resolves the same index and `part`, reads `input_layernorm.weight`, `post_attention_layernorm.weight`, the four attention projections and the gated MLP, and `_vector` refuses a norm weight that is not 1D. Both names are exported. One test at 3 tokens compares the whole layer against an fp32 reference built from the same tensors.
+- Prediction: none filed by the human.
+- Result (measured), RTX 5060 Laptop GPU: the test reads cosine above 0.99 at the 64/128 width at 3 tokens, and the suite reaches 243 passed, 44 passed and 199 skipped with no device, style 0.
+- Explanation / hypothesis: the layer is six launches at one token (norm, four attention GEMVs, norm, three MLP kernels, two adds), so this chunk is a naming and ordering fix, not a speed one. The quantized attention and MLP are what the existing tests already gated.
+- Caveat: `head_dim` defaults to 64 and `causal` to true, both from the SmolVLM2 config, and a cross-attention layer passes its prefix stream as `other` to `into`. `bytes` counts the projections only.
+- Verdict: worked. `layer_from_checkpoint(checkpoint, 3, part="expert")` is the whole layer.
+- Follow-ups: let `LayerBlock` call `tail_into` when the widths allow, so the MLP half is one launch.
+
+## EXP-095: the block's gated tail in one launch  (2026-11-24)
+- Goal / question: EXP-091 measured the cooperative gated tail at 3.49x, but only `bench/coop_gated.py` could reach it. Does the library block expose it without a bench file?
+- Change (one thing): `GatedMlpBlock.tail_into` calls `coop_gated_into` with the block's own quantized gate, up and down, taking `x`, `other`, the norm `weight` and the five [tokens, hidden] buffers. It refuses an int8 down, a group size other than 64, more than 64 tokens, a hidden width that does not divide by 16 and an intermediate width that does not divide by 64, all before the launch. The kernel's act buffer is `self.activated`.
+- Prediction: none filed by the human.
+- Result (measured): a new test at 3 tokens and 256/640 matches add_norm, `into` and add within 1e-6 on the residual and norm and 2e-2 on the int4 output. Full suite 243 passed.
+- Explanation / hypothesis: the fused launch needs the norm weight and the residual stream, which a projections-only `into` cannot see, so it is a second method rather than a change to `into`. The guard list is the kernel's contract moved to the caller.
+- Caveat: no new timing. The 3.49x and 2.36x at 1 token remain the EXP-091 numbers, on the same GPU, and this method runs the same kernel.
+- Verdict: worked, the library path can now be one launch.
+- Follow-ups: wire `LayerBlock` to it, and measure whether a layer at 1 to 8 tokens now beats the six launch chain.
+
+## EXP-096: binding a capture to the caller's buffer  (2026-11-24)
+- Goal / question: EXP-092 found the graphed layer losing above 9 MB of packed weights and blamed the per-call input copy plus replay dispatch. Does removing the copy recover those rows?
+- Change (one thing): `Int4Linear.graphed(x)` now captures against the tensor it is given instead of a private clone, `GraphedInt4Linear` keeps that buffer as `static_in`, `__call__` copies only when the pointer differs, and `replay()` runs the graph with no input argument. `bench/graph_layer.py` times three paths: eager, a graph with the copy, and a graph bound to `x`.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu graphed` inside vcvars, warmup 10, 5 repeats, 50 iterations per repeat; `pytest -q`.
+- GPU / environment: RTX 5060 Laptop GPU, one token, clocks not pinned.
+- Result (measured), two runs after a discarded first: bound against eager 4.18x and 4.26x at 0.09 MB, 3.34x and 3.35x at 0.83 MB, 3.35x and 3.37x at 1.38 MB, 1.03x and 1.01x at 9.44 MB, 1.00x and 1.02x at 18.87 MB. The copied graph reads 0.0170 against 0.0093 ms bound at 0.09 MB, 0.0211 against 0.0106 at 1.38 MB, 0.0442 against 0.0392 at 9.44 MB and 0.0818 against 0.0740 at 18.87 MB, so the copy costs 5 to 10 us. Every replay was bit exact. Suite 243 passed, 44 passed and 199 skipped with no device, style 0.
+- Explanation / hypothesis: the copy was a separate eager launch outside the graph, so it paid the same 6 to 8 us host gap the graph removes. That is why it dominated the small rows and pushed the big rows just below eager. Without it, capture is a wash at 9.44 MB and slightly ahead at 18.87 MB, where the kernel body is the cost.
+- Caveat: the first run of the new bench printed eager 0.1807 against 0.0720 at 18.87 MB, a 2.52x the next two runs did not reproduce (0.0754 against 0.0740 and 0.0750 against 0.0740), so that row was GPU drift and is not quoted. Binding means the caller must keep the buffer alive and write it in place, and `replay()` is exact for the captured shape only.
+- Verdict: worked. The loss above 9 MB came from the copy, not from capture.
+- Follow-ups: capture several layers and one residual add in a single graph; have a producer write directly into `static_in` so the bind serves a changing input.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

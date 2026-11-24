@@ -529,6 +529,18 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-088: a graph capture may bind to the caller's buffer (2026-11-24)
+
+- Context: EXP-096. The wrapper's copy was a separate launch that cost 5 to 10 us and made capture lose above 9 MB of packed weights.
+- Decision: `graphed(x)` captures against the tensor it is given, `__call__` copies only when the pointer differs, and the buffer is exposed as `static_in` with a no-argument `replay()`.
+- Consequence: a caller who owns the input buffer pays no copy, while `graphed()` keeps the convenient copying path. The caller must keep the buffer alive and write it in place, and the capture is exact for one shape.
+
+## DEC-087: the whole layer is its own block, above the MLP and attention blocks (2026-11-24)
+
+- Context: EXP-094. `LayerBlock` needs the two norms and the residual stream, which the projection blocks do not model.
+- Decision: `LayerBlock` composes a `GqaTokenBlock` and an MLP block, runs the six stage chain in `into`, and is built by `layer_from_checkpoint` from one index. The projection builders are unchanged.
+- Consequence: the projection blocks stay reusable and testable alone, and the layer owns four scratch buffers. `bytes` counts projections only, as in the blocks below it.
+
 ## DEC-086: a layer index requires an explicit stack, never auto-detect (2026-11-24)
 
 - Context: EXP-093. A SmolVLA checkpoint stores the backbone and the action expert under `model.vlm_with_expert`, both indexed the same way, with different widths.
