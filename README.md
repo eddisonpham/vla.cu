@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 37 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 38 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -93,6 +93,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | CI and gates | 230 tests on a GPU, 40 passed and 190 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk (EXP-088) |
+| Gated cooperative tail | one launch for a three-matrix SwiGLU MLP, gate and up computed in one pass over the staged norm: 3.49x at 1 token at 720/1920 and 2.36x at 960/2560, crossing at 12 and 8 tokens (EXP-091) |
 | Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused (EXP-089) |
 | One-command sanitizer gate | `python -m vla_cu sanitize` runs memcheck over every CUDA kernel and returns nonzero on an error |
 
@@ -162,6 +163,7 @@ python -m vla_cu probe
 python -m vla_cu gemv
 python -m vla_cu layer
 python -m vla_cu coop
+python -m vla_cu coopgated
 python -m vla_cu style
 ```
 

@@ -133,6 +133,7 @@ kernels, so they are used as references and as performance baselines.
 | 43 | checkpoint builder | a layer prefix resolves q, k, v, o or gate, up, down, and gate_proj selects the SwiGLU block | `vla_cu/build.py`, `vla_cu/blocks.py` | done, five tests, gated and plain at one token and a chunk (EXP-088) |
 | 44 | graph wrapper | one captured `Int4Linear` call, input copied into the static buffer, output reused | `vla_cu/linear.py` | done, replay matches eager bit for bit, wrong shape refused (EXP-089) |
 | 45 | two-width tail sweep | 1 to 64 tokens at 720/1920 and 960/2560, first losing token count printed | `bench/coop.py` | done, both cross at 10 tokens, 0.44x against 0.67x at 16 (EXP-090) |
+| 46 | gated cooperative tail | gate and up dots share one pass over the staged norm, two grid barriers as before | `csrc/coop_layer_kernel.cuh`, `bench/coop_gated.py` | done, 3.49x and 2.36x at 1 token, crossover 12 and 8 tokens (EXP-091) |
 
 ## 7. Measurement protocol
 

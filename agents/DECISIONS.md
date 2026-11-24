@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-084: the gated tail is a second kernel that shares the stages (2026-11-24)
+
+- Context: EXP-091. A SmolVLA MLP needs silu(gate x) times (up x), which is one more projection than the existing cooperative kernel computes.
+- Decision: keep `coop_layer_kernel` for two-matrix layers and add `coop_gated_kernel`, with add, norm and down factored into shared device functions and each kernel holding its own two grid barriers. The gated middle stage computes both dot products in one pass over the staged norm. Host checks and the launch plan are shared through templates, one `cudaFuncSetAttribute` per kernel.
+- Consequence: one extra weight stream per output row, no extra shared memory and no extra barrier. The wider layer crosses over earlier (8 tokens against 12) because both weight matrices are read again for every 16 token tile.
+
 ## DEC-083: a CUDA graph is opt in, and its output buffer is reused (2026-11-24)
 
 - Context: EXP-089. Capture removes 3x to 5x of dispatch on a block, but a graph fixes the grid, the input address and the output address.
