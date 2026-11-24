@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import torch
 
+from kernels.triton.int4_gemm import int4_gemm_into
 from kernels.triton.int4_gemv import int4_gemv_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
@@ -41,7 +42,7 @@ ITERATIONS = 20
 
 
 def main() -> int:
-    """Time the per-row GEMV loop against one bf16 GEMM on the same int4 weights."""
+    """Time the per-row GEMV loop against one int4 GEMM and one bf16 GEMM."""
     enforce_memory_budget()
     warm_gpu()
     print(f"GPU {torch.cuda.get_device_name(0)} | peak {PEAK_BANDWIDTH_GB_S:.0f} GB/s")
@@ -68,17 +69,24 @@ def main() -> int:
         def half_gemm() -> None:
             torch.matmul(half_activations, half.transpose(0, 1), out=half_out)
 
+        def int4_gemm() -> None:
+            int4_gemm_into(packed, scales, activations, out, group_size=group)
+
         gemv_loop()
         half_gemm()
+        int4_gemm()
         torch.cuda.synchronize()
 
         gemv_bytes = TOKENS * (n_out * n_in // 2 + 4 * n_out * n_in // group + 4 * n_in) + 4 * TOKENS * n_out
         gemm_bytes = n_out * n_in * 2 + 4 * n_out * n_in // group + 2 * TOKENS * n_in + 2 * TOKENS * n_out
+        int4_bytes = n_out * n_in // 2 + 4 * n_out * n_in // group + 4 * TOKENS * n_in + 4 * TOKENS * n_out
         gemv_seconds = time_call(gemv_loop, WARMUP, ITERATIONS)
         gemm_seconds = time_call(half_gemm, WARMUP, ITERATIONS)
+        int4_seconds = time_call(int4_gemm, WARMUP, ITERATIONS)
 
         for name, n_bytes, seconds in (
             ("gemv loop x50", gemv_bytes, gemv_seconds),
+            ("int4 gemm x1", int4_bytes, int4_seconds),
             ("bf16 gemm x1", gemm_bytes, gemm_seconds),
         ):
             gbs = bandwidth_gb_s(n_bytes, seconds)
@@ -86,7 +94,11 @@ def main() -> int:
                 f"{f'{n_out} x {n_in}':>12}  {group:>5}  {name:>16}  {n_bytes / 1e6:>7.1f}MB  {seconds * 1e3:>8.3f}  "
                 f"{gbs:>8.1f}  {fraction_of_peak(gbs):>6.1%}  {n_bytes / PEAK_BANDWIDTH_GB_S / 1e6:>8.3f}"
             )
-        print(f"{'':>12}  {'':>5}  gemm / gemv {gemv_seconds / gemm_seconds:.1f}x on time, byte ratio {gemv_bytes / gemm_bytes:.1f}x")
+        print(
+            f"{'':>12}  {'':>5}  int4 gemm / gemv {gemv_seconds / int4_seconds:.1f}x on time, "
+            f"bytes {gemv_bytes / int4_bytes:.1f}x; bf16 gemm / gemv {gemv_seconds / gemm_seconds:.1f}x, "
+            f"bytes {gemv_bytes / gemm_bytes:.1f}x"
+        )
         print()
         del w, packed, scales, activations, half, half_activations, out, half_out
 
