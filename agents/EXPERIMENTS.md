@@ -769,6 +769,7 @@
 - Caveat: no rotary rotation is applied on either side, so the scores carry content but not position (DEC-052). Cross layers read a fixed random prefix of two tokens, not the VLM stream. This stage is eager only, no graph.
 - Verdict: worked. The chain now prices real attention, and the cosine is stable to 16 layers.
 - Follow-ups: apply RoPE to q and k; graph this stage to remove the dispatch the table is now dominated by.
+- CORRECTION (2026-11-23): the softmax did not run over the two tokens. `torch.bmm` batched on tokens, so the scores were [tokens, heads, kv heads] and the softmax ran over the five kv heads. The token count only changed the batch dimension. Fixed in EXP-057. The cosine here is a value path with a head mix, not a token mix.
 
 ## EXP-053: the two token chain graphed, then with rotary positions on q and k  (2026-11-23)
 - Goal / question: does a CUDA graph remove the 8 launches per layer that dominate EXP-051, and does the cosine survive a rotation that makes the scores positional?
@@ -782,6 +783,7 @@
 - Caveat: theta 10000 is an assumption. The checkpoint directory holds weights only, so neither the real theta nor a per-layer variation was read. RoPE also changes only the off-diagonal scores: q0.k0 and q1.k1 are unchanged, only q0.k1 and q1.k0 move, which is what relative position means here.
 - Verdict: worked. The two token layer is dispatch bound until graphed, and the graphed number is the honest cost.
 - Follow-ups: read theta from the model config; run three or more tokens to watch the score matrix grow.
+- CORRECTION (2026-11-23): same layout bug as EXP-051, so the rotation moved scores over key heads, not over positions. The dispatch conclusion stands, because the graph removed the same launches. The attention claim does not. Fixed in EXP-057.
 
 ## EXP-054: contiguity hints on the wide Triton load  (2026-11-23)
 - Goal / question: the wide mapping reads a flat run of int32 words but still emits narrow loads (EXP-052). Will `tl.max_contiguous` and `tl.multiple_of` tell Triton the run is contiguous and let it reach 16 bytes?
@@ -826,6 +828,43 @@
 - Caveat: attention is not causal, so token 0 already sees the last token, which the expert at inference does not do. This whole run reads 8 to 25 percent slower on the eager paths than the EXP-053 run (stage 3 depth 16 eager 4.406 against 3.475 ms), so compare token counts inside this run and not against the archived two token times.
 - Verdict: worked. The chain now exercises an n x n score matrix up to 8 x 8, the three-key block has a test, and the rope parameters come from the config instead of an assumption.
 - Follow-ups: add a causal mask, then compare `rms_norm_eps` 1e-05 from the same config against the kernel's EPS.
+- CORRECTION (2026-11-23): the flat cosine across token counts was not a property of the model. Attention mixed over kv heads, so the token count could not change the mixing. With positions in the score, cosine falls with the token count (EXP-057). The rope correction and the graph timings stand.
+
+## EXP-057: a causal mask, and the score layout it exposed  (2026-11-23)
+- Goal / question: EXP-055 ran a non causal softmax, so token 0 read the last token. Adding the mask should make the chain match the expert. The mask instead failed to broadcast, which is how the layout bug surfaced.
+- Change (one thing): `gqa_mix` takes `causal` (default true), sets future keys to -inf, and contracts with two einsums so scores are [heads, tokens, tokens]. Before, `torch.bmm` batched on tokens and produced [tokens, heads, kv heads], so the softmax ran over the five kv heads and the token count only changed the batch dimension.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, clocks pinned, after `pytest -q`.
+- Result (measured), depth 16, tokens, eager ms, graph ms, cos, rel L2: 2, 30.500, 2.723, 0.99783, 6.58e-02. 3, 39.244, 3.025, 0.99766, 6.85e-02. 4, 39.159, 3.068, 0.99756, 6.99e-02. 8, 84.353, 4.897, 0.99712, 7.60e-02. Exact at every depth.
+- Explanation / hypothesis: cosine now falls with the token count, 0.99783 at two and 0.99712 at eight, because each token's context carries more quantized q, k and v into every residual. That gradient is the evidence the scores cover positions: over key heads the token count could not change the mixing at all, which is why EXP-055 read flat.
+- Caveat: 4 tokens eager 39.159 ms is within noise of 3 tokens at 39.244 ms, so the eager column here is dispatch and thermal, not work. These rows come from one long run that also timed the other stages.
+- Verdict: worked, and it found a real bug. The three token block test and the new mask test pass, 125 tests in total.
+- Follow-ups: run the mask over a 50 token action chunk, which is the expert's real sequence length.
+
+## EXP-058: the RMSNorm epsilon now follows the model config  (2026-11-23)
+- Goal / question: the config says `rms_norm_eps` 1e-05, the kernel used 1e-6. Which side is wrong?
+- Change (one thing): `kernels/triton/rmsnorm.py` EPS goes from 1e-6 to 1e-05. `bench/scale.py` imports the same constant, so the kernel and the fp32 reference move together.
+- Prediction: none filed by the human.
+- Source: SmolVLM2-500M-Video-Instruct `text_config.rms_norm_eps`, see RESEARCH.
+- Command: `python -m vla_cu scale`, clocks pinned.
+- Result (measured): stage 3 depth 16 cosine 0.99795 before and after, to five decimals. No other row moved beyond run noise.
+- Explanation: the vector is normalized to unit RMS, so the variance is near 1 and eps enters as 1 / (1 + 1e-5) against 1 / (1 + 1e-6), about 5e-6 relative. That sits below what the quantization error can show.
+- Caveat: this is a correctness fix against the model, not a measured improvement.
+- Verdict: corrected. The kernel carries the model's epsilon.
+- Follow-ups: none.
+
+## EXP-059: the wide dot at tf32  (2026-11-23)
+- Goal / question: EXP-056 measured only `input_precision="ieee"` and read 0.18x of the staged kernel. Is the cost the FMA lowering or the operand layout?
+- Change (one thing): `plateau` gained a `wide tf32` label and `sass` a tf32 listing.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu plateau` and `python -m vla_cu sass` in vcvars, median of 5 repeats of 30 iterations, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, Triton 3.9.0, block 1024, 1 warp, group 64.
+- Result (measured), 4096 x 8192: staged 0.072 ms, 264.1 GB/s, 68.8 percent. wide ieee 0.438 ms, 11.3 percent, 0.16x. wide tf32 0.174 ms, 108.7 GB/s, 28.3 percent, 0.41x. native unroll 86.8 percent. max abs diff against the staged output: ieee 1.91e-06, tf32 4.00e-03.
+- Result, listing: tf32 is 682 instructions, 8 FFMA, 24 LDS, 38 LDG, 0 `LDG.E.128`. ieee was 970 instructions, 264 FFMA, 83 LDS.
+- Explanation / hypothesis: tf32 cuts FFMA from 264 to 8 and LDS from 83 to 24, and buys 2.5x over ieee, so the precision lowering was most of the dot's cost. It is still 0.41x of staged, so the 16 column waste and the layout conversion remain, and it rounds the product tile to 10 mantissa bits: 4.00e-03 absolute is three orders worse than 1.91e-06 and would fail the 1e-4 test.
+- Caveat: tf32 is a diagnostic, not a usable path. This run reads faster than the EXP-056 run on the staged and native rows (68.8 against 63.6 percent), so compare the wide labels inside this run only.
+- Verdict: it answers the question and stays unusable. The staged mapping remains the one to keep.
+- Follow-ups: none for this file.
 
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?

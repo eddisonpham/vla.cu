@@ -461,3 +461,19 @@
 - Consequence: `plateau` prints a wide row that loses, and its docstring says so. Anyone reading the file sees the negative before the code.
 - Revisit if: a `tf32` measurement shows the cost is precision and not layout, in which case the file may be worth a rewrite rather than a revert.
 - Status: active
+
+## DEC-059: `gqa_mix` is causal by default, and its scores are laid out over positions  (2026-11-23)
+- Context: EXP-057. Adding a mask failed to broadcast, which showed that `torch.bmm` had batched on tokens and produced scores of shape [tokens, heads, kv heads]. The softmax therefore mixed over key heads, not over positions, and every token level table before this was measuring a head mix.
+- Options considered: (a) keep the batch layout and squeeze a mask into it; (b) contract with einsums over positions and mask on a [tokens, tokens] triangle; (c) write a small attention kernel.
+- Chosen and why: (b). The expert is causal and attends over positions, so the layout has to be [heads, tokens, tokens]. Two einsums say that in one line each, the mask is a plain triangle, and the same function serves the block and the fp32 reference. A custom kernel is the next step, not this one.
+- Consequence: `causal` defaults to true, which matches the expert and leaves one path to test. `causal=False` stays for the test that shows what the mask changes. Every token level cosine moved, and the earlier flat reading is now explained rather than trusted.
+- Revisit if: a non causal variant is needed for a prefix pass, or the einsums become the bottleneck.
+- Status: active
+
+## DEC-060: the RMSNorm epsilon is the model's, 1e-05  (2026-11-23)
+- Context: EXP-058. The kernel carried torch's common default of 1e-6 while the SmolVLM2 text config says 1e-05.
+- Options considered: (a) keep 1e-6 because the cosine does not move; (b) follow the config.
+- Chosen and why: (b). This repo is modelling a specific model, and an epsilon that does not match it is a wrong constant that happens to be invisible at the tolerance in use. The reference imports the same constant, so one edit moves both.
+- Consequence: stage 3 has one fewer hidden difference from SmolVLA. The cosine is unchanged at five decimals, which is the honest report.
+- Revisit if: a different checkpoint with a different epsilon is loaded, in which case it belongs in the config reader rather than a module constant.
+- Status: active
