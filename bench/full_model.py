@@ -37,13 +37,10 @@ def main() -> int:
     state = torch.zeros(32, device="cuda")
     prefix_input, visible = full_prefix_inputs(checkpoint, frames, state, tower_bits=8)
     reference_rows, _ = full_prefix_inputs(checkpoint, frames, state, tower_bits=32)
-    prefix_input = prefix_input[:-1].contiguous()
-    reference_rows = reference_rows[:-1].contiguous()
-    visible = visible[:-1, :-1].contiguous()
     rows = prefix_input.shape[0]
     print(f"GPU {torch.cuda.get_device_name(0)} | {checkpoint.path.name} | {LAYERS} backbone + {LAYERS} expert layers")
     print(f"backbone {rows} prefix rows bidirectional from the int8 tower, expert {TOKENS} action tokens, attention and down at int8")
-    print("the state row is dropped: the fused attention kernel takes no block mask, so it would leak into every row")
+    print("the state row sees every row and no other row sees it, which is the block mask the backbone applies")
     print("frames are seeded noise and the state is zeros; the cosine is against an fp32 tower and fp32 layers")
     print(f"warmup {WARMUP}, iterations {ITERATIONS}")
 
@@ -77,7 +74,7 @@ def main() -> int:
         current, target = prefix_first, prefix_second
         current.copy_(prefix_input)
         for index, layer in enumerate(backbone):
-            layer.into(current, target)
+            layer.into(current, target, visible=visible)
             current, target = target, current
             cached_keys[index].copy_(rotary(layer.attention.k_out))
             cached_values[index].copy_(layer.attention.v_out)
