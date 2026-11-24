@@ -21,6 +21,7 @@ TASKS: dict[str, str] = {
     "tune": "bench.int8_gemv_tune",
     "matrix": "bench.matrix",
     "layer": "bench.layer",
+    "whole": "bench.whole_layer",
     "cuda": "bench.cuda_compare",
     "stream": "bench.bandwidth_probe",
     "grouped": "bench.grouped",

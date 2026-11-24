@@ -416,6 +416,16 @@ class GatedMlpBlock:
         else:
             int8_gemm_into(self.down, self.down_scales, self.activated, out)
 
+    def can_tail(self) -> bool:
+        """Return whether this block fits the cooperative tail: int4 down, group 64, widths and tokens in range."""
+        return (
+            self.down_bits == 4
+            and self.group_size == COOP_GROUP
+            and self.tokens <= COOP_MAX_TOKENS
+            and self.hidden_width % 16 == 0
+            and self.intermediate % COOP_GROUP == 0
+        )
+
     def tail_into(
         self,
         x: Tensor,
@@ -488,12 +498,22 @@ class LayerBlock:
         self.mlp_out = torch.empty(self.tokens, hidden, device=device, dtype=torch.float32)
         self.bytes = attention.bytes + mlp.bytes
 
-    def into(self, x: Tensor, out: Tensor, other: Tensor | None = None) -> None:
-        """Write one layer into `out`, reading `x` [tokens, hidden] and the cross stream `other`."""
+    def into(self, x: Tensor, out: Tensor, other: Tensor | None = None, *, fused: bool = False) -> None:
+        """Write one layer into `out`, reading `x` [tokens, hidden] and the cross stream `other`.
+
+        `fused` replaces the post norm, the gated MLP and the residual with one cooperative
+        launch. It needs a gated block that fits the kernel; a captured chain is faster, so
+        the default is off.
+        """
         require(x.shape == (self.tokens, self.hidden_width), f"expected x {(self.tokens, self.hidden_width)}, got {tuple(x.shape)}")
         require(out.shape == x.shape, f"expected out {tuple(x.shape)}, got {tuple(out.shape)}")
+        fits = isinstance(self.mlp, GatedMlpBlock) and self.mlp.can_tail()
+        require(not fused or fits, "the fused tail needs a gated MLP with an int4 down at group 64 and widths that fit")
         rmsnorm_into(x, self.input_norm, self.normed)
         self.attention.into(self.normed, other, self.attention_out)
+        if fused:
+            self.mlp.tail_into(x, self.attention_out, self.post_norm, self.residual, self.normed, out)
+            return
         add_into(x, self.attention_out, self.residual)
         rmsnorm_into(self.residual, self.post_norm, self.normed)
         if self.tokens == 1:

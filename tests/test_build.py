@@ -255,5 +255,11 @@ def test_a_whole_layer_carries_both_norms_and_residuals(tmp_path: Path) -> None:
     residual = x + mixed
     normed = residual * torch.rsqrt(residual.square().mean(dim=-1, keepdim=True) + EPS) * post_norm.cuda()
     exact = residual + (F.silu(normed @ gate.cuda().T) * (normed @ up.cuda().T)) @ down.cuda().T
+    fused = torch.empty_like(out)
+    block.into(x, fused, fused=True)
+
     assert (block.tokens, block.hidden_width) == (3, HIDDEN)
     assert cosine(out, exact) > 0.99
+    assert block.mlp.can_tail()
+    assert cosine(fused, exact) > 0.99
+    assert cosine(fused, out) > 0.999
