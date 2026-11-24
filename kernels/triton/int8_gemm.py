@@ -5,7 +5,7 @@ core consumes them directly and the row scale applies once to the finished tile.
 therefore reads each weight once instead of once per token, which is the byte argument
 the int4 GEMM makes (EXP-063), in the format the attention block already stores.
 
-Task: python -m vla_cu scale
+Task: python -m vla_cu int8tiles
 """
 
 from __future__ import annotations

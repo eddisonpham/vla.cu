@@ -30,6 +30,8 @@ TASKS: dict[str, str] = {
     "attn": "bench.attention",
     "attncross": "bench.attention_cross",
     "pairedtail": "bench.paired_tail",
+    "int8tiles": "bench.int8_tiles",
+    "floor": "bench.launch_floor",
     "block": "bench.block",
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",

@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from kernels.triton.int8_gemm import int8_gemm, int8_gemm_into
+from kernels.triton.int8_gemm import (
+    SHARED_LIMIT_BYTES,
+    TILES,
+    int8_gemm,
+    int8_gemm_into,
+    shared_memory_bytes,
+    tile_for,
+)
 from kernels.triton.int8_gemv import int8_gemv_into
 from vla_cu.quant import quantize_int8
 
@@ -46,6 +53,16 @@ def test_matches_the_gemv_loop(tokens: int, n_out: int, n_in: int) -> None:
 
     similarity = torch.nn.functional.cosine_similarity(out.flatten(), loop.flatten(), dim=0)
     assert similarity.item() > 0.9999
+
+
+def test_every_menu_tile_fits_shared_memory() -> None:
+    """A menu entry that stages more than the GPU has would fail at launch, not in review."""
+    assert all(shared_memory_bytes(tile) <= SHARED_LIMIT_BYTES for tile in TILES)
+
+
+def test_tile_for_covers_the_token_count() -> None:
+    """A chunk pads to the next preset, and a long one keeps the last preset."""
+    assert [tile_for(tokens)[0] for tokens in (1, 16, 17, 50, 200)] == [16, 16, 32, 64, 128]
 
 
 def test_rejects_a_shape_mismatch() -> None:
