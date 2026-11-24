@@ -39,6 +39,7 @@ failed for a named reason.
   chain.
 - `sass` counts both Triton mappings and all three native variants in one table.
 - `style` zero violations, `bundle` bit exact, `fuzz` 160 seeded cases clean.
+- `compute-sanitizer --tool memcheck` over the int4 tests: 0 errors (EXP-052).
 
 ## Still open
 
