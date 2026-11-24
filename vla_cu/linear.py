@@ -57,9 +57,9 @@ class Int4Linear(torch.nn.Module):
         require(values.dim() == 2, f"expected [in_features] or [tokens, in_features], got {tuple(values.shape)}")
         return int4_gemm(self.packed, self.scales, values, group_size=self.group_size)
 
-    def graphed(self) -> GraphedInt4Linear:
-        """Capture this layer's launch into a CUDA graph, for a caller who wants no capture code."""
-        sample = torch.empty(self.in_features, device=self.packed.device, dtype=torch.float32)
+    def graphed(self, x: Tensor | None = None) -> GraphedInt4Linear:
+        """Capture this layer's launch, bound to `x` when the caller owns the input buffer."""
+        sample = torch.empty(self.in_features, device=self.packed.device, dtype=torch.float32) if x is None else x
         return GraphedInt4Linear(self, sample)
 
     def extra_repr(self) -> str:
@@ -70,9 +70,11 @@ class Int4Linear(torch.nn.Module):
 class GraphedInt4Linear:
     """One Int4Linear call captured into a CUDA graph and replayed through a static buffer.
 
-    `__call__` copies the input into the captured buffer, replays and returns the captured
-    output, which the next call reuses, so clone it to keep it. A graph only removes Python
-    and Triton dispatch, so it pays off on small layers and does nothing on a DRAM bound one.
+    `__call__` copies the input into the captured buffer unless it already is that buffer,
+    replays and returns the captured output, which the next call reuses, so clone it to
+    keep it. Passing a buffer to `Int4Linear.graphed` binds the capture to the caller's own
+    input and skips the copy. A graph only removes Python and Triton dispatch, so it pays
+    off on small layers and does nothing on a DRAM bound one.
     """
 
     def __init__(self, layer: Int4Linear, sample: Tensor, warmup: int = 3) -> None:
@@ -80,8 +82,9 @@ class GraphedInt4Linear:
         require(sample.device == layer.packed.device, f"expected activations on {layer.packed.device}, got {sample.device}")
         require(sample.shape[-1] == layer.in_features, f"expected {layer.in_features} in_features, got {sample.shape[-1]}")
         require(sample.dim() in (1, 2), f"expected [in_features] or [tokens, in_features], got {tuple(sample.shape)}")
+        require(sample.is_contiguous(), "expected a contiguous input buffer for capture")
         self.layer = layer
-        self.static_in = sample.detach().clone().contiguous()
+        self.static_in = sample.detach()
         for _ in range(warmup):
             self.output = layer(self.static_in)
         torch.cuda.synchronize()
@@ -97,6 +100,11 @@ class GraphedInt4Linear:
         )
         require(x.dtype == torch.float32, f"expected fp32 activations, got {x.dtype}")
         require(x.device == self.static_in.device, f"expected activations on {self.static_in.device}, got {x.device}")
-        self.static_in.copy_(x)
+        if x.data_ptr() != self.static_in.data_ptr():
+            self.static_in.copy_(x)
+        return self.replay()
+
+    def replay(self) -> Tensor:
+        """Replay the graph and return the captured output, which the next call overwrites."""
         self.graph.replay()
         return self.output

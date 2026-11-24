@@ -94,3 +94,18 @@ def test_a_graph_refuses_a_different_shape() -> None:
 
     with pytest.raises(ValueError, match="graph captured"):
         replay(torch.empty(96, device="cuda"))
+
+
+def test_a_bound_graph_reads_the_caller_buffer_in_place() -> None:
+    """Binding the capture to an input buffer removes the copy, so an in place rewrite shows."""
+    generator = torch.Generator(device="cuda").manual_seed(15)
+    weight = torch.randn((192, 640), device="cuda", generator=generator) * (1.0 / 640**0.5)
+    layer = Int4Linear(weight)
+    x = torch.randn(640, device="cuda", generator=generator)
+
+    bound = layer.graphed(x)
+
+    assert bound.static_in.data_ptr() == x.data_ptr()
+    torch.testing.assert_close(bound(x), layer(x), rtol=0, atol=0)
+    x.copy_(torch.randn(640, device="cuda", generator=generator))
+    torch.testing.assert_close(bound.replay(), layer(x), rtol=0, atol=0)
