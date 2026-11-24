@@ -22,3 +22,4 @@ include = ["vla_cu*", "kernels*", "bench*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["cpu: runs without a CUDA device, which is what CI has"]
