@@ -18,10 +18,14 @@ from torch.nn import functional as F
 from kernels.triton.rmsnorm import EPS
 from vla_cu.blocks import gqa_mix, rotary
 from vla_cu.checkpoint import Checkpoint
+from vla_cu.vision import FRAME_ROWS, image_tokens
 
 LAYERS = 16
 TOKENS = 48
+FRAMES = 3
+FULL_TOKENS = FRAMES * FRAME_ROWS + TOKENS + 1
 BASE = "model.vlm_with_expert.vlm.model.text_model"
+STATE = "model.state_proj"
 WEIGHTS = (
     "input_layernorm.weight",
     "post_attention_layernorm.weight",
@@ -52,14 +56,16 @@ def prefix_inputs(checkpoint: Checkpoint, tokens: int = TOKENS) -> Tensor:
     return embed.index_select(0, ids).to(device="cuda", dtype=torch.float32) * math.sqrt(embed.shape[1])
 
 
-def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAYERS) -> tuple[list[Tensor], list[Tensor]]:
-    """Return post-rope keys and values [tokens, 320] for each backbone layer.
+def cache_from_rows(
+    checkpoint: Checkpoint, rows: Tensor, visible: Tensor | None = None, layers: int = LAYERS
+) -> tuple[list[Tensor], list[Tensor]]:
+    """Return post-rope keys and values for `rows` [tokens, 960] through every backbone layer.
 
-    The prefix attends to itself in both directions, which is the mask the prefill pass
-    uses, and row i is position i. `rotary` runs at this repo's theta, not the 10000 in
+    Row i is position i. Without `visible` the rows attend to each other in both directions,
+    which is the language prefix. `rotary` runs at this repo's theta, not the 10000 in
     LeRobot's own `apply_rope`, so the cache matches this repo's expert queries.
     """
-    x = prefix_inputs(checkpoint, tokens)
+    x = rows
     keys: list[Tensor] = []
     values: list[Tensor] = []
     for index in range(layers):
@@ -72,7 +78,32 @@ def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAY
         v = normed @ wv.T
         keys.append(rotary(k))
         values.append(v)
-        x = x + gqa_mix(q, k, v, causal=False) @ wo.T
+        x = x + gqa_mix(q, k, v, causal=False, visible=visible) @ wo.T
         normed = _norm(x, post_norm)
         x = x + (F.silu(normed @ gate.T) * (normed @ up.T)) @ down.T
     return keys, values
+
+
+def prefix_cache(checkpoint: Checkpoint, tokens: int = TOKENS, layers: int = LAYERS) -> tuple[list[Tensor], list[Tensor]]:
+    """Return post-rope keys and values [tokens, 320] for the 48 language rows at every layer."""
+    return cache_from_rows(checkpoint, prefix_inputs(checkpoint, tokens), layers=layers)
+
+
+def full_prefix_inputs(checkpoint: Checkpoint, frames: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
+    """Return the 241 prefix rows and their visibility mask: 3 frames, 48 language, 1 state.
+
+    The state row sees every row and no other row sees it, which is the block mask the
+    prefill's att_masks produce. `frames` is [3, 3, 512, 512] in [-1, 1] and `state` is a
+    32 wide padded robot state, so both are inputs the caller supplies.
+    """
+    rows = torch.cat(
+        (
+            image_tokens(checkpoint, frames).reshape(-1, image_tokens(checkpoint, frames).shape[-1]),
+            prefix_inputs(checkpoint, TOKENS),
+            (state @ _read(checkpoint, f"{STATE}.weight").T + _read(checkpoint, f"{STATE}.bias"))[None],
+        ),
+        dim=0,
+    )
+    visible = torch.ones((rows.shape[0], rows.shape[0]), dtype=torch.bool, device=rows.device)
+    visible[:-1, -1] = False
+    return rows, visible

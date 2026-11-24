@@ -106,7 +106,13 @@ def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
 
 
 def gqa_mix(
-    q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM, causal: bool = True, rotate_keys: bool = True
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    head_dim: int = HEAD_DIM,
+    causal: bool = True,
+    rotate_keys: bool = True,
+    visible: Tensor | None = None,
 ) -> Tensor:
     """Return the attention context [tokens, heads * head_dim] for q, k and v.
 
@@ -115,8 +121,9 @@ def gqa_mix(
     score depends on the relative position of the pair; `rotate_keys` false is the cross
     case, where the cached keys were rotated by the prefix pass. Scores are
     [heads, tokens, keys], q.k over sqrt(head_dim), with future keys set to -inf when
-    `causal`. Softmax runs over the key axis and each kv head serves
-    `heads // kv_heads` query heads.
+    `causal`. `visible` [tokens, keys] overrides that mask, which the prefix pass uses to
+    keep the state row out of the other prefix rows. Softmax runs over the key axis and
+    each kv head serves `heads // kv_heads` query heads.
     """
     tokens = q.shape[0]
     keys = k.shape[0]
@@ -129,7 +136,10 @@ def gqa_mix(
     key = key_rows.reshape(keys, kv_heads, head_dim).index_select(1, share)
     value = v.reshape(keys, kv_heads, head_dim).index_select(1, share)
     scores = torch.einsum("thd,shd->hts", query, key) * (1.0 / math.sqrt(head_dim))
-    if causal:
+    if visible is not None:
+        require(visible.shape == (tokens, keys), f"expected visible {(tokens, keys)}, got {tuple(visible.shape)}")
+        scores = scores.masked_fill(~visible[None], float("-inf"))
+    elif causal:
         future = torch.arange(keys, device=q.device)[None, :] > torch.arange(tokens, device=q.device)[:, None]
         scores = scores.masked_fill(future[None], float("-inf"))
     weights = torch.softmax(scores, dim=-1)
