@@ -118,6 +118,11 @@ on purpose, not forgotten.
 - [x] Tile the cooperative body with tensor core dots. Attempted 2026-11-24, EXP-084: correct, but 0.247 ms at 1 token against 0.042 for the GEMV body, and 0.436 against 0.596 at 64. Reverted.
 - [ ] A different tiled body: 64 rows of tokens in one block, async copies and one K pipeline, or a graph of the Triton GEMMs. The number to beat at 1 token is 0.042 ms (EXP-084).
 - [ ] Try the cooperative kernel on the attention widths, 960 and 2560, where M is larger and the GEMV body loses sooner (EXP-085).
+- [x] One-command public API and demo. Done 2026-11-24, EXP-086.
+- [x] One-command memcheck over every CUDA kernel. Done 2026-11-24, EXP-087: cooperative kernel clean, the extension cannot be attached on Windows.
+- [ ] A checkpoint to block builder, so a real SmolVLA layer is three lines instead of a bench file.
+- [ ] A graph wrapper for `Int4Linear`, since the eager layer pays dispatch per call (EXP-086).
+- [ ] Instrument the CUDA extension on Linux or WSL2, where the sanitizer may attach (EXP-087).
 - [ ] A self-hosted GPU runner would let CI run the 169 device tests instead of skipping them (EXP-083).
 - [ ] Skip the group scale and the transpose in an int4 test variant, which is the leading suspect for the 5 to 6 percent of peak in EXP-079.
 - [x] A cooperative-launch persistent layer in CUDA C++. Done 2026-11-24, EXP-078: one launch, 3.13x at 1 token, 2.55x at 2, 2.22x at 3, 1.25x at 8, 0.24x at 50. The body, not the launch, is what is left.

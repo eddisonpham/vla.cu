@@ -1181,6 +1181,27 @@
 - Verdict: the kernel now serves any layer whose hidden width divides by 16 and intermediate width by 64, at the cost of about 7 percent at 1 token. The 720 and 1920 default is still the measured one.
 - Follow-ups: a second real layer (attention widths 960 and 2560) would need K and N tiles that respect the 16 row floor, which the tests at 384/768 already exercise.
 
+## EXP-086: a public API, a drop-in layer, and one demo command  (2026-11-24)
+- Goal / question: the kernels, blocks and bundle existed, but a caller had to read `bench/` to use them. What is the smallest surface that makes the library usable without weakening any measured claim?
+- Change: `vla_cu/linear.py` adds `Int4Linear`, which packs one [out, in] weight at construction and dispatches to the GEMV at one token and the GEMM above it. `vla_cu.__init__` exports it, the block classes, the checkpoint reader and the bundle helpers, resolved lazily with `__getattr__` because a kernel module imports the package and an eager import closed a cycle (the first run failed collection in `tests/test_blocks.py`). `bench/demo.py` (task `demo`) runs one matrix, one block and a four block stack through the public names only. Tests: `tests/test_linear.py` (six, one token, a chunk, `from_linear`, three rejections) and `tests/test_public_api.py` (three, marked cpu).
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu demo`, `pytest -q`, `CUDA_VISIBLE_DEVICES= pytest -q`.
+- Result (measured), RTX 5060 Laptop GPU, warmup 10, iterations 50: one matrix 8192 x 4096 (134 MB fp32) fp32 `torch.mv` 0.492 ms against int4 0.194 ms, 2.54x, cosine 0.99408. One MLP block 960 to 2560 to 960: fp32 0.074 ms, int4 eager 0.060, int4 graph 0.021 (3.5x fp32), cosine 0.99477, graph bit exact. Stack of four blocks: fp32 0.420 ms, graphed int4 0.075 ms, 5.58x, cosine 0.97816, graph bit exact. Suite 220 passed on the GPU, 40 passed and 180 skipped with no device, style 0.
+- Explanation / hypothesis: the layer is eager per call, so a single call pays Python and Triton dispatch (about 7 us at 960 x 2560, EXP-018) and only the graph removes it. The matrix row is DRAM bound and wins from the bytes alone. The stack accumulates int4 error, which is why cosine falls from 0.995 to 0.978 over four blocks; that is the format, not the layer.
+- Caveat: the first demo build aliased the fp32 reference buffer (`torch.mv` with `out` equal to its own input) and printed a 0.978 block cosine against a wrong reference, and the stack compared the wrong parity buffer; both were fixed and the numbers above are from the fixed run. A pre-existing `test_mlp_matches_the_fp32_chain` was flaky because it drew `x` from the global RNG and gated cosine at 0.99 on a 64 x 128 int4 shape that measures 0.9885; it now seeds and gates at 0.98.
+- Verdict: worked. The surface is `Int4Linear` plus the blocks plus `open_checkpoint`, and the demo is the one command to run first.
+- Follow-ups: a graph wrapper for a caller who wants the 3.5x without writing capture code; a checkpoint to block builder so a real layer is three lines.
+
+## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
+- Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
+- Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu sanitize` from a vcvars shell.
+- Result (measured): cooperative layer, 3, 17 and 26 tokens, `ERROR SUMMARY: 0 errors`. int4 extension, three variants, `ERROR SUMMARY: 1 error`, and the error is `CUDA_ERROR_INVALID_HANDLE (error 400)` on `cuKernelGetFunction` inside `cudaLaunchKernel`, with no invalid access reported. That is the same attach failure EXP-016 and EXP-041 logged, not a memory defect.
+- Explanation / hypothesis: the sanitizer intercepts the launch and asks the driver for a kernel function handle; for this `cpp_extension` module on Windows the driver refuses, so no instrumented launch happens at all. The first version of the task returned 1 here, which would have implied a defect; it now classifies an attach failure as unsupported, separate from clean and from error.
+- Verdict: the gate is one command, and it is honest: the cooperative kernel is proven clean, the int4 extension has never been instrumented on this platform and the task says so.
+- Follow-ups: run the same probe on Linux or under WSL2 to see whether the extension can be instrumented at all; keep the CUDA variants under the test suite, which does compare them against Triton.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

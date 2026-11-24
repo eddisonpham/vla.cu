@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 35 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 37 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -90,7 +90,9 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 204 tests on a GPU, 35 passed and 169 skipped on a CPU runner, style and task list checked in both (EXP-081) |
+| CI and gates | 220 tests on a GPU, 40 passed and 180 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-086) |
+| Public API | `Int4Linear`, the block classes and the checkpoint reader import from `vla_cu`; `python -m vla_cu demo` runs all of it at 2.5x to 5.6x over fp32 (EXP-086) |
+| One-command sanitizer gate | `python -m vla_cu sanitize` runs memcheck over every CUDA kernel and returns nonzero on an error |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -118,6 +120,31 @@ pip install -e .[triton,dev]
 The base install needs torch only. The Triton extra resolves to `triton-windows` on
 Windows, because the official wheel has no Windows build.
 
+## Use it in your model
+
+```python
+import torch
+from vla_cu import Int4Linear, MlpBlock, open_checkpoint, pack_int4, int4_gemv
+
+weight = torch.randn((768, 1920)) * 0.02
+x = torch.randn(1920)
+
+packed, scales = pack_int4(weight)
+y = int4_gemv(packed, scales, x)
+
+layer = Int4Linear(weight)
+y = layer(x)
+y = layer(x.expand(8, -1))
+
+checkpoint = open_checkpoint("model.safetensors")
+up = checkpoint.read("model.layers.0.mlp.up_proj.weight").cuda().float()
+```
+
+`python -m vla_cu demo` runs all three levels on synthetic weights at the SmolVLA
+widths and prints time and accuracy side by side. Every object here is inference only:
+fp32 activations, one CUDA device, no bias, no backward. Graphs are the caller's job,
+and `bench/demo.py` shows the capture that makes a block faster than the dispatch.
+
 ## How to run
 
 ```bash
@@ -143,7 +170,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
 | Test suite | `python -m pytest -q` | a CUDA device, except the 35 tests marked `cpu` |
-| CUDA memory errors | `compute-sanitizer --tool memcheck python -m vla_cu coop` | the built extension, and minutes |
+| CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 
 `.github/workflows/ci.yml` runs on `ubuntu-latest` with the CPU torch wheel: the style

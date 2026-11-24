@@ -9,47 +9,47 @@
 
 ## Campaign
 
-The fused tail is one cooperative launch, serves any layer width in its class, and is
-measured from 1 to 64 tokens. It wins below 16 tokens and loses above. The tensor core
-body that was supposed to widen that lost 2x to 4x at every token count and was reverted
-before commit, so the negative is the finding: at these M values a GEMV body beats tiles.
+The kernels are measured, the fused tail is one cooperative launch, and the library now
+has a public surface a stranger can use: `Int4Linear`, the block classes, the bundle and
+the checkpoint reader, plus `python -m vla_cu demo` and `python -m vla_cu sanitize`.
 
 ## Closed in this pass
 
-- **Widths as launch parameters.** hidden and intermediate come from the tensors, shared
-  memory is sized from them, tests cover 720/1920, 256/640 and 384/768. Cost about
-  7 percent at 1 token (EXP-085).
-- **Tensor core body tried and dropped.** WMMA 16 x 16 tiles at two K staging depths:
-  0.247 and 0.427 ms at 1 token against 0.042 for the GEMV body, 15 tests pass, memcheck
-  clean. A double `up_scales` application was found and fixed first (EXP-084, DEC-079).
-- **Crossover re-measured.** 2.91x at 1 token, 2.28x at 2, 1.95x at 3, 1.15x at 8,
-  0.70x at 16, 0.22x at 50 (EXP-085).
+- **Public API.** `vla_cu` exports lazily to break the kernel import cycle. `Int4Linear`
+  packs once and dispatches GEMV at one token, GEMM above it. Six tests plus three
+  CPU surface tests (EXP-086, DEC-080).
+- **Demo.** one matrix 2.54x, one block graphed 3.5x, four block stack 5.58x, cosines
+  0.994, 0.995, 0.978, graphs bit exact (EXP-086).
+- **One-command memcheck.** Cooperative kernel 0 errors. The int4 extension cannot be
+  attached on Windows (`CUDA_ERROR_INVALID_HANDLE`), which the task reports as
+  unsupported rather than clean or failed (EXP-087, DEC-081).
+- **Fixed while testing.** The demo aliased its fp32 reference and read the wrong parity
+  buffer; a pre-existing block test was flaky because it was unseeded.
 
 ## What works
 
-- `pytest -q` with a GPU: 209 passed, including 15 cooperative tests.
-- With no device: 35 passed, 169 skipped, exit 0.
-- `python -m vla_cu style`: 0 violations. `compute-sanitizer --tool memcheck`: 0 errors.
-- `python -m vla_cu coop` pins the whole tail to one launch at any width in its class.
+- `pytest -q` with a GPU: 220 passed. No device: 40 passed, 180 skipped.
+- `python -m vla_cu style`: 0 violations. `python -m vla_cu demo`: exit 0.
+- `python -m vla_cu sanitize`: cooperative kernel clean, extension unsupported.
+- `pip install -e .` plus `from vla_cu import Int4Linear` is the user path.
 
 ## Open edges
 
-- **Tiles are the wrong body below 16 tokens**, which is the batch size that matters. A
-  64 token block with async copies and one K pipeline is the untried design.
-- **The int4 dequant path** runs at 5 to 6 percent of peak and `ncu` is still blocked by
-  ERR_NVGPUCTRPERM.
-- **Shared memory races** in the cooperative kernel are argued from the code, since
-  racecheck cannot run on a grid barrier.
+- **Tiles are the wrong body below 16 tokens**, the batch size that matters. A 64 token
+  block with async copies and one K pipeline is the untried design (EXP-084).
+- **The int4 CUDA extension has never been instrumented** on this platform (EXP-087).
+- **No checkpoint to block builder**, so a real layer still needs a bench file.
+- **`ncu` is blocked** by ERR_NVGPUCTRPERM, so all attribution is inference from timing.
 - **CI proves style, imports and collection**, not kernel correctness.
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell on the 1920 x 768 shape.
-2. Choose: the 64 token single pipeline body, or the attention widths at 960 and 2560.
+2. Choose: checkpoint builder, graph wrapper for `Int4Linear`, or the attention widths.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. A 64 row token block with async copies and one K pipeline.
-2. Run the cooperative kernel on the attention widths, where M is larger.
-3. A self-hosted GPU runner so CI runs the 169 device tests.
+1. A checkpoint to block builder, three lines from safetensors to a runnable layer.
+2. A graph wrapper so the eager layer gets the 3.5x without caller code.
+3. The cooperative kernel at the attention widths, 960 and 2560.

@@ -517,6 +517,18 @@
 - Decision: no tensor core tile in the fused layer. Widths arrive as launch parameters instead, with hidden divisible by 16 and intermediate by 64.
 - Consequence: a tiled body needs a different design (64 rows of tokens per block, async copies, one K pipeline) before it is worth another attempt. The tile numbers live in EXP-084 so the next attempt does not repeat it.
 
+## DEC-081: an uninstrumentable kernel is reported as unsupported, not as clean (2026-11-24)
+
+- Context: EXP-087. `python -m vla_cu sanitize` returned 1 on the int4 extension because the tool hit `CUDA_ERROR_INVALID_HANDLE`, which is an attach failure, not an invalid access.
+- Decision: the task classifies each probe as clean, unsupported or error, and only error fails the gate.
+- Consequence: a platform where the tool cannot attach never looks like a passing memory check, and never blocks a commit for a defect that was not observed.
+
+## DEC-080: the public layer stays eager, and package exports resolve lazily (2026-11-24)
+
+- Context: EXP-086. A public `Int4Linear` needs the package to import the blocks, but `kernels/triton/gqa_attention.py` imports the package, so an eager package import created a cycle that failed test collection.
+- Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
+- Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
+
 ## DEC-077: CI covers what a CPU runner can prove, and device tests skip with a reason (2026-11-24)
 
 - Context: EXP-083. Hosted runners have no GPU, and `torch.cuda.is_available()` reports true on a machine whose visible device count is zero.
