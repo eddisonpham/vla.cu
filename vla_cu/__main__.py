@@ -29,6 +29,7 @@ TASKS: dict[str, str] = {
     "crossover": "bench.crossover",
     "attn": "bench.attention",
     "attncross": "bench.attention_cross",
+    "pairedtail": "bench.paired_tail",
     "block": "bench.block",
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",
