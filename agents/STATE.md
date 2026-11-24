@@ -9,55 +9,57 @@
 
 ## Campaign
 
-The whole policy path is one measured graph: 16 backbone layers produce the prefix cache,
-16 expert layers consume it. The attention and down precision axes are both settled by
-measurement, and the remaining gaps are the prefix content and the denoising loop.
+The deployed prefix shape is built: 192 image rows from the real SigLIP tower and
+connector, 48 language rows, 1 state row. The expert holds its cosine on 241 keys. What is
+left is content, not structure: real frames, a numerical cross-check of the tower, and the
+10 step loop.
 
 ## Closed in this pass
 
-- **The whole model in one graph.** 48 bidirectional prefix rows through 16 int8 backbone
-  layers write post-rope K and V per layer; 16 int8 expert layers read them on 50 action
-  tokens. One graph 4.899 ms, two graphs 4.938 ms, eager 19.638 ms, cosine 0.99992
-  (EXP-106, DEC-093).
+- **The full 241 row prefix.** `vla_cu/vision.py` runs the 12 layer SigLIP tower in fp32
+  over a 512 frame and the connector's 4x4 pixel shuffle plus projection, 64 rows per
+  frame. `full_prefix_inputs` adds 48 language rows and 1 state row with the state block
+  mask. Cache 16 x [241, 320] fp32, 9.87 MB, build 415.64 ms (EXP-107, DEC-094).
+- **Expert on 241 keys.** int8 down 2.710 ms at cosine 0.99996; int4 down 2.817 ms at
+  0.99858, both against fp32, both graphs bit exact.
 
 ## What the numbers say
 
-| Path | ms | x eager |
-|---|---|---|
-| eager, 32 layers of Python dispatch | 19.638 | 1.00x |
-| two graphs, backbone then expert | 4.938 | 3.98x |
-| one graph, whole path | 4.899 | 4.01x |
-
-Stored 256.52 MB, end to end cosine 0.99992, rel L2 1.30e-02, every path bit exact.
-
-| Component | Evidence |
+| Measurement | Value |
 |---|---|
-| int8 attention | default; int4 costs 1.000 ms and 0.0024 cosine (EXP-105) |
-| int4 down | 0.99847 at 50 tokens, 0.408 ms slower than int8 down (EXP-105) |
-| prefix content | real 48 row cache and random rows give the same cosine (EXP-104) |
+| prefix rows | 241 = 3 x 64 image + 48 language + 1 state |
+| prefix cache | 16 layers x [241, 320] fp32, 9.87 MB |
+| prefix build | 289.93 ms per call, weight reads included (415.64 on the cold first run) |
+| expert on 241 keys, int8 down | 2.628 ms, cosine 0.99996, 98.68 MB |
+| expert on 241 keys, int4 down | 2.920 ms, cosine 0.99858, 88.31 MB |
+| expert on 48 keys, int8 down | 2.290 ms, cosine 0.99997 (EXP-105) |
+
+Key count moves timing by about 0.42 ms and cosine by about 1e-5, so it is not an
+accuracy lever.
 
 ## Gates
 
-- GPU suite 250 passed, CPU suite 48 passed and 202 skipped, style 0, clocks pinned at 1987 MHz.
-- `fullmodel`, `expertstack`, `realstack`, `block` exit 0; graphs bit exact.
-- 42 tasks, every one imported by `tests/test_tasks.py`.
-- `compute-sanitizer --tool memcheck` on the int4 attention test: 0 errors (EXP-105).
+- GPU suite 253 passed, CPU suite 51 passed and 202 skipped, style 0, clocks pinned at 1987 MHz.
+- `fullprefix`, `fullmodel`, `expertstack`, `realstack` exit 0; graphs bit exact.
+- 43 tasks, every one imported by `tests/test_tasks.py`.
+- Pixel shuffle order has two CPU tests; memcheck ran on the int4 attention path (EXP-105).
 
 ## What works
 
-- `python -m vla_cu fullmodel` runs the whole path in one graph and in two, against eager.
-- `python -m vla_cu expertstack` runs four attention and down mixes on the real prefix.
-- `vla_cu.prefix.prefix_inputs` and `prefix_cache` give the rows and the fp32 cache.
+- `python -m vla_cu fullprefix` builds the 241 row cache and times the expert on it.
+- `vla_cu.vision.image_tokens(checkpoint, frames)` returns 64 rows per frame.
+- `vla_cu.prefix.full_prefix_inputs` returns the rows and the visibility mask.
 
 ## Open edges
 
-- **One action chunk, not ten steps.** The real inference runs 10 denoising steps with the
-  prefix cache held, so a real chunk is about ten expert passes plus one prefix pass.
-- **The prefix is 48 language rows**, not the deployed 241 (192 image, 48 language, 1 state).
+- **Frames and state are synthetic.** Seeded noise and a zero state, so the structure is
+  real and the content is not.
+- **The tower has no numerical reference.** No transformers run exists to check the fp32
+  SigLIP forward; the pixel shuffle order is tested, the weights are the checkpoint's.
+- **One action chunk, not ten steps.** The real loop holds the prefix cache across 10
+  denoising passes.
 - **Rope wavelength is unresolved.** LeRobot rotates at 10000, the config says 100000.
-- **Timing moves between runs.** The same int8 expert path read 1.977, 2.290 and 2.290 ms
-  across three runs, so compare ratios inside one run.
-- **`ncu` is blocked** by ERR_NVGPUCTRPERM; the int4 extension cannot be instrumented on Windows.
+- **`ncu` is blocked** by ERR_NVGPUCTRPERM; the int4 extension cannot be instrumented.
 - **CI proves style, imports and collection**, not kernel correctness.
 
 ## What the human can do
@@ -68,6 +70,6 @@ Stored 256.52 MB, end to end cosine 0.99992, rel L2 1.30e-02, every path bit exa
 
 ## Best next options
 
-1. The 10 step loop with the prefix cache held, which is the real per action cost.
-2. The full 241 row prefix with the SigLIP tower and three real frames.
-3. int4 down on the whole path, to see if the 0.99847 expert cosine holds model level.
+1. The 10 step denoising loop with the prefix cache held, which is the real chunk cost.
+2. Three real camera frames, to give the image rows scene content.
+3. Quantize the SigLIP tower, which is most of the 415.64 ms build.

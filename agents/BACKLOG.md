@@ -37,7 +37,10 @@
 - [x] All 16 backbone layers at int8 and int4, one token, graphed. Done 2026-11-24, EXP-101: cosine 0.99998 at int8 and 0.99965 at int4.
 - [x] The expert stack at 50 tokens. Done 2026-11-24, EXP-102: cosine 0.99996 at int8 and 0.99847 at int4; int4 down is 0.471 ms slower on the GEMM path.
 - [x] The expert stack at 50 tokens with the real VLM prefix instead of a random one. Done 2026-11-24, EXP-104: cosine 0.99997 at int8 and 0.99847 at int4, identical to the random prefix, 1.977 and 2.378 ms.
-- [ ] The full 241 row prefix: 192 image rows through the SigLIP tower and connector, 48 language rows, 1 state row. Needs a tokenizer and three camera frames.
+- [x] The full 241 row prefix: 192 image rows through the SigLIP tower and connector, 48 language rows, 1 state row. Done 2026-11-24, EXP-107: cache 9.87 MB, build 415.64 ms, expert cosine 0.99996 at int8 down and 0.99858 at int4 down.
+- [ ] Three real camera frames in place of seeded noise, so the image rows carry scene content.
+- [ ] A transformers cross-check of one frame's 64 rows, since the vision forward has no numerical reference yet.
+- [ ] Quantize the SigLIP tower, which is most of the 415.64 ms prefix build.
 - [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
 - [ ] The 10 step denoising loop with the prefix cache held across steps, which is what a real action chunk costs instead of one expert pass (EXP-106).
 - [ ] int4 down on the whole path, to see whether the model level cosine tracks the expert level 0.99847.

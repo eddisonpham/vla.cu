@@ -1409,6 +1409,19 @@
 - Verdict: worked. The whole path is one graph at 4.899 ms with end to end cosine 0.99992.
 - Follow-ups: the 10 step loop with a cached prefix; the 241 row prefix; int4 down on the whole path.
 
+## EXP-107: the full 241 row prefix and the expert that reads it  (2026-11-24)
+- Goal / question: the 48 row prefix was the language segment only. Can the real tower, connector and backbone build the deployed 241 rows, and does the expert on 241 keys still hold its cosine?
+- Change: new `vla_cu/vision.py` runs the 12 layer SigLIP tower in fp32 over a 512 frame (1024 patches, row major position table) and the connector's 4x4 pixel shuffle plus [960, 12288] projection, giving 64 rows per frame. `vla_cu/prefix.py` gained `cache_from_rows`, which takes any rows and an optional visibility mask, and `full_prefix_inputs`, which concatenates 3 frames, 48 language rows and 1 state row, with the state row visible to itself and to the others not visible in return. `gqa_mix` takes `visible`. New task `fullprefix` (43 tasks).
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu fullprefix` in vcvars, warmup 10, iterations 50.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, 241 keys, 50 action tokens, expert attention at int8.
+- Result (measured): cache 16 layers x [241, 320] fp32, 9.87 MB; prefix build 415.64 ms per call including the weight reads. Expert fp32 392.98 MB, 6.927 ms; int8 down 98.68 MB, 2.710 ms, 2.56x, cosine 0.99996, rel L2 8.40e-03; int4 down 88.31 MB, 2.817 ms, 2.46x, cosine 0.99858, rel L2 5.33e-02. Both graphs bit exact. The two pixel shuffle order tests pass on CPU.
+- Explanation / hypothesis: 241 keys instead of 48 move the expert cosine by about 1e-5 and cost 0.42 ms on the int8 path, so key count is a timing effect, not an accuracy effect. The prefix build is 415 ms because 3 frames make 12 SigLIP layers of 1024 patches plus 16 fp32 text layers, and it is paid once per observation in the real loop while 10 expert passes follow.
+- Caveat: frames are seeded uniform noise and the state is a zero 32 wide vector, so this is the real structure with synthetic content. The vision forward is this repo's fp32 reading of SigLIP and of the connector order, and no transformers run exists to cross-check it; the pixel shuffle order is tested, the weights are the checkpoint's. The rope wavelength question stands.
+- Repeat (measured): the same command after a print cleanup read prefix build 289.93 ms, fp32 7.671 ms, int8 down 2.628 ms at 2.92x, int4 down 2.920 ms at 2.63x, with the same cosines. The first build included cold disk reads and the clocks move between runs, so cite ratios inside one run.
+- Verdict: worked. The deployed 241 row shape is built and measured, at cosine 0.99996 and 0.99858 on the expert.
+- Follow-ups: three real frames; a transformers cross-check of one frame's 64 rows; quantize the tower, which is 415 ms of the path.
+
 ### CORRECTION to EXP-102 and STATE (2026-11-24)
 
 EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `prefix_length: 0` and `tokenizer_max_length: 48`, and a prefill is 192 image rows (3 cameras x 64) plus 48 language rows plus 1 state row, so a deployed prefix is about 241 rows. 48 is the language segment only. EXP-104 measures that segment.

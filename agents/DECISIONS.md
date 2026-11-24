@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-094: the vision tower runs in fp32 with synthetic frames  (2026-11-24)
+- Context: EXP-107. The deployed prefix is 241 rows, and the repo has no camera frames and no transformers install. The checkpoint carries the tower and connector.
+- Decision: `vla_cu/vision.py` implements the 12 layer SigLIP forward and the connector in fp32 torch, reading the real weights, with the 4x4 pixel shuffle order tested on CPU. `bench/full_prefix.py` supplies seeded noise frames and a zero 32 wide state, and says so in its output.
+- Consequence: the row count, widths, weights, normalization and mask structure are real; the frame content is not, and the tower is not quantized because it is not the target of this project's kernels. The 415 ms build is a cost of the real structure, not a claim about a real observation.
+- Revisit if: frames and a tokenizer arrive, or a transformers run makes a numerical cross-check possible.
+
 ## DEC-093: the whole model is one graph, and the second graph is not the cost  (2026-11-24)
 - Context: EXP-106. One graph over 16 backbone and 16 expert layers reads 4.899 ms; the same work in two graphs reads 4.938 ms, a 0.8 percent gap, and eager reads 19.638 ms.
 - Decision: `fullmodel` captures the whole path in one graph, with the backbone writing the prefix key and value buffers that the expert reads. The two graph path stays in the bench as the comparison.

@@ -124,7 +124,7 @@ kernels, so they are used as references and as performance baselines.
 | 34 | body split | K step size, K length, format and program count at 50 tokens | `bench/body.py` | done, time is linear in bytes at 20 to 23 GB/s and flat in the step count, so the dequant path is the cost |
 | 35 | int8 paired tiles | menu pick against three challengers, alternating inside one process | `bench/int8_pair.py` | done, a 16 row tile won every repeat by 1.07x to 1.53x, so the menu changed |
 | 36 | cooperative hardening | device-aware shared memory setup, occupancy bound, alignment checks, token boundaries 1 to 64 | `csrc/coop_layer.cu` | done, memcheck 0 errors, 10 tests pass |
-| 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 48 passed and 202 skipped with no device |
+| 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 51 passed and 202 skipped with no device |
 | 38 | fused scaling sweep | 1 to 64 tokens, fused against the five launches, paired | `bench/coop.py` | done, 2.91x at 1 token, 1.15x at 8, 0.70x at 16, 0.25x at 64; two widths in EXP-090 |
 | 39 | tensor core body | 16 x 16 WMMA tiles over a shared activation tile, at two K staging depths | `csrc/coop_layer_kernel.cuh`, not kept | negative, 0.247 and 0.427 ms at 1 token against 0.042 for the GEMV body, reverted (EXP-084) |
 | 40 | runtime widths | hidden and intermediate from the tensors, shared memory and tile counts sized from them | `csrc/coop_layer.cu`, `vla_cu/cuda_coop.py` | done, tested at 720/1920, 256/640 and 384/768 |
@@ -144,6 +144,7 @@ kernels, so they are used as references and as performance baselines.
 | 55 | real VLM prefix cache | 16 real backbone layers over 48 language rows, bidirectional, post-rope keys and values at 320 wide per layer | `vla_cu/prefix.py` | done, the expert cosine is unchanged against a random prefix, so prefix statistics are not the error source (EXP-104) |
 | 56 | int4 attention block | q, k, v and o at int4 group 64, with K padded to whole groups and the int4 GEMM over the chunk | `vla_cu/blocks.py`, `vla_cu/build.py` | done, one test at 6 tokens and a memcheck pass; at 50 tokens it costs 1.000 ms more and reads 0.99761 against 0.99847, so int8 stays the default (EXP-105) |
 | 57 | whole model, one graph | 16 backbone layers over 48 prefix rows write the K/V cache, 16 expert layers over 50 action tokens read it, all in one capture | `bench/full_model.py` | done, 4.899 ms against 19.638 eager, 256.52 MB, cosine 0.99992; two graphs sit within 0.8 percent (EXP-106) |
+| 58 | full 241 row prefix | 12 layer SigLIP tower, 4x4 pixel shuffle connector, 48 language rows and 1 state row, with the state block mask | `vla_cu/vision.py`, `vla_cu/prefix.py`, `bench/full_prefix.py` | done, cache 9.87 MB, build 289.93 ms, expert cosine 0.99996 at int8 down and 0.99858 at int4 down (EXP-107) |
 | 54 | int4 attention rung | int4 attention with int8 down isolates the attention error from the down error on four blocks | `bench/block.py` | done, 0.93242 at int4 attention and int8 down against 0.97606 at int8 attention and int4 down (EXP-103) |
 
 ## 7. Measurement protocol
