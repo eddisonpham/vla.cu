@@ -35,6 +35,7 @@ TASKS: dict[str, str] = {
     "floor": "bench.launch_floor",
     "body": "bench.body",
     "coop": "bench.coop",
+    "coopgated": "bench.coop_gated",
     "block": "bench.block",
     "fuzz": "bench.fuzz",
     "bundle": "bench.bundle_bench",

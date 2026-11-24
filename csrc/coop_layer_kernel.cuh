@@ -44,27 +44,31 @@ __device__ __forceinline__ float dot_four(int word, float4 a) {
     return local;
 }
 
-__global__ void coop_layer_kernel(const float* __restrict__ x,
-                                  const float* __restrict__ other,
-                                  const float* __restrict__ weight,
-                                  const signed char* __restrict__ up,
-                                  const float* __restrict__ up_scales,
-                                  const unsigned char* __restrict__ down,
-                                  const float* __restrict__ down_scales,
-                                  float* __restrict__ added,
-                                  float* __restrict__ normed,
-                                  float* __restrict__ act,
-                                  float* __restrict__ out,
-                                  int tokens,
-                                  int hidden,
-                                  int intermediate) {
-    extern __shared__ float shared[];
-    float* row = shared;
-    float* partial = shared + hidden;
+__device__ __forceinline__ float dot_row(const signed char* weights, const float* row, int hidden, int lane) {
+    float sum = 0.0f;
+    for (int base = 0; base < hidden; base += 128) {
+        const int col = base + lane * 4;
+        if (col + 4 <= hidden) {
+            const int word = *reinterpret_cast<const int*>(weights + col);
+            sum += dot_four(word, *reinterpret_cast<const float4*>(row + col));
+        } else {
+            for (int c = col; c < hidden; ++c) {
+                sum += static_cast<float>(weights[c]) * row[c];
+            }
+        }
+    }
+    return warp_sum(sum);
+}
 
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-
+__device__ __forceinline__ void add_norm_stage(const float* __restrict__ x,
+                                               const float* __restrict__ other,
+                                               const float* __restrict__ weight,
+                                               float* __restrict__ added,
+                                               float* __restrict__ normed,
+                                               float* row,
+                                               float* partial,
+                                               int tokens,
+                                               int hidden) {
     for (int token = blockIdx.x; token < tokens; token += gridDim.x) {
         float squares = 0.0f;
         for (int k = threadIdx.x; k < hidden; k += THREADS) {
@@ -87,9 +91,18 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
         }
         __syncthreads();
     }
+}
 
-    cooperative_groups::this_grid().sync();
-
+__device__ __forceinline__ void up_stage(const float* __restrict__ normed,
+                                         const signed char* __restrict__ up,
+                                         const float* __restrict__ up_scales,
+                                         float* __restrict__ act,
+                                         float* shared,
+                                         int tokens,
+                                         int hidden,
+                                         int intermediate) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
     for (int first = 0; first < tokens; first += UP_TOKENS) {
         const int held = tokens - first < UP_TOKENS ? tokens - first : UP_TOKENS;
         for (int i = threadIdx.x; i < held * hidden; i += THREADS) {
@@ -128,9 +141,82 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
         }
         __syncthreads();
     }
+}
 
-    cooperative_groups::this_grid().sync();
+__device__ __forceinline__ void gated_stage(const float* __restrict__ normed,
+                                            const signed char* __restrict__ gate,
+                                            const float* __restrict__ gate_scales,
+                                            const signed char* __restrict__ up,
+                                            const float* __restrict__ up_scales,
+                                            float* __restrict__ act,
+                                            float* shared,
+                                            int tokens,
+                                            int hidden,
+                                            int intermediate) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    for (int first = 0; first < tokens; first += UP_TOKENS) {
+        const int held = tokens - first < UP_TOKENS ? tokens - first : UP_TOKENS;
+        for (int i = threadIdx.x; i < held * hidden; i += THREADS) {
+            shared[i] = normed[(first + i / hidden) * hidden + i % hidden];
+        }
+        __syncthreads();
+        for (int out_row = blockIdx.x + gridDim.x * warp; out_row < intermediate; out_row += gridDim.x * WARPS) {
+            const signed char* gate_weights = gate + static_cast<long>(out_row) * hidden;
+            const signed char* up_weights = up + static_cast<long>(out_row) * hidden;
+            const float gate_scale = gate_scales[out_row];
+            const float up_scale = up_scales[out_row];
+            float gate_acc[UP_TOKENS];
+            float up_acc[UP_TOKENS];
+            for (int t = 0; t < held; ++t) {
+                gate_acc[t] = 0.0f;
+                up_acc[t] = 0.0f;
+            }
+            for (int base = 0; base < hidden; base += 128) {
+                const int col = base + lane * 4;
+                if (col + 4 <= hidden) {
+                    const int gate_word = *reinterpret_cast<const int*>(gate_weights + col);
+                    const int up_word = *reinterpret_cast<const int*>(up_weights + col);
+                    for (int t = 0; t < held; ++t) {
+                        const float4 values = *reinterpret_cast<const float4*>(shared + t * hidden + col);
+                        gate_acc[t] += dot_four(gate_word, values);
+                        up_acc[t] += dot_four(up_word, values);
+                    }
+                } else {
+                    for (int c = col; c < hidden; ++c) {
+                        const float gate_value = static_cast<float>(gate_weights[c]);
+                        const float up_value = static_cast<float>(up_weights[c]);
+                        for (int t = 0; t < held; ++t) {
+                            gate_acc[t] += gate_value * shared[t * hidden + c];
+                            up_acc[t] += up_value * shared[t * hidden + c];
+                        }
+                    }
+                }
+            }
+            for (int t = 0; t < held; ++t) {
+                const float gate_total = warp_sum(gate_acc[t]);
+                const float up_total = warp_sum(up_acc[t]);
+                if (lane == 0) {
+                    act[(first + t) * intermediate + out_row] =
+                        silu(gate_total * gate_scale) * (up_total * up_scale);
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
 
+__device__ __forceinline__ void down_stage(const unsigned char* __restrict__ down,
+                                           const float* __restrict__ down_scales,
+                                           const float* __restrict__ act,
+                                           const float* __restrict__ added,
+                                           float* __restrict__ out,
+                                           float* shared,
+                                           int tokens,
+                                           int hidden,
+                                           int intermediate) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
     for (int first = 0; first < tokens; first += DOWN_TOKENS) {
         const int held = tokens - first < DOWN_TOKENS ? tokens - first : DOWN_TOKENS;
         for (int i = threadIdx.x; i < held * intermediate; i += THREADS) {
@@ -166,6 +252,52 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
         }
         __syncthreads();
     }
+}
+
+__global__ void coop_layer_kernel(const float* __restrict__ x,
+                                  const float* __restrict__ other,
+                                  const float* __restrict__ weight,
+                                  const signed char* __restrict__ up,
+                                  const float* __restrict__ up_scales,
+                                  const unsigned char* __restrict__ down,
+                                  const float* __restrict__ down_scales,
+                                  float* __restrict__ added,
+                                  float* __restrict__ normed,
+                                  float* __restrict__ act,
+                                  float* __restrict__ out,
+                                  int tokens,
+                                  int hidden,
+                                  int intermediate) {
+    extern __shared__ float shared[];
+    add_norm_stage(x, other, weight, added, normed, shared, shared + hidden, tokens, hidden);
+    cooperative_groups::this_grid().sync();
+    up_stage(normed, up, up_scales, act, shared, tokens, hidden, intermediate);
+    cooperative_groups::this_grid().sync();
+    down_stage(down, down_scales, act, added, out, shared, tokens, hidden, intermediate);
+}
+
+__global__ void coop_gated_kernel(const float* __restrict__ x,
+                                  const float* __restrict__ other,
+                                  const float* __restrict__ weight,
+                                  const signed char* __restrict__ gate,
+                                  const float* __restrict__ gate_scales,
+                                  const signed char* __restrict__ up,
+                                  const float* __restrict__ up_scales,
+                                  const unsigned char* __restrict__ down,
+                                  const float* __restrict__ down_scales,
+                                  float* __restrict__ added,
+                                  float* __restrict__ normed,
+                                  float* __restrict__ act,
+                                  float* __restrict__ out,
+                                  int tokens,
+                                  int hidden,
+                                  int intermediate) {
+    extern __shared__ float shared[];
+    add_norm_stage(x, other, weight, added, normed, shared, shared + hidden, tokens, hidden);
+    cooperative_groups::this_grid().sync();
+    gated_stage(normed, gate, gate_scales, up, up_scales, act, shared, tokens, hidden, intermediate);
+    cooperative_groups::this_grid().sync();
+    down_stage(down, down_scales, act, added, out, shared, tokens, hidden, intermediate);
 }
 
 }

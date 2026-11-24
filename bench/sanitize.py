@@ -17,6 +17,7 @@ from pathlib import Path
 PROBES = (
     ("int4 gemv, three variants", "bench.probes.int4"),
     ("cooperative layer, 3, 17 and 26 tokens", "bench.probes.coop"),
+    ("gated cooperative layer, 3, 17 and 26 tokens", "bench.probes.coop_gated"),
 )
 UNSUPPORTED = "CUDA_ERROR_INVALID_HANDLE"
 
