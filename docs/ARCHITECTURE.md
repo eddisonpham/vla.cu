@@ -124,7 +124,7 @@ kernels, so they are used as references and as performance baselines.
 | 34 | body split | K step size, K length, format and program count at 50 tokens | `bench/body.py` | done, time is linear in bytes at 20 to 23 GB/s and flat in the step count, so the dequant path is the cost |
 | 35 | int8 paired tiles | menu pick against three challengers, alternating inside one process | `bench/int8_pair.py` | done, a 16 row tile won every repeat by 1.07x to 1.53x, so the menu changed |
 | 36 | cooperative hardening | device-aware shared memory setup, occupancy bound, alignment checks, token boundaries 1 to 64 | `csrc/coop_layer.cu` | done, memcheck 0 errors, 10 tests pass |
-| 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 45 passed and 199 skipped with no device |
+| 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 46 passed and 199 skipped with no device |
 | 38 | fused scaling sweep | 1 to 64 tokens, fused against the five launches, paired | `bench/coop.py` | done, 2.91x at 1 token, 1.15x at 8, 0.70x at 16, 0.25x at 64; two widths in EXP-090 |
 | 39 | tensor core body | 16 x 16 WMMA tiles over a shared activation tile, at two K staging depths | `csrc/coop_layer_kernel.cuh`, not kept | negative, 0.247 and 0.427 ms at 1 token against 0.042 for the GEMV body, reverted (EXP-084) |
 | 40 | runtime widths | hidden and intermediate from the tensors, shared memory and tile counts sized from them | `csrc/coop_layer.cu`, `vla_cu/cuda_coop.py` | done, tested at 720/1920, 256/640 and 384/768 |
@@ -136,9 +136,10 @@ kernels, so they are used as references and as performance baselines.
 | 46 | gated cooperative tail | gate and up dots share one pass over the staged norm, two grid barriers as before | `csrc/coop_layer_kernel.cuh`, `bench/coop_gated.py` | done, 3.49x and 2.36x at 1 token, crossover 12 and 8 tokens (EXP-091) |
 | 47 | graphed layer sweep | eager against `graphed()` at five shapes from 0.09 to 18.87 MB of packed weights | `bench/graph_layer.py` | done, 2.20x to 0.94x, so capture pays below about 1.5 MB (EXP-092) |
 | 48 | layer index resolver | one index plus a stack name resolves the SmolVLM2 backbone or the action expert, checked against the header | `vla_cu/build.py` | done, both stacks at one index, a wrong index names the layers held (EXP-093) |
-| 49 | whole layer builder | input norm, causal attention, residual, post norm, gated MLP, residual, both RMSNorm weights from the same index | `vla_cu/blocks.py`, `vla_cu/build.py` | done, cosine above 0.99 against an fp32 reference at 3 tokens (EXP-094); `fused=True` runs the tail in one launch, 0.59x a captured chain at 1 token (EXP-097) |
+| 49 | whole layer builder | input norm, causal attention, residual, post norm, gated MLP, residual, both RMSNorm weights from the same index | `vla_cu/blocks.py`, `vla_cu/build.py` | done, cosine above 0.99 against an fp32 reference at 3 tokens (EXP-094); `fused=True` runs the tail in one launch, 0.59x a captured chain at 1 token at 960/2560 and 0.58x at 720/1920 (EXP-097, EXP-100) |
 | 50 | gated tail in the block | `GatedMlpBlock.tail_into` calls the cooperative gated kernel with the block's own packed weights | `vla_cu/blocks.py` | done, host checks for int8 down, group 64, 64 tokens and both widths (EXP-095) |
 | 51 | bound graph capture | capture against the caller's input buffer, copy only when the pointer differs, `replay()` without a copy | `vla_cu/linear.py` | done, 4.18x to 1.02x and the copy cost measured at 5 to 10 us (EXP-096) |
+| 52 | real three layer stack | layers 0 to 2 of `lerobot/smolvla_base`, int8 against int4 down, each stack a captured graph against an fp32 graph | `bench/real_stack.py` | done, cosine 0.99986 at int8 and 0.99505 at int4, 4.2 to 5.5x fp32 at one token (EXP-099) |
 
 ## 7. Measurement protocol
 

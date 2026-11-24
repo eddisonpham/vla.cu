@@ -1313,6 +1313,30 @@
 - Verdict: the documented surface matches the code.
 - Follow-ups: none for release; the open BACKLOG items are future experiments, not unfinished work.
 
+## EXP-099: three real SmolVLA layers at int8 and int4  (2026-11-24)
+- Goal / question: EXP-043 read single matrices and EXP-036 stacked four synthetic blocks. Does int4 down hold the 0.98 gate over three real layers, and what does the stack cost? The BACKLOG item asked for exactly this.
+- Change (one thing): added `bench/real_stack.py` (task `realstack`). It builds layers 0 to 2 of `models/smolvla_base/model.safetensors` through `layer_from_checkpoint` at down 8 and down 4, compares each layer and the whole stack against an fp32 chain built from the same tensors, and times captured graphs of all three paths.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu realstack` inside vcvars, warmup 10, iterations 50, two runs.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, checkpoint 906,712,520 bytes, one token.
+- Result (measured), both runs identical on accuracy: fp32 117.99 MB, 0.800 and 0.778 ms; int8 down 29.59 MB, 0.192 and 0.177 ms, 4.17x and 4.39x fp32, cosine 0.99986, rel L2 1.69e-02; int4 down 26.36 MB, 0.154 and 0.141 ms, 5.21x and 5.50x, cosine 0.99505, rel L2 1.02e-01. Per layer, int8 reads 0.99998, 0.99995, 0.99986 and int4 reads 0.99860, 0.99768, 0.99505. Every graph replay was bit exact against its eager stack. Suite 245 passed on the GPU, 46 passed and 199 skipped with no device, style 0.
+- Explanation / hypothesis: int4 error compounds slowly rather than exploding, and it stays above the 0.98 gate after three layers because attention, gate and up stay int8 and only down loses a byte. int4 stores 3.23 MB less than int8, about 0.03 ms at the measured rate, so its 5.2x to 5.5x over fp32 is a byte effect plus the smaller down stream, not a new kernel.
+- Caveat: only three of the 16 backbone layers, one token, Gaussian activations, no VLM prefix. fp32 is captured as a graph too, because the eager fp32 chain is Python bound and read 3.8 to 4.0 ms. A first version of the bench cloned the eager output before capture and printed int4 cosine 0.66; the per-layer states and two later runs give 0.99505, the bench no longer clones, and 0.66 is treated as a bench artifact.
+- Verdict: worked. int8 down stays the quality default (DEC-039), and int4 down holds 0.995 after three real layers.
+- Follow-ups: all 16 backbone layers at both precisions; the expert stack at 50 tokens; int4 attention with int8 down.
+
+## EXP-100: does the captured cooperative tail win at 720/1920?  (2026-11-24)
+- Goal / question: EXP-097 found the fused layer tail losing to a captured chain at 960/2560. The 720 width cannot form a square attention block, so the layer bench cannot answer for it. Measure the tail alone, captured, at both widths.
+- Change (one thing): `bench/whole_layer.py` gains a tail table that captures add_norm plus the gated MLP plus the residual add against `tail_into` at 720/1920 and 960/2560. No library or kernel change.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu whole` inside vcvars, warmup 5, repeats 5, 20 iterations per repeat.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, one token.
+- Result (measured): 720/1920 chain 0.025 ms against fused 0.044, 0.58x (repeat range 0.57 to 0.58), max difference 7.2e-07; 960/2560 chain 0.033 against fused 0.066, 0.50x (0.50 to 0.73), max difference 7.2e-07.
+- Explanation / hypothesis: the smaller width does not change the verdict. The cooperative kernel pays one launch plus two grid barriers, about 19 to 33 us, while the captured five launch chain costs 25 to 33 us in total at these sizes. The 3.49x in EXP-091 came from an eager chain, so it was removing dispatch that the graph removes anyway.
+- Caveat: one token only, and this is the tail rather than a full layer, because LayerBlock needs a square attention block and 720 is not a multiple of the 64 wide head.
+- Verdict: no win at either width. DEC-089 stands.
+- Follow-ups: none; the captured chain is the fast path for the tail.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

@@ -30,9 +30,10 @@
 - [x] Package the project, add a style gate and CPU CI. Done 2026-11-23, EXP-039: editable install works, 47 CUDA comment lines moved to `docs/ARCHITECTURE.md`, gate at zero.
 - [ ] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error.
 - [x] CI removed 2026-11-23 at the human's request (DEC-042). The local gate is `style`, `pytest`, `fuzz`, and the vcvars suite. A GPU runner is moot until CI returns.
-- [x] Read real weights from `lerobot/smolvla_base`. Done 2026-11-23, EXP-043: five matrices, `python -m vla_cu real`. A three layer stack is still open.
+- [x] Read real weights from `lerobot/smolvla_base`. Done 2026-11-23, EXP-043: five matrices, `python -m vla_cu real`. Three layers measured 2026-11-24, EXP-099, `python -m vla_cu realstack`.
+- [ ] All 16 backbone layers at int8 and int4, one token, graphed; the expert stack at 50 tokens.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
-- [x] A real checkpoint with and without rotation. Done 2026-11-23, EXP-043 and DEC-045: rotation is inconsistent on real weights. A three layer stack at int8 and int4 is still open.
+- [x] A real checkpoint with and without rotation. Done 2026-11-23, EXP-043 and DEC-045: rotation is inconsistent on real weights. A three layer stack at int8 and int4 is done 2026-11-24, EXP-099: cosine 0.99986 at int8 and 0.99505 at int4, 4.2 to 5.5x fp32.
 - [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.
 - [x] Pin clocks from an elevated shell (`nvidia-smi -lgc 2000`). Done 2026-11-23, EXP-042.
 - [ ] Re-run EXP-020, EXP-021 and EXP-032 under the pinned clock, now that the spread is 0.35 percent.

@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 39 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 40 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -90,10 +90,12 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 244 tests on a GPU, 45 passed and 199 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
+| CI and gates | 245 tests on a GPU, 46 passed and 199 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
 | Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094); `fused=True` runs its tail in one launch, measured slower than a captured chain (EXP-097) |
+| Real three layer stack | three backbone layers at one token, every path a captured graph: fp32 0.778 to 0.800 ms, int8 down 0.177 to 0.192 ms (4.2 to 4.4x), int4 down 0.141 to 0.154 ms (5.2 to 5.5x), cosine 0.99986 against 0.99505 (EXP-099) |
+| Captured tail at 720 | at one token the cooperative tail reads 0.58x the captured chain at 720/1920 and 0.50x at 960/2560, so the smaller width does not change the verdict (EXP-100) |
 | Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |
 | Gated cooperative tail | one launch for a three-matrix SwiGLU MLP, gate and up computed in one pass over the staged norm: 3.49x at 1 token at 720/1920 and 2.36x at 960/2560, crossing at 12 and 8 tokens (EXP-091) |
 | Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused; `graphed(x)` binds the input buffer and drops the copy (EXP-089, EXP-096) |
@@ -176,6 +178,7 @@ python -m vla_cu layer
 python -m vla_cu coop
 python -m vla_cu coopgated
 python -m vla_cu whole
+python -m vla_cu realstack
 python -m vla_cu graphed
 python -m vla_cu style
 ```
@@ -192,7 +195,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 |---|---|---|
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
-| Test suite | `python -m pytest -q` | a CUDA device, except the 45 tests marked `cpu` |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 46 tests marked `cpu` |
 | CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 
