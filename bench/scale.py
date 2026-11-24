@@ -16,6 +16,7 @@ from torch.nn import functional as F
 
 from bench.real_layers import CHECKPOINT, MATRICES, cosine, pad_columns, relative_error, run_int4
 from kernels.triton.int4_gemv import int4_gemv_into
+from kernels.triton.rmsnorm import EPS, add_into, rmsnorm_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
     bandwidth_gb_s,
@@ -112,26 +113,32 @@ def precision_ladder(checkpoint) -> None:
 
 
 def stack_scale(checkpoint) -> None:
-    """Run the 16 real expert MLPs in order and report time, bytes and cosine at each depth.
+    """Run the 16 real expert MLPs in order, bare and again with norm and residual.
 
-    The blocks are distinct layers, so depth means the real stack rather than one layer
-    repeated. Attention and norms are absent, so this measures the weight stream per token.
+    The bare chain multiplies quantized projections only, so its activation scale drifts
+    from the fp32 reference and cosine stops describing the weights. The normed chain
+    applies the layer's own post-attention norm and adds the residual, which keeps the
+    vector on the reference's scale and costs two extra launches per layer.
     """
     print("stage 3: the real expert MLP stack, int8 up and int4 down")
-    print(f"{'blocks':>7}  {'MB':>8}  {'ms':>8}  {'us/block':>9}  {'cos':>9}")
+    print(f"{'blocks':>7}  {'MB':>7}  {'proj ms':>8}  {'normed ms':>10}  {'cos bare':>9}  {'cos normed':>11}")
     generator = torch.Generator(device="cuda").manual_seed(0)
     source = []
     blocks = []
+    norms = []
     for index in range(EXPERT_LAYERS):
-        prefix = f"model.vlm_with_expert.lm_expert.layers.{index}.mlp"
-        up = checkpoint.read(f"{prefix}.up_proj.weight").to(device="cuda", dtype=torch.float32)
-        down = checkpoint.read(f"{prefix}.down_proj.weight").to(device="cuda", dtype=torch.float32)
+        prefix = f"model.vlm_with_expert.lm_expert.layers.{index}"
+        up = checkpoint.read(f"{prefix}.mlp.up_proj.weight").to(device="cuda", dtype=torch.float32)
+        down = checkpoint.read(f"{prefix}.mlp.down_proj.weight").to(device="cuda", dtype=torch.float32)
         source.append((up, down))
         blocks.append(MlpBlock(up, down, down_bits=4))
+        norms.append(checkpoint.read(f"{prefix}.post_attention_layernorm.weight").to(device="cuda", dtype=torch.float32))
 
     hidden = blocks[0].hidden_width
     x = torch.randn(hidden, device="cuda", generator=generator)
     buffers = (torch.empty(hidden, device="cuda"), torch.empty(hidden, device="cuda"))
+    normed = torch.empty(hidden, device="cuda")
+    delta = torch.empty(hidden, device="cuda")
 
     def chain(depth: int) -> torch.Tensor:
         """Run the first `depth` blocks in order, alternating two scratch buffers."""
@@ -140,19 +147,35 @@ def stack_scale(checkpoint) -> None:
             blocks[index].into(buffers[index % 2], buffers[(index + 1) % 2])
         return buffers[depth % 2]
 
+    def normed_chain(depth: int) -> torch.Tensor:
+        """Run norm, MLP, residual for the first `depth` blocks, alternating two buffers."""
+        buffers[0].copy_(x)
+        for index in range(depth):
+            current = buffers[index % 2]
+            rmsnorm_into(current, norms[index], normed)
+            blocks[index].into(normed, delta)
+            add_into(current, delta, buffers[(index + 1) % 2])
+        return buffers[depth % 2]
+
     reference = x
+    normed_reference = x
     for depth in range(1, EXPERT_LAYERS + 1):
         up, down = source[depth - 1]
         reference = torch.mv(down, F.silu(torch.mv(up, reference)))
+        inverse_rms = torch.rsqrt(normed_reference.square().mean() + EPS)
+        normalized = normed_reference * inverse_rms * norms[depth - 1]
+        normed_reference = normed_reference + torch.mv(down, F.silu(torch.mv(up, normalized)))
         if depth not in STACKS:
             continue
-        result = chain(depth)
+        bare = chain(depth).clone()
+        scaled = normed_chain(depth).clone()
         torch.cuda.synchronize()
-        seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
+        bare_seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
+        normed_seconds = time_call(lambda d=depth: normed_chain(d), WARMUP, ITERATIONS)
         n_bytes = sum(block.bytes for block in blocks[:depth])
         print(
-            f"{depth:>7}  {n_bytes / 1e6:>8.2f}  {seconds * 1e3:>8.3f}  "
-            f"{seconds * 1e6 / depth:>9.2f}  {cosine(result, reference):>9.5f}"
+            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {bare_seconds * 1e3:>8.3f}  {normed_seconds * 1e3:>10.3f}  "
+            f"{cosine(bare, reference):>9.5f}  {cosine(scaled, normed_reference):>11.5f}"
         )
     print()
 
