@@ -6,14 +6,15 @@ import pytest
 import torch
 
 from kernels.triton.int4_gemv import int4_gemv
+from kernels.triton.int4_gemv_wide import int4_gemv_wide
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
 SHAPES = ((1, 64), (3, 128), (17, 320), (64, 960), (128, 2048))
 
 
-def reference(packed: torch.Tensor, scales: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def reference(packed: torch.Tensor, scales: torch.Tensor, x: torch.Tensor, group_size: int = GROUP_SIZE) -> torch.Tensor:
     """Dequantize to float64, then matmul, so the reference carries no fp32 error."""
-    weights = dequantize_int4(packed, scales).to(torch.float64)
+    weights = dequantize_int4(packed, scales, group_size=group_size).to(torch.float64)
     return (weights @ x.to(torch.float64)).to(torch.float32)
 
 
@@ -30,6 +31,19 @@ def test_matches_dequantize_then_matmul(n_out: int, n_in: int) -> None:
     assert out.shape == (n_out,)
     assert out.dtype == torch.float32
     torch.testing.assert_close(out, reference(packed, scales, x), rtol=1e-4, atol=1e-3)
+
+
+@pytest.mark.parametrize("group_size", (GROUP_SIZE, 16))
+def test_wide_path_matches_reference(group_size: int) -> None:
+    """Reading a row as int32 changes how bytes arrive, not which nibble owns which element."""
+    generator = torch.Generator(device="cuda").manual_seed(6)
+    w = torch.randn((37, 1024), device="cuda", generator=generator) * 0.05
+    x = torch.randn(1024, device="cuda", generator=generator)
+
+    packed, scales = pack_int4(w, group_size=group_size)
+    out = int4_gemv_wide(packed, scales, x, group_size=group_size)
+
+    torch.testing.assert_close(out, reference(packed, scales, x, group_size), rtol=1e-4, atol=1e-3)
 
 
 def test_block_k_matches_reference() -> None:

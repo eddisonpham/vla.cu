@@ -16,6 +16,7 @@ import torch
 
 from bench.scale import SHAPES, VERIFY_MAX_ELEMENTS
 from kernels.triton.int4_gemv import int4_gemv_into
+from kernels.triton.int4_gemv_wide import int4_gemv_wide_into
 from vla_cu.bench_utils import (
     PEAK_BANDWIDTH_GB_S,
     bandwidth_gb_s,
@@ -49,7 +50,7 @@ def main() -> int:
         f"{'% DRAM':>7}  {'vs triton':>10}  {'max abs diff':>12}"
     )
     best: dict[str, tuple[float, str]] = {}
-    labels = ("triton",) + tuple(f"cuda:{variant}" for variant in VARIANTS)
+    labels = ("triton", "wide") + tuple(f"cuda:{variant}" for variant in VARIANTS)
 
     for n_out, n_in in SHAPES:
         generator = torch.Generator(device="cuda").manual_seed(0)
@@ -71,6 +72,14 @@ def main() -> int:
                     samples[name].append(
                         time_call(lambda: int4_gemv_into(packed, scales, x, reference), warmup, ITERATIONS)
                     )
+                elif name == "wide":
+                    if n_in % 32:
+                        continue
+                    samples[name].append(
+                        time_call(lambda: int4_gemv_wide_into(packed, scales, x, out), warmup, ITERATIONS)
+                    )
+                    diffs[name] = max(diffs[name], torch.max(torch.abs(out - reference)).item())
+                    out.zero_()
                 else:
                     variant = name.split(":", 1)[1]
                     samples[name].append(
@@ -83,9 +92,12 @@ def main() -> int:
 
         n_bytes = moved_bytes(n_out, n_in)
         label = f"{n_out} x {n_in}"
-        seconds_by_name = {name: statistics.median(samples[name]) for name in labels}
+        seconds_by_name = {name: statistics.median(samples[name]) for name in labels if samples[name]}
         triton_seconds = seconds_by_name["triton"]
         for name in labels:
+            if not samples[name]:
+                print(f"{label:>15}  {name:>13}  skipped, K is not a multiple of 32")
+                continue
             seconds = seconds_by_name[name]
             spread = (max(samples[name]) - min(samples[name])) * 1e3
             gbs = bandwidth_gb_s(n_bytes, seconds)

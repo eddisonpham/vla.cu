@@ -3,7 +3,8 @@
 Concept: both kernels read the same 8 MB of packed weights and both report hundreds of
 GB/s, so a 69 against 88 percent gap is not a bandwidth fact, it is a codegen fact. This
 dumps the SASS of each and counts what the compiler emitted, which is what to read before
-tuning either kernel. The raw listings stay in bench/results for a line by line diff.
+tuning either kernel. Two Triton mappings are dumped: the staged one that ships, and the
+wide one that reads the row as int32. The raw listings stay in bench/results.
 
 Task: python -m vla_cu sass
 """
@@ -27,7 +28,7 @@ N_ROWS = 4096
 N_COLS = 8192
 RESULTS = Path(__file__).resolve().parent / "results"
 VARIANTS = {("0", "0"): "baseline", ("1", "0"): "unroll", ("1", "1"): "stream"}
-COLUMNS = ("LDG", "LDG.E.128", "IMAD", "FFMA", "LOP3", "SHF", "IADD3", "BRA")
+COLUMNS = ("LDG", "LDG.E.128", "IMAD", "FFMA", "LOP3", "SHF", "IADD3", "PRMT", "LDS", "BRA")
 INSTRUCTION = re.compile(r"\s*/\*[0-9a-f]{4}\*/\s+(?:@!?P\d+\s+)?([A-Z][A-Z0-9.]*)")
 FUNCTION = re.compile(r"Function : (.+)")
 
@@ -64,8 +65,18 @@ def histograms(text: str) -> dict[str, Counter]:
     return counts
 
 
+def cubin_listing(compiled, name: str) -> str:
+    """Write a compiled kernel's cubin to bench/results and return its SASS listing."""
+    cubin = compiled.asm["cubin"]
+    if isinstance(cubin, str):
+        cubin = cubin.encode("latin-1")
+    path = RESULTS / f"{name}.cubin"
+    path.write_bytes(cubin)
+    return disassemble(path)
+
+
 def triton_listing() -> str:
-    """Compile the Triton kernel at the measured shape and return its SASS."""
+    """Compile the staged Triton kernel at the measured shape and return its SASS."""
     from kernels.triton.int4_gemv import BLOCK_K, ROWS_PER_PROGRAM, int4_gemv_kernel
 
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -86,12 +97,32 @@ def triton_listing() -> str:
         W_EVICT="evict_first",
         X_EVICT="evict_last",
     )
-    cubin = compiled.asm["cubin"]
-    if isinstance(cubin, str):
-        cubin = cubin.encode("latin-1")
-    path = RESULTS / "int4_gemv_triton.cubin"
-    path.write_bytes(cubin)
-    return disassemble(path)
+    return cubin_listing(compiled, "int4_gemv_triton")
+
+
+def wide_listing() -> str:
+    """Compile the wide-load Triton kernel at the measured shape and return its SASS."""
+    from kernels.triton.int4_gemv_wide import BLOCK_K, WARPS, int4_gemv_wide_kernel
+
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(N_COLS, device="cuda", generator=generator)
+    packed = torch.randint(0, 256, (N_ROWS, N_COLS // 2), dtype=torch.uint8, device="cuda", generator=generator)
+    scales = torch.rand((N_ROWS, N_COLS // GROUP_SIZE), device="cuda", generator=generator) * 0.01
+    out = torch.empty(N_ROWS, device="cuda")
+    compiled = int4_gemv_wide_kernel[(N_ROWS,)](
+        packed.view(torch.int32),
+        scales,
+        x,
+        out,
+        N_ROWS,
+        N_COLS,
+        GROUP=GROUP_SIZE,
+        BLOCK_K=BLOCK_K,
+        num_warps=WARPS,
+        W_EVICT="evict_first",
+        X_EVICT="evict_last",
+    )
+    return cubin_listing(compiled, "int4_gemv_wide_triton")
 
 
 def cuda_listing() -> str:
@@ -114,15 +145,19 @@ def main() -> int:
     warm_gpu()
     RESULTS.mkdir(parents=True, exist_ok=True)
     triton_text = triton_listing()
+    wide_text = wide_listing()
     cuda_text = cuda_listing()
     (RESULTS / "sass_triton.txt").write_text(triton_text, encoding="utf-8")
+    (RESULTS / "sass_wide.txt").write_text(wide_text, encoding="utf-8")
     (RESULTS / "sass_cuda.txt").write_text(cuda_text, encoding="utf-8")
     print(f"GPU {torch.cuda.get_device_name(0)} | int4 GEMV {N_ROWS} x {N_COLS}, group {GROUP_SIZE}, fp32 activations")
-    print("listings: bench/results/sass_triton.txt and bench/results/sass_cuda.txt")
+    print("listings: bench/results/sass_triton.txt, sass_wide.txt and sass_cuda.txt")
     print()
     print(f"{'kernel':>22}  {'instr':>6}  " + "  ".join(f"{column:>{max(len(column), 5)}}" for column in COLUMNS))
     for counts in histograms(triton_text).values():
-        print(row("triton", counts))
+        print(row("triton staged", counts))
+    for counts in histograms(wide_text).values():
+        print(row("triton wide", counts))
     for name, counts in histograms(cuda_text).items():
         if "int4_gemv_kernel" not in name:
             continue
