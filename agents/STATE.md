@@ -33,7 +33,7 @@ removing host dispatch that a graph also removes. `fused=False` is the default (
 
 ## Gates
 
-- GPU suite 244 passed, CPU suite 45 passed and 199 skipped, style 0.
+- GPU suite 244 passed, CPU suite 45 passed and 199 skipped, style 0, clocks pinned at 1987 MHz.
 - `demo`, `graphed`, `whole`, `coopgated` exit 0.
 - Graphed block 0.021 ms at 4.5x fp32, four block stack 4.7 to 5.2x, graphs bit exact.
 
