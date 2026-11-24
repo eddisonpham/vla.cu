@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vla_cu.blocks import ActionBlock, AttentionBlock, MlpBlock
+from vla_cu.blocks import ActionBlock, AttentionBlock, MlpBlock, rotary
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -82,3 +82,28 @@ def test_rejects_matrices_that_do_not_compose() -> None:
     up, down = mlp_matrices(64, 128, 5)
     with pytest.raises(ValueError):
         MlpBlock(up, down[:, :-1])
+
+
+def test_rotary_turns_row_one_and_leaves_row_zero() -> None:
+    """Position 0 is the identity rotation, which is what lets a one token block skip it."""
+    generator = torch.Generator(device="cuda").manual_seed(6)
+    x = torch.randn((2, 15 * 64), device="cuda", generator=generator)
+
+    turned = rotary(x)
+
+    torch.testing.assert_close(turned[0], x[0])
+    assert not torch.allclose(turned[1], x[1])
+    torch.testing.assert_close(turned.norm(dim=1), x.norm(dim=1), rtol=1e-5, atol=1e-5)
+
+
+def test_rotary_moves_a_score_only_when_the_positions_differ() -> None:
+    """A rotation preserves q.k for one position and moves it for two, which is relative position."""
+    generator = torch.Generator(device="cuda").manual_seed(7)
+    q = torch.randn((2, 64), device="cuda", generator=generator)
+    k = torch.randn((2, 64), device="cuda", generator=generator)
+
+    plain = q @ k.T
+    turned = rotary(q) @ rotary(k).T
+
+    torch.testing.assert_close(turned.diagonal(), plain.diagonal(), rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(turned[0, 1], plain[0, 1])

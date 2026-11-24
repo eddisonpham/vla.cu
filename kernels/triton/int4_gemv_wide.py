@@ -44,7 +44,9 @@ def int4_gemv_wide_kernel(
     and the load can reach 16 bytes, then the run is reshaped to [groups, words per
     group] and broadcast against a shift vector to unpack eight nibbles per word. The
     group scale multiplies the group's finished sum. The reshape is what keeps the
-    weights narrow in practice: it drives the layout Triton picks for the tile.
+    weights narrow in practice: it drives the layout Triton picks for the tile, and
+    `tl.multiple_of` plus `tl.max_contiguous` on the offsets did not change either the
+    width or the speed (EXP-054).
     Expected bottleneck: memory, one weight stream plus one cached activation stream.
     """
     row = tl.program_id(axis=0)

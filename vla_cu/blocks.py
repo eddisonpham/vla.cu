@@ -30,6 +30,7 @@ from vla_cu.validate import require
 
 BITS = (4, 8)
 HEAD_DIM = 64
+THETA = 10000.0
 
 
 def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
@@ -46,21 +47,43 @@ def matrix_bytes(rows: int, cols: int, bits: int, group_size: int) -> int:
     return weights + scales
 
 
+def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
+    """Return `x` [tokens, heads * head_dim] with each row rotated to its own position.
+
+    Row i is position i, and within a head the pair (2p, 2p+1) turns by
+    i * theta ** (-2p / head_dim). Row 0 is the identity rotation, which is why a one
+    token block needs none of this. Only q and k are rotated, never v.
+    """
+    tokens = x.shape[0]
+    heads = x.shape[1] // head_dim
+    half = head_dim // 2
+    frequencies = theta ** (-2.0 * torch.arange(half, device=x.device, dtype=torch.float32) / head_dim)
+    angles = torch.arange(tokens, device=x.device, dtype=torch.float32)[:, None] * frequencies[None, :]
+    cosine = torch.cos(angles)[:, None, :]
+    sine = torch.sin(angles)[:, None, :]
+    pairs = x.reshape(tokens, heads, half, 2)
+    even = pairs[..., 0]
+    odd = pairs[..., 1]
+    rotated = torch.stack((even * cosine - odd * sine, even * sine + odd * cosine), dim=-1)
+    return rotated.reshape(tokens, heads * head_dim)
+
+
 def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM) -> Tensor:
-    """Return the attention context [tokens, heads * head_dim] for unrotated q, k and v.
+    """Return the attention context [tokens, heads * head_dim] for q, k and v.
 
     q is [tokens, heads * head_dim], k and v are [tokens, kv_heads * head_dim], with
-    kv_heads dividing heads. Scores are q.k over sqrt(head_dim), softmax runs over the
-    key axis, and each kv head serves `heads // kv_heads` query heads. No rotary
-    rotation is applied, so the scores carry no position, only content.
+    kv_heads dividing heads. q and k rotate to their row's position first, so a score
+    depends on the relative position of the pair. Scores are q.k over sqrt(head_dim),
+    softmax runs over the key axis, and each kv head serves `heads // kv_heads` query
+    heads.
     """
     tokens = q.shape[0]
     heads = q.shape[1] // head_dim
     kv_heads = k.shape[1] // head_dim
     require(heads % kv_heads == 0, f"{heads} query heads do not group {kv_heads} kv heads")
     share = torch.arange(heads, device=q.device) // (heads // kv_heads)
-    query = q.reshape(tokens, heads, head_dim)
-    key = k.reshape(tokens, kv_heads, head_dim).index_select(1, share)
+    query = rotary(q, head_dim).reshape(tokens, heads, head_dim)
+    key = rotary(k, head_dim).reshape(tokens, kv_heads, head_dim).index_select(1, share)
     value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
     scores = torch.bmm(query, key.transpose(1, 2)) * (1.0 / math.sqrt(head_dim))
     return torch.bmm(torch.softmax(scores, dim=-1), value).reshape(tokens, heads * head_dim)
@@ -169,9 +192,10 @@ class GqaTokenBlock:
 
     `wq` is [heads * 64, input_width], `wk` and `wv` are [kv_heads * 64, other_width] and
     `wo` is [hidden, heads * 64]. Every projection is one GEMV per token, so the block
-    costs four launches per token; the softmax and the value mix are a few [tokens, heads,
-    tokens] torch ops between them. `into` reads `x` [tokens, input_width] and writes `out`
-    [tokens, hidden], taking k and v from `other` [tokens, other_width] when it is given.
+    costs four launches per token; q and k rotate by their row's position, and the softmax
+    and value mix are a few [tokens, heads, tokens] torch ops between them. `into` reads
+    `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
+    `other` [tokens, other_width] when it is given.
     """
 
     def __init__(self, wq: Tensor, wk: Tensor, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM) -> None:

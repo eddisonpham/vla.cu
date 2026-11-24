@@ -218,11 +218,13 @@ def two_token_chain(checkpoint) -> None:
 
     Two tokens make the softmax choose between two keys, so a layer pays for q, k and v
     and every projection is one GEMV per token. The reference is the same chain in fp32
-    with the same weights and the same fixed cross-attention prefix. No rotary rotation
-    is applied on either side, so this prices content mixing, not position.
+    with the same weights and the same fixed cross-attention prefix. Both sides rotate q
+    and k by row position, so a score depends on relative position. Each depth is
+    also captured as one CUDA graph, checked exact against the eager run before its time
+    is printed, because 8 launches per layer is dispatch the graph can remove.
     """
     print("stage 4: two tokens through the expert stack, q and k included")
-    print(f"{'layers':>7}  {'MB':>7}  {'ms':>8}  {'cos':>9}  {'rel L2':>9}")
+    print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
     tokens = 2
     generator = torch.Generator(device="cuda").manual_seed(0)
     names = (
@@ -293,15 +295,23 @@ def two_token_chain(checkpoint) -> None:
 
     for depth in STACKS:
         result = chain(depth).clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            chain(depth)
+        current.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        exact = torch.equal(following if depth % 2 else current, result)
         seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
+        graph_seconds = time_call(graph.replay, WARMUP, ITERATIONS)
         n_bytes = sum(attention.bytes + mlp.bytes for attention, mlp, _, _ in blocks[:depth])
         flat = result.reshape(-1)
         expected = references[depth].reshape(-1)
         print(
-            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>8.3f}  "
-            f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}"
+            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
+            f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
-    print("note: no rotary rotation on either side, odd layers read the same fixed prefix [2, 320]")
+    print("note: q and k rotate by row position with theta 10000, odd layers read the same fixed prefix [2, 320]")
     print()
 
 
