@@ -371,4 +371,21 @@
 - Chosen and why: (c). Time is valid at any depth because every row runs the same kernel over the same bytes. Accuracy is only meaningful while the chain tracks the model, and this one stops doing so between depth 8 and 16.
 - Consequence: the `scale` table is a timing result. A quality claim about the expert stack needs norms and residuals first.
 - Revisit if: a norm and residual are added to the chain, or attention is included.
+- Superseded in part by: DEC-048, which restores an accuracy claim at depth 16.
+- Status: active
+
+## DEC-048: the expert stack is chained with the layer's own norm and residual  (2026-11-23)
+- Context: EXP-045 reported cosine 0.31792 at depth 16 because the chain was projections only, so DEC-047 had to restrict accuracy claims.
+- Options considered: (a) keep the caveat; (b) normalize with a unit weight; (c) apply the checkpoint's own `post_attention_layernorm.weight` and add the residual.
+- Chosen and why: (c). It is the structure the weights were trained in, it invents no constant, and cosine at depth 16 reads 0.99548 against 0.31792 bare (EXP-048).
+- Consequence: depth 16 carries an accuracy number again, and that number describes a projection chain with norm and residual, not attention.
+- Revisit if: attention enters the chain. The chain is not a diffusion forward pass, so the time constant question is still open.
+- Status: active
+
+## DEC-049: ncu runs through a task and a generated batch file  (2026-11-23)
+- Context: the inline recipe with `cmd /c "call vcvars.bat python.exe -m vla_cu cuda"` stopped at a PowerShell continuation prompt, and through ncu the quoted batch path failed with "is not recognized as an internal or external command".
+- Options considered: (a) keep a one-line recipe and document the quoting; (b) a hand written batch file; (c) a task that writes the vcvars wrapper and passes ncu an argument list with no quotes.
+- Chosen and why: (c). The human types `python -m vla_cu ncu`, the argument list is built in Python, and ncu receives `cmd /c bench\results\ncu_run.bat`, which has no quote for cmd to mis-parse.
+- Consequence: `bench/results/ncu_run.bat` is generated per run and stays out of git. A normal shell still stops at `ERR_NVGPUCTRPERM`, which the task explains in one sentence.
+- Revisit if: counters become readable by a normal user, or profiling moves to another machine.
 - Status: active

@@ -697,4 +697,38 @@
 - Verdict: works for stages 1 and 2. Stage 3 measures projection cost only; the depth 16 collapse comes from the norm-free chain, not from the kernel.
 - Follow-ups: sweep the native kernel over the same grid and compare plateaus; add a fused RMSNorm before quoting accuracy at depth; quote cosine at depth 8 or below.
 
+## EXP-046: the int8 kernel gets a torch-free header and its own sanitizer pass  (2026-11-23)
+- Goal / question: close the last sanitizer gap, since the int4 kernel had a harness and int8 only had API-level checks.
+- Change (one thing): moved the kernel into `csrc/int8_gemv_kernel.cuh` and added `csrc/standalone/int8_check.cu`. No arithmetic changed.
+- Prediction (agent's, labelled): the same treatment as int4, so a clean run on the first try with the host reference within 4e-06.
+- Command: `nvcc -std=c++17 -O3 -arch=sm_120 -o bench\results\int8_check.exe csrc\standalone\int8_check.cu` inside vcvars, then `compute-sanitizer --tool memcheck --leak-check full bench/results/int8_check.exe`.
+- GPU / environment: RTX 5060 Laptop, CUDA 12.9.2, compute-sanitizer 2025.2.1.
+- Result (measured): 511 x 1040, which is 2 full steps of 512 weights plus a 16 wide tail, and 511 rows so the warp guard runs. Kernel: no error. Worst abs error 3.815e-06 at reference 23.99. `LEAK SUMMARY: 0 bytes leaked in 0 allocations`. `ERROR SUMMARY: 0 errors`.
+- Explanation / hypothesis: the tail loop and the row guard are where the int8 kernel departs from int4, and both now run under memcheck.
+- Verdict: worked. Both CUDA kernels have a standalone sanitizer pass (DEC-046).
+- Follow-ups: none. The harness builds with the same vcvars recipe as int4.
+
+## EXP-047: native plateau against Triton on the scaling grid  (2026-11-23, task `plateau`)
+- Goal / question: does the native kernel keep its lead at every shape, or only at 8192 x 16384?
+- Change (one thing): added `bench/plateau.py` and the `plateau` task. No kernel changed.
+- Prediction (agent's, labelled): the native variants lead everywhere above the launch-bound sizes, and the gap stays near 15 points.
+- Command: `python -m vla_cu plateau` inside vcvars, median of 5 repeats of 30 iterations, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, peak 384 GB/s, L2 33.6 MB.
+- Result (measured), percent of spec: 2048 x 4096 Triton 50.3, baseline 65.7, unroll 66.0, stream 65.1. 4096 x 8192 Triton 69.4, baseline 87.6, unroll 88.0, stream 84.2. 8192 x 16384 Triton 67.9, baseline 74.7, unroll 75.5, stream 80.0. 16384 x 16384 Triton 67.7, baseline 74.7, unroll 79.1, stream 79.3. 16384 x 32768 Triton 63.3, baseline 69.4, unroll 76.5, stream 75.8, with a 0.9 to 1.4 ms range across the five repeats. Agreement with Triton: worst max abs diff 5.72e-06 at the largest shape, Triton relative L2 4.12e-07 at 8192 x 16384.
+- Explanation / hypothesis: the gap is real and about 18 points at the plateau, 88.0 against 69.4 at 4096 x 8192. Below 5 MB both are launch bound. Above 151 MB the five-repeat range grows past 1 ms, so those rows describe a throttled part, not the kernel.
+- CORRECTION to EXP-042: its 90.4 percent at 8192 x 16384 was one 20-iteration window. As a median the same shape reads 80.0 percent for stream, and the best repeated number anywhere is 88.0 percent at 4096 x 8192. Use 88 percent, not 90.4, as the native plateau.
+- Verdict: worked. The native kernel is 1.2 to 2.2 times Triton from 1024 x 1024 upward and leads at every size above 5 MB.
+- Follow-ups: compare SASS at 4096 x 8192 to name what Triton emits differently; re-run 16384 x 32768 on a cooler part before quoting those two rows.
+
+## EXP-048: the expert stack with the layer's own norm and residual  (2026-11-23, task `scale`)
+- Goal / question: can the 16 deep expert chain carry an accuracy number, given EXP-045 read cosine 0.31792 at depth 16?
+- Change (one thing): added `kernels/triton/rmsnorm.py` and a second chain in stage 3 that runs norm, MLP, residual per layer. No quantized kernel changed.
+- Prediction (agent's, labelled): the bare chain collapses because its activation scale drifts, and the normed chain holds above 0.99 at every depth at the cost of two launches per layer.
+- Command: `python -m vla_cu scale`, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, the 16 real expert MLPs, norms read from `post_attention_layernorm.weight` [720] bf16.
+- Result (measured): cosine bare against normed, depth 1 0.99460 and 0.99966, depth 2 0.98999 and 0.99930, depth 4 0.98159 and 0.99858, depth 8 0.96753 and 0.99722, depth 16 0.31792 and 0.99548. Time bare against normed: 0.090 and 0.105 ms at depth 1, 0.448 and 0.832 at depth 8, 0.850 and 1.534 at depth 16, over 37.0 MB of weights.
+- Explanation / hypothesis: the bare chain applies down(silu(up(x))) to a vector whose scale shrinks each layer, so by depth 16 the signal is below the quantization error. Norm plus residual holds the scale, and cosine then tracks the weights. The extra 0.684 ms over 16 layers is 43 us per layer, which is about two Python launches at 16.7 us each (EXP-009) plus the norm kernel, so dispatch, not bytes.
+- Verdict: worked. Depth 16 now carries cosine 0.99548. It is a projection chain plus the layer's norm and residual, not attention.
+- Follow-ups: add attention to the chain; graph the normed chain to remove the 43 us per layer of dispatch.
+
 ## EXP-045

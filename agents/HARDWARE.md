@@ -109,3 +109,12 @@ The sections above record the state before an elevated shell was used. These row
 | standalone int4 harness under memcheck | 0 errors, 0 leaks, worst error 1.788e-07 (EXP-044) |
 | `ncu` from a normal shell | still `ERR_NVGPUCTRPERM` |
 | `ncu` from the elevated shell | works, report in `bench/results/ncu_int4.ncu-rep` |
+| `ncu` through the task, normal shell | reaches ncu, stops at `ERR_NVGPUCTRPERM`, exit 1 |
+
+## Native plateau and the int8 harness (2026-11-23)
+
+| Date | Test | Result | Command | Entry |
+|---|---|---|---|---|
+| 2026-11-23, pinned clock | int8 standalone harness under memcheck | 0 errors, 0 leaks, worst error 3.815e-06 at 511 x 1040 | `compute-sanitizer --tool memcheck --leak-check full bench/results/int8_check.exe` | EXP-046 |
+| 2026-11-23, pinned clock | native against Triton, median of 5 repeats | unroll 338.0 GB/s, 88.0 percent at 4096 x 8192; Triton 266.4, 69.4 percent; stream 307.2, 80.0 at 8192 x 16384 | `python -m vla_cu plateau` in vcvars | EXP-047 |
+| 2026-11-23, pinned clock | depth 16 normed chain | 37.0 MB, 1.534 ms, cosine 0.99548 | `python -m vla_cu scale` | EXP-048 |

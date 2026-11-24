@@ -83,10 +83,12 @@ on purpose, not forgotten.
 - [x] Wrap the kernels as torch custom ops and run one layer end to end - done 2026-11-23, EXP-015, DEC-022
 - [x] Port the int4 GEMV to CUDA C++ and compare - done 2026-11-23, EXP-016, DEC-023
 - [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015). Queued as EXP-018.
-- [x] Resolve the compute-sanitizer failure on the CUDA extension. Done 2026-11-23, EXP-044: kernel in a torch-free header, standalone harness, 0 errors. The int8 kernel still needs the same split.
-- [ ] `ncu` the int4 stream variant at 8192 x 16384 from the elevated shell; the existing report is a 6.75 us small shape.
-- [ ] Sweep the native CUDA streaming kernel over the `scale` shape grid. It reads 90.4 percent where Triton plateaus at 75 (EXP-045).
-- [ ] Add a fused RMSNorm and residual so the expert stack can be chained and cosine quoted at depth 16.
+- [x] Resolve the compute-sanitizer failure on the CUDA extension. Done 2026-11-23, EXP-044 and EXP-046: both kernels in torch-free headers, both harnesses at 0 errors and 0 leaks.
+- [ ] `ncu` the int4 stream variant at 8192 x 16384 from the elevated shell. The command is now `python -m vla_cu ncu` (DEC-049); the existing report is still a 6.75 us small shape.
+- [x] Sweep the native CUDA streaming kernel over the `scale` shape grid. Done 2026-11-23, EXP-047: native 88.0 percent against Triton 69.4 at 4096 x 8192, and the 90.4 in EXP-042 does not repeat as a median.
+- [x] Add a fused RMSNorm and residual so the expert stack can be chained and cosine quoted at depth 16. Done 2026-11-23, EXP-048: 0.99548 at depth 16 against 0.31792 bare.
+- [ ] Diff the SASS of the Triton and native int4 GEMV at 4096 x 8192, to name what separates 69 percent from 88 (EXP-047).
+- [ ] Graph the normed expert chain: it pays 43 us per layer in dispatch and nothing else (EXP-048).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)
