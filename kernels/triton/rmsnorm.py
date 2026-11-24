@@ -45,6 +45,32 @@ def add_kernel(a_ptr, b_ptr, out_ptr, K, BLOCK: tl.constexpr) -> None:
     tl.store(out_ptr + offsets, total, mask=mask)
 
 
+@triton.jit
+def add_norm_kernel(
+    a_ptr,
+    b_ptr,
+    weight_ptr,
+    added_ptr,
+    normed_ptr,
+    K,
+    BLOCK: tl.constexpr,
+    EPS: tl.constexpr,
+) -> None:
+    """Write a + b and the RMSNorm of that sum for one fp32 vector of length K.
+
+    `added` receives the new residual and `normed` receives added * weight /
+    sqrt(mean(added^2) + eps), so a residual plus its norm costs one launch instead of
+    two. One program, one pass: both stores read the sum that is already in registers.
+    """
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < K
+    total = tl.load(a_ptr + offsets, mask=mask, other=0.0) + tl.load(b_ptr + offsets, mask=mask, other=0.0)
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
+    inverse_rms = 1.0 / tl.sqrt(tl.sum(total * total) / K + EPS)
+    tl.store(added_ptr + offsets, total, mask=mask)
+    tl.store(normed_ptr + offsets, total * inverse_rms * weight, mask=mask)
+
+
 def _check_vector(name: str, vector: torch.Tensor, length: int) -> None:
     """Require a contiguous fp32 vector of `length` on the device the caller uses."""
     require(vector.dim() == 1, f"{name} must be 1D, got {tuple(vector.shape)}")
@@ -69,3 +95,20 @@ def add_into(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> None:
     _check_vector("b", b, length)
     _check_vector("out", out, length)
     add_kernel[(1,)](a, b, out, length, BLOCK=triton.next_power_of_2(length))
+
+
+def add_norm_into(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    weight: torch.Tensor,
+    added: torch.Tensor,
+    normed: torch.Tensor,
+) -> None:
+    """Write a + b into `added` and its RMSNorm into `normed`, each [K], in one launch."""
+    length = a.shape[0]
+    _check_vector("a", a, length)
+    _check_vector("b", b, length)
+    _check_vector("weight", weight, length)
+    _check_vector("added", added, length)
+    _check_vector("normed", normed, length)
+    add_norm_kernel[(1,)](a, b, weight, added, normed, length, BLOCK=triton.next_power_of_2(length), EPS=EPS)
