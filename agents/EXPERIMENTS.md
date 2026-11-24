@@ -916,6 +916,49 @@
 - Verdict: the GEMM is clearly the right shape for a chunk, and it is not yet a good kernel. The loop is 24 to 42x worse, so shipping the GEMM into the block is worth it before tuning it.
 - Follow-ups: pipeline the GEMM with `num_stages` in the Marlin shape, and give it a tile menu, then repeat this table.
 
+## EXP-064: the int4 GEMM with a staged pipeline and a measured tile menu  (2026-11-23)
+- Goal / question: EXP-063 left the GEMM at 7.6 and 3.6 percent of peak. How much of that is an unpipelined K loop, and which tile does each expert shape actually want?
+- Change (one thing): the launch now takes a tile preset `(block_m, block_n, block_k, stages)` from a menu, `num_stages` comes from that preset, and `m50` sweeps nine candidates per shape.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu m50`, 5 warmup and 20 iterations, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, 26 SM, 101376 byte shared limit per block, M = 50.
+- Result (measured), 1920 x 720 group 16: 0.048 ms against 0.054 in EXP-063, 33.4 GB/s, 8.7 percent of peak, 42.2x the GEMV loop. bf16 cuBLAS 0.032 ms, 107.0 GB/s, 27.9 percent.
+- Result, 720 x 1920 group 64: 0.054 ms against 0.094, 24.1 GB/s, 6.3 percent of peak, 41.1x the loop. bf16 0.028 ms, 110.5 GB/s, 28.8 percent.
+- Sweep, 1920 x 720, ms by tile: (16,64,64,2) 0.044, (32,64,128,3) 0.048, (64,128,128,2) 0.048, (64,64,64,2) 0.054, (64,64,128,2) 0.072, (16,64,128,3) 0.064, (128,64,128,2) 0.118.
+- Sweep, 720 x 1920: (32,64,128,3) 0.056, (16,64,128,3) 0.074, (64,64,128,2) 0.092, (64,64,64,3) 0.089, (64,128,128,2) 0.125, (128,64,128,2) 0.152. The narrow shape wants 32 rows because 50 tokens then split into two row tiles and the grid doubles from 12 to 24 programs against 26 SMs.
+- Shared memory surprise: a (64,64,128,3) tile is rejected with `Required: 106496, Hardware limit: 101376` even though the four fp16 dot operands sum to 98304. Triton stages an extra buffer the formula misses, so the menu's narrow family stops at 32 rows and every preset is one the sweep actually launched.
+- Caveat: the menu lands within 0.004 to 0.008 ms of the best row, not on it, because the preset must cover every shape in its family. Single process, Gaussian weights, one shape per width.
+- Verdict: worked. 11 and 43 percent faster, and the GEMM is now ahead of bf16 nowhere, at 2.5 to 1.7x its time for twice the bytes.
+- Follow-ups: split K across programs for the narrow shape (12 or 24 programs is the real limit), and a `cp.async` mainloop in the Marlin shape.
+
+## EXP-065: the attention mix regrouped by kv head with rope inside  (2026-11-23)
+- Goal / question: EXP-062 measured the kernel reloading key and value rows once per query head. What is the mix worth with one program per (token, kv head), rope fused, and both paths timed in alternating pairs?
+- Change (one thing): `kernels/triton/gqa_attention.py` now grids (tokens, kv heads), loads the key and value rows once per group, loops the HEADS // KV_HEADS query heads of that group, and rotates from the shared cos and sine tables. `bench/attention_cross.py` times both paths paired in one process.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu attncross`, 5 warmup, 20 iterations, 5 paired repeats, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, expert layer 0, 15 query heads, 5 kv heads, head dim 64, fp32.
+- Result (measured), tokens 1, 2, 3, 4, 8, 16, 32, 50, fused ms: 0.024, 0.038, 0.036, 0.036, 0.037, 0.037, 0.034, 0.034. Einsums: 0.582, 0.791, 0.825, 0.860, 0.834, 0.882, 0.799, 0.868. Paired ratio 0.04 to 0.05 at every count, so the fused kernel is 20 to 24x faster from one token to fifty.
+- Correctness: cosine 1.000000 against `gqa_mix` at every token count, max absolute difference 8.34e-07, and the chain at 50 tokens stays exact with cosine 0.99637.
+- Explanation / hypothesis: rope was the larger half. The einsum path runs several small torch nodes per layer for the cos and sine tables plus two rotations, and at 0.58 ms for one layer it is dispatch, not arithmetic. Grouping by kv head then removes the tile reloads that made the old kernel lose at 50 tokens.
+- Caveat: per layer only, on random activations of the real widths, no graph. The end to end effect is in EXP-066.
+- Verdict: worked, and the crossover is gone: the fused kernel wins at every token count this repo cares about. `FUSED_MAX_TOKENS` is 64, where BLOCK_T stops fitting registers (DEC-064).
+- Follow-ups: the einsum path above 64 tokens is now uncharted; if a longer chunk appears, split the key axis instead of dropping back to torch.
+
+## EXP-066: chunk projections through an int8 GEMM  (2026-11-23)
+- Goal / question: EXP-063 and EXP-064 priced a GEMM against the GEMV loop, and EXP-060 counted 500 launches per layer at 50 tokens. What does the real chain cost when the token block runs its four attention projections as GEMMs?
+- Change (one thing): `GqaTokenBlock` dispatches its q, k, v and o projections to the new int8 GEMM at `GEMM_MIN_TOKENS = 2`, which is the format the block stores, and keeps the GEMV loop only at one token. Fused attention moved to 64 tokens in the same chunk (DEC-064).
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, 16 real expert layers, 5 warmup and 10 iterations for the 50 token block, clocks pinned.
+- GPU / environment: RTX 5060 Laptop, int8 attention projections, int4 down, causal, theta 100000.
+- Result (measured), depth 16 graph ms, tokens 2, 3, 4, 8, 50: 1.172, 1.419, 1.639, 2.712, 18.946. The previous run read 2.016, 2.585, 3.186, 5.934, 23.245.
+- Result, eager depth 16, same tokens: 11.072, 15.437, 19.692, 33.640, 215.646 against 23.313, 30.074, 36.188, 67.839, 360.220.
+- Launches per layer: 305 at 50 tokens against 500 before, and 17 at 2 tokens against 25.
+- Correctness: exact at every depth and token count, cosine and relative L2 identical to the previous run to every printed digit (0.99783 to 0.99637). The int8 GEMM rounds activations to fp16 inside the dot, which is why the tests check 0.9999 cosine against the GEMV loop rather than bit equality.
+- Explanation / hypothesis: two effects. Four launches instead of 4 per token is most of the 2 and 3 token gain (0.84 and 1.17 ms at depth 16), and the fused mix at 8 and 50 tokens is most of the long chunk gain (EXP-065, 20x on the mix).
+- Caveat: the GEMM and the attention regroup landed in one run, so the chain numbers are the sum of both. `attncross` and `m50` isolate each half, and the small token gains must be the GEMM because the mix is unchanged there.
+- Verdict: worked. The chunk path is 18 to 42 percent faster with no accuracy movement.
+- Follow-ups: the MLP still runs two GEMVs per token in this chain, so about 100 launches per layer are still projections; wire it the same way.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

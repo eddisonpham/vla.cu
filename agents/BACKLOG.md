@@ -106,12 +106,15 @@ on purpose, not forgotten.
 - [ ] Batch the projections over the token axis so a 50 token layer is 4 launches instead of 200. This keeps the same weight traffic as today and removes the dispatch, and it is the cheapest test of the batched idea (EXP-060).
 - [x] Compare the int4 GEMM at M = 50 against fifty GEMV launches. Done 2026-11-23, EXP-063: 41.6x and 24.5x faster on the two expert shapes, 1.6 and 1.3 MB against 52.4 and 39.4, but still 2.5 to 3.8x behind cuBLAS bf16 (DEC-062).
 - [x] Replace the two einsums in `gqa_mix` with a small fused attention kernel. Done 2026-11-23, EXP-062, DEC-061: 27 percent faster at 2 tokens, 13 percent slower at 50, so the block dispatches at 4 tokens.
-- [ ] Group the attention program by kv head so its key and value tiles load once per group, and fuse rope into the same kernel (EXP-062, TensorRT-LLM XQA, vLLM Q blocks).
-- [ ] Add `num_stages` and a tile menu to the int4 GEMM. At M = 50 it is 3.6 to 7.6 percent of peak while cuBLAS bf16 is 2.5 to 3.8x faster (EXP-063, Marlin, llama.cpp MMQ).
+- [x] Group the attention program by kv head and fuse rope into it. Done 2026-11-23, EXP-065, DEC-064: 20 to 24x faster than the einsums at every token count, so the threshold moved from 4 to 64.
+- [x] Add `num_stages` and a tile menu to the int4 GEMM. Done 2026-11-23, EXP-064: 0.048 and 0.054 ms at M = 50, 8.7 and 6.3 percent of peak, still behind cuBLAS bf16.
+- [ ] Split K across programs for the narrow expert shape. At 720 x 1920 the grid is 12 to 24 programs against 26 SMs, which is why it sits at 6.3 percent of peak (EXP-064).
+- [ ] Give the int8 GEMM its own sweep. It runs the int4 menu's shapes today, and nothing has timed its tiles (EXP-066).
 - [ ] A W4A8 rung: int4 weights with int8 activations, then compare cosine at depth 16 against the current int4 down (EXP-036, CUTLASS W4A8, LiquidGEMM).
 - [ ] Replace the hardcoded tile constants with a measured shape table, the way llama.cpp switches kernels per architecture and quant type (EXP-052, EXP-060, docs/PRODUCTION.md).
 - [ ] Cache the VLM prefix KV across calls, which is the RadixAttention idea applied to a fixed policy prefix (docs/PRODUCTION.md).
-- [ ] Run both attention paths in one process at 2, 3, 4 and 8 tokens, so the crossover is paired rather than compared across runs (EXP-062, DEC-061).
+- [x] Run both attention paths paired in one process. Done 2026-11-23, `python -m vla_cu attncross`, EXP-065: the fused kernel wins at 1 through 50 tokens by 20 to 24x.
+- [ ] Wire the MLP's two projections to the GEMMs too. At 50 tokens they are still about 100 launches per layer of the remaining 305 (EXP-066).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

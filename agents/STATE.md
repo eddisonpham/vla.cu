@@ -9,58 +9,56 @@
 
 ## Campaign
 
-The attention block is causal, its scores cover positions, and its mix is now a Triton
-kernel for short chunks and einsums for long ones. The 50 token chunk is measured, the
-int4 GEMM is measured against fifty GEMV launches, and eleven production CUDA inference
-systems are surveyed in `docs/PRODUCTION.md`. The named bottleneck is the per-token GEMV
-launch, and the fix is decided (DEC-062) but not yet wired.
+A token chunk now runs as a chunk: the four attention projections are int8 GEMMs above
+one token, the causal mix with rope is one Triton kernel up to 64 tokens, and the
+projections that remain are the MLP pair. At 50 tokens a layer issues 305 launches
+instead of 500, and the graphed chain is 18.946 ms at depth 16 instead of 23.245.
 
 ## Closed this pass
 
-- **The causal mix is one kernel for short chunks.** Depth 16 graph 2.016 and 2.585 ms at
-  2 and 3 tokens against 2.723 and 3.025 with einsums. It loses at 8 and 50, so the block
-  dispatches at `FUSED_MAX_TOKENS = 4` (EXP-062, DEC-061).
-- **An int4 GEMM at M = 50 beats the GEMV loop by 24 to 42x** on the expert matrices, and
-  is still 2.5 to 3.8x behind cuBLAS bf16, at 3.6 to 7.6 percent of peak (EXP-063).
-- **The chain runs at 50 tokens.** 23.245 ms graphed against 360.220 ms eager at depth 16,
-  exact, cosine 0.99637. 500 launches per layer counted from the code (EXP-060).
-- **`gqa_mix` was mixing over key heads, not tokens.** `torch.bmm` batched on tokens. The
-  causal mask exposed it, einsums fix it (EXP-057, DEC-059).
-- **Constants now come from the model config**: rope theta 100000 with the Llama pairing,
-  and `rms_norm_eps` 1e-05 (EXP-055, EXP-058, DEC-056, DEC-060).
-- **The real shapes are launch bound** at about 22 us while bytes move 3.6x (EXP-061).
+- **The attention mix with rope is one kernel, 20 to 24x the einsums.** 0.034 ms against
+  0.868 per layer at 50 tokens, paired in one process, cosine 1.000000, max diff 8.34e-07
+  (EXP-065, DEC-064). The threshold moved from 4 to 64 tokens.
+- **Chunk projections run as one int8 GEMM each.** Depth 16 graph at 2, 3, 4, 8, 50
+  tokens: 1.172, 1.419, 1.639, 2.712, 18.946 ms against 2.016, 2.585, 3.186, 5.934,
+  23.245. Exact everywhere, cosine unchanged (EXP-066, DEC-063).
+- **The int4 GEMM is pipelined and picks its tile from the shape.** 0.048 and 0.054 ms at
+  M = 50 against 0.054 and 0.094, 8.7 and 6.3 percent of peak, within 0.008 ms of the
+  best swept row (EXP-064).
+- **The causal mask, the score layout, the epsilon and the rope constants** are settled
+  (DEC-056, DEC-059, DEC-060, EXP-057, EXP-058).
+- **The production survey** maps 11 systems onto this repo in `docs/PRODUCTION.md`.
 
 ## What works
 
-- 27 tasks, `pytest -q` 126 passed with vcvars active, 96 passed and 23 skipped without.
-- `scale` prints four stages plus the 50 token block, with eager, graph, cosine, relative
-  L2 and an exactness column.
-- `m50` compares the GEMV loop, the int4 GEMM and cuBLAS bf16 at the expert widths.
+- 28 tasks, `pytest -q` 142 passed with vcvars active.
+- `scale` prints four stages plus the 50 token block with eager, graph, cosine, relative
+  L2 and an exactness column, and now prints its real launch count per layer.
+- `m50` compares the GEMV loop, the int4 GEMM and cuBLAS bf16, then sweeps nine tiles and
+  marks the menu's pick.
+- `attncross` times both attention paths paired in one process at eight token counts.
 - `plateau` median of 5: staged Triton 63.6 to 73.1, wide ieee 11.3 to 16.1, wide tf32
   28.3, native unroll 86.8 to 88.0 percent at 4096 x 8192 across runs.
-- `docs/PRODUCTION.md` maps 11 production systems onto this repo and ranks six gaps.
 
 ## Still open
 
-- **A 50 token layer is 500 launches.** Decided: dispatch to the int4 GEMM above a small
-  token count (DEC-062). Not wired yet.
-- **The attention kernel reloads its key tile per query head.** Group it by kv head and
-  fuse rope, then the crossover moves up.
-- **The int4 GEMM is 7.6 percent of peak at M = 50.** Needs `num_stages` and a tile menu
-  in the Marlin shape.
+- **The MLP is still two GEMVs per token.** At 50 tokens that is about 100 of the 305
+  launches per layer, and it needs the same GEMM dispatch (EXP-066).
+- **The narrow expert shape is parallelism bound.** 720 x 1920 runs 12 to 24 programs
+  against 26 SMs at 6.3 percent of peak, so it wants a K split (EXP-064).
 - **`ncu` on the large shape** needs the elevated shell: `python -m vla_cu ncu`.
-- **Run drift reaches 25 percent**, so only numbers inside one output block compare. The
-  attention crossover is the first casualty and needs a paired run.
-- **The wide mapping** lost on load width, reduction and precision (EXP-052, 054, 056, 059).
+- **Run drift reaches 25 percent** on eager paths, so only numbers inside one output
+  block compare. `attncross` and `time_pair` exist because of it.
+- **Above 64 tokens the einsums are back**, 25x slower, and only one test covers them.
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell, then say what the report shows.
-2. Pick the next question: wire the GEMM for chunks, or regroup the attention kernel.
+2. Pick the next question: MLP GEMM dispatch, or the K split for the narrow shape.
 3. Reset the lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Wire the int4 GEMM into the block above a token threshold, then re-run `scale` at 8 and 50.
-2. Group the attention program by kv head and fuse rope into it.
-3. Pipeline the int4 GEMM and give it a tile menu, then repeat `m50`.
+1. Wire the MLP up and down projections to the GEMMs, then re-run `scale` at 8 and 50.
+2. Split K across programs in the int4 GEMM for the 720-wide shape and repeat `m50`.
+3. Fuse the two norms and the residual adds so the per-token launch tail shrinks.

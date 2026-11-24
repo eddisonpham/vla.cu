@@ -484,6 +484,22 @@
 - Chosen and why: (c) at `FUSED_MAX_TOKENS = 4`. Both paths are tested against each other and cross the chain with identical cosine, so the choice is purely about time, and a named constant is easier to re-measure than a hidden branch. A shape table is the right end state (see `docs/PRODUCTION.md`), not this chunk.
 - Cost accepted: one more code path in `GqaTokenBlock.into`, and a threshold that is only solid at 2 and 3 tokens. The 4 token margin is inside run drift: the dispatch run read 3.186 against 3.139 ms at 4 tokens. The constant stays at 4 rather than fitting noise at 3, and a paired in-process comparison is in the backlog.
 - Revisit if: the kernel is regrouped by kv head, in which case it should win further up and the threshold moves.
+- Status: superseded by DEC-064 on 2026-11-23. The paired comparison happened (`attncross`) and the kernel wins at every token count, so the threshold moved to 64.
+
+## DEC-063: a chunk's attention projections run as int8 GEMMs  (2026-11-23)
+- Context: EXP-066. Above one token the block issued four GEMV launches per token, 200 of the 500 launches in a 50 token layer. The block stores int8 codes with one scale per row, and EXP-063 showed a GEMM reads the weights once per chunk instead of once per token.
+- Options considered: (a) keep the GEMV loop; (b) switch the block to int4 weights and use the int4 GEMM; (c) add an int8 GEMM and dispatch it above a token count; (d) call torch matmul on a materialized dense matrix.
+- Chosen and why: (c) with `GEMM_MIN_TOKENS = 2`. The block's weights are int8, so (b) would silently change the format the expert uses and move the cosine for a speed reason, and (d) would defeat the point of keeping weights packed. One token still runs the GEMV, because a GEMM pads that row to 16.
+- Cost accepted: one more kernel, an int8 twin of the int4 GEMM, and fp16 rounding of activations inside the dot. The chain cosine did not move at five decimals and the exactness column stays `yes`.
+- Revisit if: the attention weights move to int4, in which case the int4 GEMM replaces this one.
+- Status: active
+
+## DEC-064: the fused attention kernel runs up to 64 tokens  (2026-11-23)
+- Context: EXP-065. With one program per (token, kv head) and rope inside, the kernel is 20 to 24x faster than the einsums from 1 to 50 tokens on the real layer widths, paired in one process.
+- Options considered: (a) keep the 4 token threshold from DEC-061; (b) remove the einsum path; (c) raise the threshold to the largest token tile whose registers hold and keep the einsums above it.
+- Chosen and why: (c) at `FUSED_MAX_TOKENS = 64`. The kernel's BLOCK_T is the next power of two of the token count, so 65 tokens doubles every key and value tile in registers; the einsums are slow but bounded, and a 65 token test keeps that path alive.
+- Cost accepted: an einsum path that is 25x slower sits above 64 tokens and is only exercised by one test. If a chunk longer than 64 tokens ever matters, it needs a split key axis kernel rather than this fallback.
+- Revisit if: a longer chunk is measured, or the kernel gets a K split.
 - Status: active
 
 ## DEC-062: a chunk of tokens belongs to a GEMM, not a GEMV loop  (2026-11-23)

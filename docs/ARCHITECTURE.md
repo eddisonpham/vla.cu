@@ -7,7 +7,7 @@ Tables and diagrams only. Rules live in `CLAUDE.md`. Measured results live in
 
 | Layer | Path | Job | State |
 |---|---|---|---|
-| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `block`, `fuzz`, `bundle`, `style` |
+| Entry point | `vla_cu/__main__.py` | `python -m vla_cu <task>` | tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `attncross`, `block`, `fuzz`, `bundle`, `real`, `scale`, `plateau`, `ncu`, `sass`, `style` |
 | Harness | `vla_cu/`, `tests/`, `bench/` | reference answers, timing, memory cap | planned |
 | Kernels | `kernels/triton/`, `csrc/` | the arithmetic | started |
 | Memory | `agents/` | state, experiments, decisions | live |
@@ -110,6 +110,8 @@ kernels, so they are used as references and as performance baselines.
 | 20 | block composition | attention then MLP, precision chosen per matrix | `vla_cu/blocks.py` | done, four blocks read 0.99951 cosine at 0.140 ms |
 | 21 | fuzz gate | seeded random shapes against float64 | `bench/fuzz.py` | done, 160 cases, zero failures |
 | 22 | weight bundle | versioned archive of packed matrices, CPU load | `vla_cu/bundle.py` | done, bit exact, 5.81x smaller than fp32 |
+| 23 | chunk projections | one GEMM per projection instead of one GEMV per token, int8 twin of the int4 GEMM | `kernels/triton/int8_gemm.py`, `vla_cu/blocks.py` | done, 305 launches per 50 token layer against 500, exact |
+| 24 | fused grouped attention | program per (token, kv head), rope inside, cos and sine tables shared with the einsum path | `kernels/triton/gqa_attention.py` | done, 20 to 24x the einsums at 1 to 50 tokens, max diff 8.34e-07 |
 
 ## 7. Measurement protocol
 
