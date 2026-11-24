@@ -85,6 +85,8 @@ on purpose, not forgotten.
 - [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015). Queued as EXP-018.
 - [x] Resolve the compute-sanitizer failure on the CUDA extension. Done 2026-11-23, EXP-044: kernel in a torch-free header, standalone harness, 0 errors. The int8 kernel still needs the same split.
 - [ ] `ncu` the int4 stream variant at 8192 x 16384 from the elevated shell; the existing report is a 6.75 us small shape.
+- [ ] Sweep the native CUDA streaming kernel over the `scale` shape grid. It reads 90.4 percent where Triton plateaus at 75 (EXP-045).
+- [ ] Add a fused RMSNorm and residual so the expert stack can be chained and cosine quoted at depth 16.
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

@@ -364,3 +364,11 @@
 - Consequence: `csrc/int4_gemv_kernel.cuh` holds the kernel and its launch constants, and `csrc/standalone/int4_check.cu` is the harness. The int8 kernel does not have this split yet.
 - Revisit if: the tool learns to follow torch's launcher, or a second harness makes a shared helper worthwhile.
 - Status: active
+
+## DEC-047: scaling reports time at every depth and accuracy only while the chain tracks  (2026-11-23)
+- Context: EXP-045 chained the 16 real expert MLPs with no norms and no residuals. Time stays linear at 76 to 92 us per block, while cosine falls from 0.99460 at depth 1 to 0.31792 at depth 16.
+- Options considered: (a) report the whole depth table including cosine; (b) stop at depth 8; (c) report time at every depth and cosine only up to the depth where the chain still resembles the model.
+- Chosen and why: (c). Time is valid at any depth because every row runs the same kernel over the same bytes. Accuracy is only meaningful while the chain tracks the model, and this one stops doing so between depth 8 and 16.
+- Consequence: the `scale` table is a timing result. A quality claim about the expert stack needs norms and residuals first.
+- Revisit if: a norm and residual are added to the chain, or attention is included.
+- Status: active

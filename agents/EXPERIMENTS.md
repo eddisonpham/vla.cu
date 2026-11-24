@@ -685,3 +685,16 @@
 - Explanation / hypothesis: the `CUDA_ERROR_INVALID_HANDLE` of EXP-041 came from the tool instrumenting torch's `cuKernelGetFunction` call, not from the kernel, so removing torch from the process restores normal memcheck.
 - Verdict: worked, EXP-041 is closed for the int4 kernel.
 - Follow-ups: give the int8 kernel the same header split and harness, then put both sanitizer commands in the chunk checklist.
+
+## EXP-045: iterative scaling across shapes, group size and stack depth  (2026-11-23, task `scale`)
+- Goal / question: where does the int4 GEMV stop improving, which group size earns its bytes, and what does depth cost per token?
+- Change (one thing): added `bench/scale.py` and the `scale` task. No kernel changed.
+- Prediction (agent's, labelled): throughput plateaus above 8192 x 16384, a finer group buys accuracy at a byte cost, and per-block time falls with depth as launches amortize.
+- Command: `python -m vla_cu scale`
+- GPU / environment: RTX 5060 Laptop, clocks pinned near 1985 MHz, torch 2.8.0+cu129, Triton 3.9.0, 4 GB working cap per shape.
+- Result (measured): stage 1 plateaus at 74.6 to 75.4 percent of spec from 75.5 MB upward: 289.4 GB/s at 8192 x 16384 and 286.5 GB/s at 302 MB. Below that, 4.7 MB reads 217.2 GB/s and 0.6 MB reads 25.3 GB/s at 0.023 ms, which is launch bound. Stage 2 on vlm.0.mlp.down, groups 64 to 8: 1.38, 1.54, 1.84, 2.46 MB for cosine 0.99218, 0.99530, 0.99604, 0.99716. Stage 3 on the real expert stack: 92.49 us per block at depth 1, falling to 76.25 at depth 16, cosine 0.99460 at depth 1, 0.98159 at 4, 0.96753 at 8, 0.31792 at 16.
+- Explanation / hypothesis: the Triton kernel tops out near 75 percent, about 15 points below the native streaming kernel's 90.4 percent in EXP-042, so the plateau belongs to the implementation and not the part. Group size trades bytes almost linearly for cosine. The depth row mixes two effects: launches amortize, and quantization error compounds because the chain has no norms or residuals.
+- Verdict: works for stages 1 and 2. Stage 3 measures projection cost only; the depth 16 collapse comes from the norm-free chain, not from the kernel.
+- Follow-ups: sweep the native kernel over the same grid and compare plateaus; add a fused RMSNorm before quoting accuracy at depth; quote cosine at depth 8 or below.
+
+## EXP-045
