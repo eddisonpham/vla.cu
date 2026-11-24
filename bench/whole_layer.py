@@ -1,9 +1,9 @@
-"""One transformer layer as six launches against the fused tail, at three token counts.
+"""The fused gated tail against a captured chain, as a layer and as a tail alone.
 
-Concept: the chain is norm, attention, residual, norm, gated MLP, residual, and the fused
-option replaces the post norm, the three projections and the residual with one cooperative
-launch. Both paths are captured, so the ratio is kernel time and not host dispatch, and the
-result is that the fused tail loses to the chain at every token count measured.
+Concept: the layer table runs a whole 960/2560 layer two ways and the tail table isolates the
+same choice at 720/1920 and 960/2560, both captured, so the ratio is kernel time and not host
+dispatch. The 720 width cannot form a square attention block, which is why the tail is the
+only place that width can be compared at the layer level.
 
 Task: python -m vla_cu whole
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import torch
 
+from kernels.triton.rmsnorm import add_into, add_norm_into
 from vla_cu.bench_utils import enforce_memory_budget, time_pair, warm_gpu
 from vla_cu.blocks import GatedMlpBlock, GqaTokenBlock, LayerBlock
 from vla_cu.quant import GROUP_SIZE
@@ -21,6 +22,7 @@ INTERMEDIATE = 2560
 HEAD_DIM = 64
 KV_HEADS = 3
 TOKENS = (1, 8, 50)
+TAIL_WIDTHS = ((720, 1920), (960, 2560))
 REPEATS = 5
 ITERATIONS = 20
 WARMUP = 5
@@ -45,7 +47,7 @@ def build(tokens: int, generator: torch.Generator) -> LayerBlock:
     return LayerBlock(attention, mlp, input_norm, post_norm)
 
 
-def measure(tokens: int, generator: torch.Generator) -> int:
+def measure_layer(tokens: int, generator: torch.Generator) -> int:
     """Time captured chain and fused layers at `tokens`, returning nonzero if they disagree."""
     block = build(tokens, generator)
     x = torch.randn((tokens, HIDDEN), device="cuda", generator=generator)
@@ -66,13 +68,7 @@ def measure(tokens: int, generator: torch.Generator) -> int:
     if not torch.allclose(chain_out, fused_out, atol=TOLERANCE, rtol=TOLERANCE):
         print(f"{tokens:>6}  the fused layer disagrees with the chain, max diff {difference:.2e}")
         return 1
-    timing = time_pair(
-        chain_graph.replay,
-        fused_graph.replay,
-        ITERATIONS,
-        REPEATS,
-        WARMUP,
-    )
+    timing = time_pair(chain_graph.replay, fused_graph.replay, ITERATIONS, REPEATS, WARMUP)
     print(
         f"{tokens:>6}  {timing.a * 1e3:>9.3f}  {timing.b * 1e3:>9.3f}  {timing.ratio:>7.2f}x  "
         f"{timing.ratio_low:.2f} to {timing.ratio_high:.2f}  {difference:>9.1e}"
@@ -80,8 +76,57 @@ def measure(tokens: int, generator: torch.Generator) -> int:
     return 0
 
 
+def measure_tail(hidden: int, intermediate: int, generator: torch.Generator) -> int:
+    """Time a captured gated tail against a captured chain at one token, returning nonzero on disagreement."""
+    scale = 1.0 / hidden**0.5
+    gate = torch.randn((intermediate, hidden), device="cuda", generator=generator) * scale
+    up = torch.randn((intermediate, hidden), device="cuda", generator=generator) * scale
+    down = torch.randn((hidden, intermediate), device="cuda", generator=generator) * (1.0 / intermediate**0.5)
+    weight = torch.rand(hidden, device="cuda", generator=generator) + 0.5
+    block = GatedMlpBlock(gate, up, down, down_bits=4, group_size=GROUP_SIZE, tokens=1)
+    x = torch.randn((1, hidden), device="cuda", generator=generator)
+    other = torch.randn((1, hidden), device="cuda", generator=generator)
+    chain_added = torch.empty_like(x)
+    chain_normed = torch.empty_like(x)
+    chain_mlp = torch.empty_like(x)
+    chain_result = torch.empty_like(x)
+    fused_added = torch.empty_like(x)
+    fused_normed = torch.empty_like(x)
+    fused_result = torch.empty_like(x)
+
+    def chain() -> None:
+        add_norm_into(x, other, weight, chain_added, chain_normed)
+        block.into(chain_normed[0], chain_mlp[0])
+        add_into(chain_added, chain_mlp, chain_result)
+
+    def fused() -> None:
+        block.tail_into(x, other, weight, fused_added, fused_normed, fused_result)
+
+    chain()
+    fused()
+    chain_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(chain_graph):
+        chain()
+    fused_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(fused_graph):
+        fused()
+    chain_graph.replay()
+    fused_graph.replay()
+    torch.cuda.synchronize()
+    difference = (chain_result - fused_result).abs().max().item()
+    if not torch.allclose(chain_result, fused_result, atol=TOLERANCE, rtol=TOLERANCE):
+        print(f"{hidden:>6}  the fused tail disagrees with the chain, max diff {difference:.2e}")
+        return 1
+    timing = time_pair(chain_graph.replay, fused_graph.replay, ITERATIONS, REPEATS, WARMUP)
+    print(
+        f"{hidden:>6}  {intermediate:>12}  {timing.a * 1e3:>9.3f}  {timing.b * 1e3:>9.3f}  "
+        f"{timing.ratio:>7.2f}x  {timing.ratio_low:.2f} to {timing.ratio_high:.2f}  {difference:>9.1e}"
+    )
+    return 0
+
+
 def main() -> int:
-    """Sweep the token counts and print chain against fused for one 960/2560 layer."""
+    """Print the layer table at three token counts, then the one token tail table at two widths."""
     enforce_memory_budget()
     warm_gpu()
     print(f"GPU {torch.cuda.get_device_name(0)}")
@@ -91,7 +136,14 @@ def main() -> int:
     print(f"{'tokens':>6}  {'chain ms':>9}  {'fused ms':>9}  {'speedup':>8}  {'range':>13}  {'max diff':>9}")
     generator = torch.Generator(device="cuda").manual_seed(0)
     for tokens in TOKENS:
-        status = measure(tokens, generator)
+        status = measure_layer(tokens, generator)
+        if status:
+            return status
+    print()
+    print("gated tail alone, one token, chain is add_norm, three MLP launches and add")
+    print(f"{'hidden':>6}  {'intermediate':>12}  {'chain ms':>9}  {'fused ms':>9}  {'speedup':>8}  {'range':>13}  {'max diff':>9}")
+    for hidden, intermediate in TAIL_WIDTHS:
+        status = measure_tail(hidden, intermediate, generator)
         if status:
             return status
     return 0
