@@ -166,3 +166,17 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Finding: with `--target-processes all` the tool starts, the kernels return correct results, and it reports `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction` once per extension, one for the int4 module and one for the int8 module. It cannot resolve the handle torch's launcher uses. Setting `CUDA_MODULE_LOADING=EAGER` and `CUDA_LAUNCH_BLOCKING=1` did not finish inside 600 seconds, so that path is dropped. No memory error was reported.
 - Source: local runs, EXP-041. Confidence: high for the behavior, low for the root cause.
 - Relevance: the CUDA kernels have API-level sanitizer coverage and no kernel-level pass until an elevated run or a standalone harness.
+
+## the real checkpoint header, read without a dependency  (2026-11-23)
+- Question: what widths and dtypes does `lerobot/smolvla_base` actually store, and what is inside a safetensors file?
+- Finding: 906,712,520 bytes, 500 tensors, 474 bf16 and 26 fp32, no metadata block. The format is an 8 byte little-endian header length, a JSON table from name to dtype, shape and byte range, then the raw bytes, so one tensor costs one seek and one read. Real widths: expert hidden 720, expert MLP intermediate 2048, q_proj [960, 720], k_proj and v_proj [320, 720] in self-attention layers and [320, 320] in cross-attention layers, o_proj [720, 960], down_proj [720, 2048]. VLM text layer: hidden 960, intermediate 2560, k and v at 320. Vision layer: 768 hidden, 3072 intermediate.
+- Source: local header parse of `models/smolvla_base/model.safetensors` on 2026-11-23; the file is public and ungated on Hugging Face.
+- Confidence: high, the shapes and dtypes are read from the file itself.
+- Relevance: DEC-044, DEC-045 and the `real` task. Group 64 divides 2048, 960 and 2560, and needs a 48 column pad only on 720 wide matrices. The 1920 expert intermediate in DEC-043 is wrong.
+
+## compute-sanitizer executable location and wrapper  (2026-11-23)
+- Question: why is `compute-sanitizer` not on PATH, and what is the real binary?
+- Finding: `.../CUDA/v12.9/bin` holds only `compute-sanitizer.bat`, which calls `%~dp0\..\compute-sanitizer\compute-sanitizer.exe`. Neither is on PATH, and the wrapper works through `cmd /c`.
+- Source: local read of the batch file, 2026-11-23.
+- Confidence: high.
+- Relevance: every sanitizer command in docs and `agents/` must use the full executable path, and EXP-044 is the first clean kernel pass.

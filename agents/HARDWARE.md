@@ -94,3 +94,18 @@ To pin clocks, run an elevated shell once: `nvidia-smi -pm 1` then `nvidia-smi -
 | Date | Test | Result | Command | Commit |
 |---|---|---|---|---|
 | 2026-11-23 | int4 CUDA variants, 8192 x 16384 | Triton 0.221 ms, baseline 0.238, unroll 0.230, stream 0.208 (363.5 GB/s, 94.7 percent) | `python -m vla_cu cuda` | EXP-040 |
+| 2026-11-23, pinned clock | int4 CUDA variants, 8192 x 16384 | Triton 0.252 ms, baseline 0.274, unroll 0.237, stream 0.218 (347.2 GB/s, 90.4 percent) | `python -m vla_cu cuda` in vcvars | EXP-042 |
+
+## Clock and sanitizer updates (2026-11-23, second pass)
+
+The sections above record the state before an elevated shell was used. These rows replace them.
+
+| Fact | Value |
+|---|---|
+| `nvidia-smi -lgc 2000` from an elevated shell | applied: 1987 MHz at idle, 1980 to 1987 MHz under load |
+| throttle reason under load | 0x4, software power cap, 64.7 to 76.4 W of a 115 W maximum |
+| clock spread under load | 0.35 percent, against the 2x spread in EXP-017 |
+| `compute-sanitizer` for a kernel pass | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\compute-sanitizer\compute-sanitizer.exe`, not on PATH |
+| standalone int4 harness under memcheck | 0 errors, 0 leaks, worst error 1.788e-07 (EXP-044) |
+| `ncu` from a normal shell | still `ERR_NVGPUCTRPERM` |
+| `ncu` from the elevated shell | works, report in `bench/results/ncu_int4.ncu-rep` |

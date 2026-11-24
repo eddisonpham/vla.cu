@@ -339,3 +339,28 @@
 - Consequence: `bench/layer.py` and `bench/m50.py` may say "published" instead of "assumed". Group 64 still cannot divide 720, so DEC-030 stays open on its own terms.
 - Revisit if: a checkpoint shows a different width, which would itself be a finding.
 - Status: active
+- CORRECTION 2026-11-23: the checkpoint shows expert intermediate 2048, not 1920. The 0.75 multiplier sets the expert hidden width at 720, and the expert MLP then uses a 2048 intermediate, with q at 960, k and v at 320 and o at 720. The 1920 came from multiplying 2560 by 0.75 and was never read from a file. See `agents/RESEARCH.md`.
+
+## DEC-044: a 720-wide expert matrix is zero padded to 768, not regrouped to 16  (2026-11-23)
+- Context: EXP-043 measured both options on the real `expert.layers.0.mlp.up_proj` [2048, 720].
+- Options considered: (a) zero pad K to 768 and keep group 64; (b) group 16 at the true width; (c) a ragged last group.
+- Chosen and why: (a). 0.88 MB against 1.11 MB, 26 percent fewer bytes, 0.035 against 0.036 ms, and cosine 0.99489 against 0.99668. Padding also keeps the CUDA kernel usable, which requires K divisible by 64. The added columns are zeros and contribute exactly zero, so the pad itself costs no accuracy.
+- Consequence: a packed 720-wide matrix is stored at 768 columns, and the activation vector must carry the same 48 zero columns. int8 stays the default for these projections by DEC-039, so the case appears only when int4 is requested.
+- Revisit if: a wider measurement shows group 16 clearing the 0.98 gate where padding does not.
+- Status: active
+
+## DEC-045: rotation is not used on real SmolVLA weights  (2026-11-23)
+- Context: DEC-034 left rotation opt-in pending a real checkpoint. EXP-043 ran it on three real matrices with K divisible by 64.
+- Options considered: (a) rotate by default; (b) keep it opt-in; (c) drop it.
+- Chosen and why: (b). Measured cosine moved 0.99218 to 0.99455, 0.99383 to 0.99402 and 0.99459 to 0.99384, so the sign is not consistent and the best gain is 0.0024, against two matmuls per block in the fast path (EXP-030).
+- Consequence: the fast path stays unrotated, and `real` keeps the rotated row in its table so another weight distribution can be checked in one command.
+- Revisit if: a layer with a known outlier channel is quantized, or a fused rotation kernel removes the cost.
+- Status: active
+
+## DEC-046: kernels live in a torch-free header, and the sanitizer runs a standalone harness  (2026-11-23)
+- Context: EXP-041 blocked the kernel-level sanitizer pass because torch's launcher asks for a handle the tool cannot resolve.
+- Options considered: (a) keep retrying the extension under the tool; (b) copy the kernel into a standalone file; (c) move the kernel into a header shared by the extension and a standalone harness.
+- Chosen and why: (c). One copy of the kernel, two entry points, and the sanitizer runs under memcheck with zero errors (EXP-044). (b) would let the copy drift.
+- Consequence: `csrc/int4_gemv_kernel.cuh` holds the kernel and its launch constants, and `csrc/standalone/int4_check.cu` is the harness. The int8 kernel does not have this split yet.
+- Revisit if: the tool learns to follow torch's launcher, or a second harness makes a shared helper worthwhile.
+- Status: active

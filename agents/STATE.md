@@ -9,49 +9,47 @@
 
 ## Campaign
 
-Five improvement cycles are complete, EXP-034 to EXP-039. The temporary `CLAUDE.md`
-section was removed after cycle 4. This pass closed the limitations that could be closed.
+The limitations pass is nearly complete. Five improvement cycles (EXP-034 to EXP-039) closed
+the earlier items; this pass closed the checkpoint, the clock lock, the sanitizer and the
+720-wide decision. Profiling on the large shape is the one thing left, and it needs the
+human's elevated shell.
 
 ## Closed this pass
 
-- Model widths are read, not assumed: 960 and 2560 from the SmolVLM2-500M config,
-  expert 720 and 1920 from the 0.75 multiplier (DEC-043, RESEARCH 2026-11-23).
-- The CUDA baseline regression does not reproduce: baseline 0.238 ms and stream
-  0.208 ms at 8192 x 16384, stream at 94.7 percent of peak (EXP-040).
-- `docs/PRIMER.md` deleted. The CI workflow deleted at the human's request (DEC-042);
-  `python -m vla_cu style` stays as the local gate.
-- compute-sanitizer now starts on the extension with `--target-processes all`. It
-  reports `CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction` and no memory error
-  (EXP-041). Eager loading with blocking launches hung past 600 s and is dropped.
+- **Real weights are in and measured.** 906,712,520 bytes, 500 tensors, expert hidden 720
+  and expert intermediate 2048 (EXP-043, DEC-044). int8 reads 0.99995 or better on five
+  real matrices, int4 group 64 reads 0.992 to 0.995.
+- **Clocks are pinned.** The elevated `nvidia-smi -lgc 2000` holds at 1980 to 1987 MHz,
+  0.35 percent spread, power capped at about 70 W (EXP-042).
+- **The int4 kernel has a clean sanitizer pass.** Kernel moved to a torch-free header and a
+  standalone harness reports 0 errors and 0 leaks (EXP-044, DEC-046).
+- **The 720-wide case is decided.** Zero pad to 768 beats group 16 on bytes and time, and
+  loses 0.0018 cosine (DEC-044). Rotation stays opt-in (DEC-045).
 
 ## What works
 
-- 22 tasks, `pytest -q` 96 passed and 23 skipped outside vcvars, 119 passed inside it.
-- int8 grouped attention 0.99994 at 0.019 ms graphed (EXP-035).
-- Four action blocks at int8 everywhere: 0.99951 cosine, 0.140 ms, 3.94x fp32 (EXP-036).
-- `fuzz` 160 seeded cases, zero failures. `bundle` bit exact, 5.81x smaller than fp32.
-- `style` zero violations, editable install works from outside the repo.
+- 23 tasks, `pytest -q` 96 passed and 23 skipped outside vcvars, 119 passed inside it.
+- Locked `cuda` table at 8192 x 16384: stream 0.218 ms, 347.2 GB/s, 90.4 percent of spec.
+- int8 action blocks 0.99951 cosine at 0.140 ms, 3.94x fp32 (EXP-036).
+- `style` zero violations, `bundle` bit exact, `fuzz` 160 seeded cases clean.
 
 ## Still open
 
-- **The checkpoint weights are not downloaded.** The configs are read and the file is
-  public, 865 MiB. Needs the human's go-ahead before a download.
-- **No administrator rights.** `ncu` is denied and clocks cannot be pinned, so a
-  difference under 6 percent is not a result (DEC-029, DEC-035).
-- **No kernel-level sanitizer pass** on the two CUDA extensions (EXP-041).
-- Group 64 does not divide the expert hidden width 720 (DEC-030), decision open.
-- No CI. The local gate is manual by choice (DEC-042).
+- **`ncu` on the large shape** needs the elevated shell. The existing report covers a small
+  shape at 6.75 us and 26 percent of DRAM, which is the latency regime, not the headline.
+- **The int8 kernel has no standalone harness**, so its sanitizer pass is still API level.
+- **No three layer stack at M = 50** on real weights; EXP-043 measures one matrix at a time.
+- Group 16 was not retested above 720, and the 0.98 gate has not been checked end to end on
+  real weights.
 
 ## What the human can do
 
-1. Approve the 865 MiB `model.safetensors` download, and set `HF_TOKEN` only if the
-   public route fails.
-2. Run an elevated shell once: `nvidia-smi -pm 1`, `nvidia-smi -lgc 2000`, then launch
-   `ncu` and `compute-sanitizer` from a terminal started as Administrator.
-3. Decide padding 720 to 768 against group 16 for the expert (DEC-030).
+1. Run `ncu` for the int4 stream variant at the large shape, from the elevated shell.
+2. Say what "iterative scaling" means, so it can be built next.
+3. Reset the lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Convert three checkpoint layers, cosine per layer, with and without rotation.
-2. The missing rung from EXP-036: int4 attention with int8 down.
-3. Settle DEC-030 with a 720-wide quality and time comparison.
+1. Three real layers end to end, cosine per layer at int8 and at int4.
+2. The int8 header split and harness, closing the last sanitizer gap.
+3. A shape sweep that grows N and K until the kernel stops being memory bound.

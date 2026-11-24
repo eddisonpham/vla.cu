@@ -23,21 +23,22 @@
 - [x] EXP-026 H11: rotation lifts outlier cosine 0.98788 to 0.99586 at no byte cost.
 
 ## Next, ranked by the evidence (detail in `OPTIMIZATIONS.md` section 9)
-- [ ] Pin clocks with `nvidia-smi -lgc` (needs admin) and repeat EXP-017, EXP-020, EXP-021, EXP-022.
+- [x] Pin clocks with `nvidia-smi -lgc` (needs admin). Done 2026-11-23, EXP-042: holds at 1980 to 1987 MHz, 0.35 percent spread. The repeat of EXP-017, EXP-020, EXP-021 and EXP-022 is still open, listed below.
 - [x] Wire the measured wins into a default path. Done 2026-11-23, EXP-027 and EXP-028: native int8 and int4 streaming kernels, launched on the torch stream so they capture, one block 0.015 ms against fp32's 0.069, bit exact.
 - [x] Grouped launch in a real attention block. Done 2026-11-23, EXP-031: two launches, 0.011 ms graphed against fp32's 0.052, bit exact, cosine 0.98804.
 - [x] An int8 grouped kernel. Done 2026-11-23, EXP-035: the attention block reads 0.99994 at int8 for 1.54x the int4 time.
 - [x] Package the project, add a style gate and CPU CI. Done 2026-11-23, EXP-039: editable install works, 47 CUDA comment lines moved to `docs/ARCHITECTURE.md`, gate at zero.
 - [ ] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error.
 - [x] CI removed 2026-11-23 at the human's request (DEC-042). The local gate is `style`, `pytest`, `fuzz`, and the vcvars suite. A GPU runner is moot until CI returns.
-- [ ] Convert three layers of `lerobot/smolvla_base` once the 865 MiB `model.safetensors` download is approved. The configs are read, so only the weights are missing.
+- [x] Read real weights from `lerobot/smolvla_base`. Done 2026-11-23, EXP-043: five matrices, `python -m vla_cu real`. A three layer stack is still open.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
-- [ ] A real checkpoint: three layers, cosine per layer, with and without rotation, which is the only way to settle DEC-034.
+- [x] A real checkpoint with and without rotation. Done 2026-11-23, EXP-043 and DEC-045: rotation is inconsistent on real weights. A three layer stack at int8 and int4 is still open.
 - [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.
-- [ ] Pin clocks from an elevated shell (`nvidia-smi -lgc 2000`) and re-run the inconclusive experiments (EXP-032).
+- [x] Pin clocks from an elevated shell (`nvidia-smi -lgc 2000`). Done 2026-11-23, EXP-042.
+- [ ] Re-run EXP-020, EXP-021 and EXP-032 under the pinned clock, now that the spread is 0.35 percent.
 - [ ] A capture-safety check in the tests: assert `torch.equal` between a graph and the eager chain for any kernel added later (the rule in DEC-031).
 - [ ] Write an int4 GEMM that dequantizes into `tl.dot`, and sweep M from 1 to 64 for the GEMV crossover.
-- [ ] Decide group 16 against padding to 768 for the 720-wide expert (DEC-030).
+- [x] Decide group 16 against padding to 768 for the 720-wide expert. Done 2026-11-23, DEC-044: pad to 768, 26 percent fewer bytes for 0.0018 cosine.
 - [ ] Download `lerobot/smolvla_base` config and index, then re-run EXP-023 and EXP-026 on real weights.
 - [ ] Make every table best-of-N with the run count stated (DEC-029).
 - [x] Explain the CUDA baseline regression. Done 2026-11-23, EXP-040: it does not reproduce. Baseline 0.238 ms and stream 0.208 ms at 8192 x 16384 in one process, so the 0.476 reading was a clock outlier.
@@ -82,7 +83,8 @@ on purpose, not forgotten.
 - [x] Wrap the kernels as torch custom ops and run one layer end to end - done 2026-11-23, EXP-015, DEC-022
 - [x] Port the int4 GEMV to CUDA C++ and compare - done 2026-11-23, EXP-016, DEC-023
 - [ ] CUDA-graph the MLP block: the fused path loses to fp32 only through dispatch (EXP-015). Queued as EXP-018.
-- [ ] Resolve the compute-sanitizer failure on the CUDA extension, or run `ncu` on both kernels instead
+- [x] Resolve the compute-sanitizer failure on the CUDA extension. Done 2026-11-23, EXP-044: kernel in a torch-free header, standalone harness, 0 errors. The int8 kernel still needs the same split.
+- [ ] `ncu` the int4 stream variant at 8192 x 16384 from the elevated shell; the existing report is a 6.75 us small shape.
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

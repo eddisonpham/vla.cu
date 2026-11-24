@@ -652,3 +652,36 @@
 - Explanation / hypothesis: the tool instruments the API but cannot resolve the kernel handle torch's launcher asks for, so no kernel-level pass happens. No memory error was reported, which is not the same as a clean pass.
 - Verdict: blocked, with a narrower cause than EXP-016.
 - Follow-ups: retry from an elevated shell; a standalone CUDA harness without torch's launcher is the fallback.
+
+## EXP-042: clocks pinned, and the locked rerun of the int4 table  (2026-11-23, commit 9c9da03)
+- Goal / question: does an elevated `nvidia-smi -lgc 2000` hold on this laptop part, and how much of the 2x spread in EXP-017 was clock state?
+- Change (one thing): none. The human ran `nvidia-smi -lgc 2000` from an elevated PowerShell; the harness and the benchmark are unchanged.
+- Prediction (agent's, labelled): the lock holds within 3 percent under load, and the locked table moves by less than the 6 percent floor of DEC-029 between repeats.
+- Command: `nvidia-smi -lgc 2000` (elevated), then `python -m vla_cu cuda` inside vcvars; clocks sampled every 2 s during a 14 s fp16 matmul loop with `nvidia-smi --query-gpu=clocks.sm,power.draw,clocks_throttle_reasons.active --format=csv,noheader`.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, driver 617.42, torch 2.8.0+cu129, MSVC 14.44.
+- Result (measured): the SM clock held 1980 to 1987 MHz through the load, a 0.35 percent spread, throttle reason 0x4 (software power cap) at 64.7 to 76.4 W, and 1987 MHz at idle. One 5 s sample read 1875 MHz before the load ramped. Locked `cuda` table at 8192 x 16384: Triton 0.252 ms (299.9 GB/s, 78.1 percent), baseline 0.274 (275.6, 71.8), unroll 0.237 (319.1, 83.1), stream 0.218 (347.2, 90.4). At 4096 x 2048 stream 0.020 ms, 236.0 GB/s, 61.4 percent. At 1024 x 1024 unroll 0.019 ms.
+- Explanation / hypothesis: the lock removes the boost algorithm, so the remaining variation is the power cap at work. The part sits near 70 W of a 115 W maximum and cannot raise its clock under a sustained matmul. Absolute numbers are lower than the unlocked 0.208 ms stream reading in EXP-040 because that sample ran near a 2400 MHz boost clock that the lock forbids.
+- Verdict: worked. Clock pinning is available on this machine, so DEC-035's paired alternation is no longer the only method.
+- Follow-ups: quote the lock in every future table, rerun EXP-020, EXP-021 and EXP-032 under it, and reset with `nvidia-smi -rgc` when the session ends.
+
+## EXP-043: int4 and int8 accuracy on the real checkpoint  (2026-11-23, commit caba912)
+- Goal / question: do the synthetic Gaussian results survive real SmolVLA weights, and what happens to group 64 when K is 720 (DEC-030, DEC-034)?
+- Change (one thing): added `vla_cu/checkpoint.py`, a stdlib safetensors reader, and the `real` task.
+- Prediction (agent's, labelled): int8 stays above 0.999, int4 group 64 lands near 0.99 on real weights, and group 16 buys less than the synthetic outlier test suggested.
+- Command: `python -m vla_cu real`
+- GPU / environment: RTX 5060 Laptop with clocks pinned near 1985 MHz, torch 2.8.0+cu129, checkpoint `models/smolvla_base/model.safetensors` at 906,712,520 bytes.
+- Result (measured): int8 cosine 0.99995 to 0.99998. int4 group 64 0.99218 to 0.99504. int4 group 16 0.99604 to 0.99697 at 1.33x the int4 bytes. Padding K 720 to 768 reads 0.99489 at 0.88 MB and 0.035 ms against group 16 at 0.99668, 1.11 MB and 0.036 ms. Rotation on top of group 64 changes 0.99218 to 0.99455 on vlm down, 0.99383 to 0.99402 on vlm gate, and 0.99459 to 0.99384 on expert down, so the sign is not consistent.
+- Explanation / hypothesis: real weights are close to Gaussian inside a group, so the 16 levels of int4 carry almost all of the error and only a finer group moves it. Rotation pays only where a group holds a planted outlier, which these weights do not. int4 is slower than int8 at these sizes because 4 to 9 us per call is launch bound, not bandwidth bound.
+- Verdict: worked, and it settles two open decisions.
+- Follow-ups: run a three layer stack rather than one matrix at a time, then compare the same layers at M = 50.
+
+## EXP-044: compute-sanitizer passes on a standalone int4 harness  (2026-11-23, commit 9c9da03)
+- Goal / question: can the int4 kernel get a kernel-level memcheck with torch's launcher out of the process?
+- Change (one thing): moved the kernel into `csrc/int4_gemv_kernel.cuh`, included by both the extension and `csrc/standalone/int4_check.cu`.
+- Prediction (agent's, labelled): zero errors and agreement with a host reference, because the same kernel passes every torch test.
+- Command: `nvcc -std=c++17 -O3 -arch=sm_120 -o bench/results/int4_check.exe csrc/standalone/int4_check.cu` inside vcvars, then `compute-sanitizer --tool memcheck --leak-check full bench/results/int4_check.exe`.
+- GPU / environment: RTX 5060 Laptop, CUDA 12.9. The executable is at `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\compute-sanitizer\compute-sanitizer.exe`; `bin\compute-sanitizer.bat` is only a wrapper and neither is on PATH.
+- Result (measured): 512 x 1024, three variants, `ERROR SUMMARY: 0 errors`, `LEAK SUMMARY: 0 bytes leaked in 0 allocations`, worst absolute error 1.788e-07 against a host reference. The extension still builds and the vcvars suite reads 119 passed after the refactor.
+- Explanation / hypothesis: the `CUDA_ERROR_INVALID_HANDLE` of EXP-041 came from the tool instrumenting torch's `cuKernelGetFunction` call, not from the kernel, so removing torch from the process restores normal memcheck.
+- Verdict: worked, EXP-041 is closed for the int4 kernel.
+- Follow-ups: give the int8 kernel the same header split and harness, then put both sanitizer commands in the chunk checklist.
