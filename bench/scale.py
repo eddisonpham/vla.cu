@@ -221,9 +221,9 @@ def token_chain(checkpoint, tokens: int) -> None:
     eight, so every token feeds every other one and a layer pays for q, k and v. Every
     projection is one GEMV per token, so a layer issues four launches per token. The
     reference is the same chain in fp32 with the same weights, the same fixed
-    cross-attention prefix and the same rotation. Attention is not causal here, so token
-    0 already sees the last token. Each depth is also captured as one CUDA graph, checked
-    exact against the eager run before its time is printed.
+    cross-attention prefix and the same rotation. Attention is causal, so token i reads
+    keys 0 to i, which is the schedule the expert runs. Each depth is also captured as one
+    CUDA graph, checked exact against the eager run before its time is printed.
     """
     print(f"stage 4: {tokens} tokens through the expert stack, q and k included")
     print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
@@ -312,7 +312,7 @@ def token_chain(checkpoint, tokens: int) -> None:
             f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
             f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
-    print(f"note: q and k rotate by position with theta {THETA:.0f} and the Llama pairing, attention is not causal")
+    print(f"note: q and k rotate by position with theta {THETA:.0f} and the Llama pairing, attention is causal")
     print()
 
 

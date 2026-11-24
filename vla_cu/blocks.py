@@ -70,14 +70,15 @@ def rotary(x: Tensor, head_dim: int = HEAD_DIM, theta: float = THETA) -> Tensor:
     return rotated.reshape(tokens, heads * head_dim)
 
 
-def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM) -> Tensor:
+def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM, causal: bool = True) -> Tensor:
     """Return the attention context [tokens, heads * head_dim] for q, k and v.
 
     q is [tokens, heads * head_dim], k and v are [tokens, kv_heads * head_dim], with
     kv_heads dividing heads. q and k rotate to their row's position first, so a score
-    depends on the relative position of the pair. Scores are q.k over sqrt(head_dim),
-    softmax runs over the key axis, and each kv head serves `heads // kv_heads` query
-    heads.
+    depends on the relative position of the pair. Scores are [heads, tokens, tokens],
+    q.k over sqrt(head_dim), with future keys set to -inf when `causal` so token i reads
+    keys 0 to i and the chain runs the schedule the expert runs. Softmax runs over the
+    key axis and each kv head serves `heads // kv_heads` query heads.
     """
     tokens = q.shape[0]
     heads = q.shape[1] // head_dim
@@ -87,8 +88,12 @@ def gqa_mix(q: Tensor, k: Tensor, v: Tensor, head_dim: int = HEAD_DIM) -> Tensor
     query = rotary(q, head_dim).reshape(tokens, heads, head_dim)
     key = rotary(k, head_dim).reshape(tokens, kv_heads, head_dim).index_select(1, share)
     value = v.reshape(tokens, kv_heads, head_dim).index_select(1, share)
-    scores = torch.bmm(query, key.transpose(1, 2)) * (1.0 / math.sqrt(head_dim))
-    return torch.bmm(torch.softmax(scores, dim=-1), value).reshape(tokens, heads * head_dim)
+    scores = torch.einsum("thd,shd->hts", query, key) * (1.0 / math.sqrt(head_dim))
+    if causal:
+        future = torch.ones(tokens, tokens, dtype=torch.bool, device=q.device).triu(1)
+        scores = scores.masked_fill(future[None], float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
+    return torch.einsum("hts,shd->thd", weights, value).reshape(tokens, heads * head_dim)
 
 
 class MlpBlock:
@@ -194,8 +199,9 @@ class GqaTokenBlock:
 
     `wq` is [heads * 64, input_width], `wk` and `wv` are [kv_heads * 64, other_width] and
     `wo` is [hidden, heads * 64]. Every projection is one GEMV per token, so the block
-    costs four launches per token; q and k rotate by their row's position, and the softmax
-    and value mix are a few [tokens, heads, tokens] torch ops between them. `into` reads
+    costs four launches per token; q and k rotate by their row's position, the softmax is
+    causal so a token reads only itself and earlier tokens, and the score and value mix
+    are two [heads, tokens, tokens] einsums between them. `into` reads
     `x` [tokens, input_width] and writes `out` [tokens, hidden], taking k and v from
     `other` [tokens, other_width] when it is given. `tokens` fixes the buffer shapes, so
     one block serves one token count and a graph captures that count.

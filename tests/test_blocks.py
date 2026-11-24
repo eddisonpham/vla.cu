@@ -125,3 +125,17 @@ def test_gqa_token_block_mixes_three_keys() -> None:
     exact = gqa_mix(x @ wq.T, x @ wk.T, x @ wv.T, head_dim=8) @ wo.T
     assert out.shape == (3, 32)
     assert cosine(out.reshape(-1), exact.reshape(-1)) > 0.995
+
+
+def test_gqa_mix_masks_future_keys() -> None:
+    """A causal block lets token 0 see one key, so its context is that key's value alone."""
+    generator = torch.Generator(device="cuda").manual_seed(9)
+    q = torch.randn((3, 16), device="cuda", generator=generator)
+    k = torch.randn((3, 8), device="cuda", generator=generator)
+    v = torch.randn((3, 8), device="cuda", generator=generator)
+
+    causal = gqa_mix(q, k, v, head_dim=8)
+    full = gqa_mix(q, k, v, head_dim=8, causal=False)
+
+    torch.testing.assert_close(causal[0], v[0].repeat(2))
+    assert not torch.allclose(full[0], v[0].repeat(2))
