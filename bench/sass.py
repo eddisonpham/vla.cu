@@ -102,7 +102,7 @@ def triton_listing() -> str:
 
 def wide_listing() -> str:
     """Compile the wide-load Triton kernel at the measured shape and return its SASS."""
-    from kernels.triton.int4_gemv_wide import BLOCK_K, WARPS, int4_gemv_wide_kernel
+    from kernels.triton.int4_gemv_wide import BLOCK_K, DOT_LANES, PRECISION, WARPS, int4_gemv_wide_kernel
 
     generator = torch.Generator(device="cuda").manual_seed(0)
     x = torch.randn(N_COLS, device="cuda", generator=generator)
@@ -118,6 +118,8 @@ def wide_listing() -> str:
         N_COLS,
         GROUP=GROUP_SIZE,
         BLOCK_K=BLOCK_K,
+        DOT_LANES=DOT_LANES,
+        PRECISION=PRECISION,
         num_warps=WARPS,
         W_EVICT="evict_first",
         X_EVICT="evict_last",
