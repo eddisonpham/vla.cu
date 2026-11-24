@@ -40,6 +40,8 @@ TASKS: dict[str, str] = {
     "bundle": "bench.bundle_bench",
     "real": "bench.real_layers",
     "scale": "bench.scale",
+    "demo": "bench.demo",
+    "sanitize": "bench.sanitize",
     "plateau": "bench.plateau",
     "ncu": "bench.ncu_profile",
     "sass": "bench.sass",
