@@ -25,7 +25,7 @@ from vla_cu.bench_utils import (
     time_call,
     warm_gpu,
 )
-from vla_cu.blocks import MlpBlock
+from vla_cu.blocks import GqaValueBlock, MlpBlock
 from vla_cu.checkpoint import open_checkpoint
 from vla_cu.quant import GROUP_SIZE, dequantize_int4, pack_int4
 
@@ -112,71 +112,104 @@ def precision_ladder(checkpoint) -> None:
     print()
 
 
-def stack_scale(checkpoint) -> None:
-    """Run the 16 real expert MLPs in order, bare and again with norm and residual.
+def reference_norm(vector: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Return the fp32 RMSNorm of `vector` [K], scaled by the learned `weight` [K]."""
+    return vector * torch.rsqrt(vector.square().mean() + EPS) * weight
 
-    The bare chain multiplies quantized projections only, so its activation scale drifts
-    from the fp32 reference and cosine stops describing the weights. The normed chain
-    applies the layer's own post-attention norm and adds the residual, which keeps the
-    vector on the reference's scale and costs two extra launches per layer.
+
+def stack_scale(checkpoint) -> None:
+    """Run the 16 real expert layers three ways: projections, full layer, graphed layer.
+
+    The projection chain multiplies quantized matrices only, so its activation scale drifts
+    from the fp32 reference. The layer chain adds both norms, the attention value path and
+    the residuals, which is the layer SmolVLA runs. The graphed chain replays those kernels
+    as one submission, which removes the per-layer Python dispatch.
     """
-    print("stage 3: the real expert MLP stack, int8 up and int4 down")
-    print(f"{'blocks':>7}  {'MB':>7}  {'proj ms':>8}  {'normed ms':>10}  {'cos bare':>9}  {'cos normed':>11}")
+    print("stage 3: the real expert stack, int8 attention and up, int4 down")
+    print(f"{'layers':>7}  {'MB':>7}  {'proj ms':>8}  {'layer ms':>9}  {'graph ms':>9}  {'cos proj':>9}  {'cos layer':>10}  {'exact':>5}")
     generator = torch.Generator(device="cuda").manual_seed(0)
+    names = (
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight",
+        "input_layernorm.weight",
+        "post_attention_layernorm.weight",
+    )
     source = []
-    blocks = []
-    norms = []
+    layers = []
     for index in range(EXPERT_LAYERS):
         prefix = f"model.vlm_with_expert.lm_expert.layers.{index}"
-        up = checkpoint.read(f"{prefix}.mlp.up_proj.weight").to(device="cuda", dtype=torch.float32)
-        down = checkpoint.read(f"{prefix}.mlp.down_proj.weight").to(device="cuda", dtype=torch.float32)
-        source.append((up, down))
-        blocks.append(MlpBlock(up, down, down_bits=4))
-        norms.append(checkpoint.read(f"{prefix}.post_attention_layernorm.weight").to(device="cuda", dtype=torch.float32))
+        wv, wo, up, down, input_norm, post_norm = (
+            checkpoint.read(f"{prefix}.{name}").to(device="cuda", dtype=torch.float32) for name in names
+        )
+        attention = GqaValueBlock(wv, wo)
+        prefix = None
+        if attention.input_width != attention.hidden_width:
+            prefix = torch.randn(attention.input_width, device="cuda", generator=generator)
+        source.append((wv, wo, up, down, input_norm, post_norm))
+        layers.append((attention, MlpBlock(up, down, down_bits=4), (input_norm, post_norm), prefix))
 
-    hidden = blocks[0].hidden_width
+    hidden = layers[0][1].hidden_width
     x = torch.randn(hidden, device="cuda", generator=generator)
     buffers = (torch.empty(hidden, device="cuda"), torch.empty(hidden, device="cuda"))
     normed = torch.empty(hidden, device="cuda")
     delta = torch.empty(hidden, device="cuda")
+    scratch = torch.empty(hidden, device="cuda")
 
-    def chain(depth: int) -> torch.Tensor:
-        """Run the first `depth` blocks in order, alternating two scratch buffers."""
+    def proj_chain(depth: int) -> torch.Tensor:
+        """Run the first `depth` MLP projection pairs, alternating two buffers."""
         buffers[0].copy_(x)
         for index in range(depth):
-            blocks[index].into(buffers[index % 2], buffers[(index + 1) % 2])
+            layers[index][1].into(buffers[index % 2], buffers[(index + 1) % 2])
         return buffers[depth % 2]
 
-    def normed_chain(depth: int) -> torch.Tensor:
-        """Run norm, MLP, residual for the first `depth` blocks, alternating two buffers."""
+    def layer_chain(depth: int) -> torch.Tensor:
+        """Run attention then MLP for the first `depth` layers, norms and residuals included."""
         buffers[0].copy_(x)
         for index in range(depth):
+            attention, mlp, (input_norm, post_norm), prefix = layers[index]
             current = buffers[index % 2]
-            rmsnorm_into(current, norms[index], normed)
-            blocks[index].into(normed, delta)
-            add_into(current, delta, buffers[(index + 1) % 2])
+            rmsnorm_into(current, input_norm, normed)
+            attention.into(normed if prefix is None else prefix, scratch)
+            add_into(current, scratch, delta)
+            rmsnorm_into(delta, post_norm, normed)
+            mlp.into(normed, scratch)
+            add_into(delta, scratch, buffers[(index + 1) % 2])
         return buffers[depth % 2]
 
-    reference = x
-    normed_reference = x
+    proj_reference = x
+    layer_reference = x
     for depth in range(1, EXPERT_LAYERS + 1):
-        up, down = source[depth - 1]
-        reference = torch.mv(down, F.silu(torch.mv(up, reference)))
-        inverse_rms = torch.rsqrt(normed_reference.square().mean() + EPS)
-        normalized = normed_reference * inverse_rms * norms[depth - 1]
-        normed_reference = normed_reference + torch.mv(down, F.silu(torch.mv(up, normalized)))
+        wv, wo, up, down, input_norm, post_norm = source[depth - 1]
+        proj_reference = torch.mv(down, F.silu(torch.mv(up, proj_reference)))
+        normalized = reference_norm(layer_reference, input_norm)
+        value_input = normalized if layers[depth - 1][3] is None else layers[depth - 1][3]
+        attention = torch.mv(wo, torch.mv(wv, value_input).index_select(0, layers[depth - 1][0].expand))
+        layer_reference = layer_reference + attention
+        normalized = reference_norm(layer_reference, post_norm)
+        layer_reference = layer_reference + torch.mv(down, F.silu(torch.mv(up, normalized)))
         if depth not in STACKS:
             continue
-        bare = chain(depth).clone()
-        scaled = normed_chain(depth).clone()
+        proj = proj_chain(depth).clone()
+        eager = layer_chain(depth).clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            layer_chain(depth)
+        buffers[0].zero_()
+        graph.replay()
         torch.cuda.synchronize()
-        bare_seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
-        normed_seconds = time_call(lambda d=depth: normed_chain(d), WARMUP, ITERATIONS)
-        n_bytes = sum(block.bytes for block in blocks[:depth])
+        exact = torch.equal(buffers[depth % 2], eager)
+        proj_seconds = time_call(lambda d=depth: proj_chain(d), WARMUP, ITERATIONS)
+        layer_seconds = time_call(lambda d=depth: layer_chain(d), WARMUP, ITERATIONS)
+        graph_seconds = time_call(graph.replay, WARMUP, ITERATIONS)
+        n_bytes = sum(attention_block.bytes + mlp.bytes for attention_block, mlp, _, _ in layers[:depth])
         print(
-            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {bare_seconds * 1e3:>8.3f}  {normed_seconds * 1e3:>10.3f}  "
-            f"{cosine(bare, reference):>9.5f}  {cosine(scaled, normed_reference):>11.5f}"
+            f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {proj_seconds * 1e3:>8.3f}  {layer_seconds * 1e3:>9.3f}  "
+            f"{graph_seconds * 1e3:>9.3f}  {cosine(proj, proj_reference):>9.5f}  "
+            f"{cosine(eager, layer_reference):>10.5f}  {'yes' if exact else 'NO':>5}"
         )
+    print("note: odd layers are cross attention, so their value path reads a fixed random prefix [320]")
     print()
 
 

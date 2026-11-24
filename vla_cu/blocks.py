@@ -25,6 +25,7 @@ from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
 from vla_cu.validate import require
 
 BITS = (4, 8)
+HEAD_DIM = 64
 
 
 def _pack(w: Tensor, bits: int, group_size: int) -> tuple[Tensor, Tensor]:
@@ -102,6 +103,41 @@ class AttentionBlock:
         else:
             int8_grouped_gemv_into(self.qkv, self.qkv_scales, x, self.qkv_out, self.segment, self.x_base)
             int8_gemv_into(self.o, self.o_scales, self.qkv_out[2 * self.hidden_width :], out)
+
+
+class GqaValueBlock:
+    """The value path of one grouped-query attention block at a single visible token.
+
+    `wv` is [kv_heads * 64, in_width] and `wo` is [hidden, heads * 64]. With one token the
+    softmax is 1 and the rotation is the identity, so q and k cancel out of the output
+    exactly and are never computed; the block writes Wo(repeat(Wv x)), each kv head
+    repeated `heads // kv_heads` times to match the o_proj input layout. A self-attention
+    block reads the residual stream, a cross-attention block reads the other stream.
+    """
+
+    def __init__(self, wv: Tensor, wo: Tensor, head_dim: int = HEAD_DIM) -> None:
+        require(wv.dim() == 2 and wo.dim() == 2, f"expected 2D matrices, got {tuple(wv.shape)} and {tuple(wo.shape)}")
+        require(wo.shape[1] % wv.shape[0] == 0, f"o input width {wo.shape[1]} is not a multiple of v width {wv.shape[0]}")
+        require(wv.shape[0] % head_dim == 0 and wo.shape[1] % head_dim == 0, "head_dim must divide both widths")
+        self.hidden_width = wo.shape[0]
+        self.input_width = wv.shape[1]
+        self.groups = wo.shape[1] // wv.shape[0]
+        self.v, self.v_scales = quantize_int8(wv)
+        self.o, self.o_scales = quantize_int8(wo)
+        heads = wo.shape[1] // head_dim
+        kv_head_of = torch.arange(heads, device=wv.device) // self.groups
+        self.expand = kv_head_of.repeat_interleave(head_dim) * head_dim + torch.arange(head_dim, device=wv.device).repeat(heads)
+        self.v_out = torch.empty(wv.shape[0], device=wv.device, dtype=torch.float32)
+        self.expanded = torch.empty(wo.shape[1], device=wv.device, dtype=torch.float32)
+        self.bytes = matrix_bytes(wv.shape[0], wv.shape[1], 8, group_size=GROUP_SIZE) + matrix_bytes(
+            wo.shape[0], wo.shape[1], 8, group_size=GROUP_SIZE
+        )
+
+    def into(self, x: Tensor, out: Tensor) -> None:
+        """Write Wo(Wv x) into `out`, reading `x` [in_width] and expanding the kv heads."""
+        int8_gemv_into(self.v, self.v_scales, x, self.v_out)
+        torch.index_select(self.v_out, 0, self.expand, out=self.expanded)
+        int8_gemv_into(self.o, self.o_scales, self.expanded, out)
 
 
 class ActionBlock:
