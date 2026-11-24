@@ -49,7 +49,11 @@
 - [ ] Hold the text weights at int8 for the deployed path, 157.84 MB against 629.27, and measure whether the prefix cache cosine moves (DEC-100 raised this and left it open).
 - [ ] Re-time the 10 step loop on the warm prefill, which is now 117.50 ms plus the steps instead of 841.37 ms (EXP-115).
 - [ ] Memcheck and time the masked fused kernel on a short prefix of 64 rows or fewer, where it is the path rather than the einsum (EXP-114).
-- [ ] A prepacked file for the tower and the 16 text layers, so even the first call in a process skips the read: the measured first call is 253.37 ms for the tower and 603.84 to 619.91 ms for the text layers, against 117.50 ms warm (EXP-112, EXP-115).
+- [x] A prepacked file for the tower and the 16 text layers. Done 2026-11-24, EXP-117 and DEC-101: one 417.83 MB file, a second read of 192.41 ms against 495.20 from the checkpoint, bit exact. A cold read of the file is still a disk read.
+- [ ] Text weights at int8 in the pack, 157.84 MB instead of 417.83, and the one cache that changes precision rather than only load time (DEC-101).
+- [ ] A checkpoint hash in the pack file name, so a stale pack beside a new checkpoint cannot be loaded (EXP-117).
+- [ ] Measure a genuinely cold start by dropping the Windows file cache, since every read in EXP-117 is a second read (EXP-117).
+- [ ] torchao under WSL2, so the comparison table carries both libraries (EXP-116).
 - [x] A W4A8 rung for the tower. Done 2026-11-24, EXP-113: exact activations read 0.97059 and int8 activations read 0.96827, so the 4-bit weight is the whole error and W4A8 has nothing to recover.
 - [ ] Time one cold prefill, since every read measured so far is warm in the OS file cache (EXP-108).
 - [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
@@ -89,11 +93,12 @@
 - [x] One benchmark table across the ladder: fp32, bf16, int8, int4 on identical shapes - done 2026-11-22, `python -m vla_cu matrix`, EXP-013
 - [x] Fused dequantize + GEMV (batch 1) in Triton - done 2026-11-22, `kernels/triton/int4_gemv.py`, EXP-013. The CUDA C++ port is still open
 - [ ] Extract real layer shapes from SmolVLA for benchmarks
-- [ ] Compare against bitsandbytes and torchao on the same shapes
+- [x] Compare against bitsandbytes and torchao on the same shapes. Done for bitsandbytes 2026-11-24, EXP-116: at 8192 x 16384 this repo's int4 reads 0.254 ms at cosine 0.99439 and nf4 0.319 at 0.99568; at 2560 x 960 and 1920 x 768 every path is launch bound and int4 loses. torchao cannot run on Windows, because int4 weight-only needs fbgemm-gpu-genai (RESEARCH 2026-11-24).
 - [ ] Roofline plot: achieved GB/s vs peak, per kernel version
 - [ ] Fused RMSNorm + residual; small custom attention kernel for short sequences
 - [ ] Register kernels as PyTorch custom ops (`torch.library`); capture a forward pass in a CUDA graph
-- [ ] Plug into LeRobot Edge as a backend, gated by cosine similarity of at least 0.98 vs FP32
+- [x] The backend side of a policy runtime, gated at cosine 0.98 vs fp32. Done 2026-11-24, EXP-118 and DEC-102: `SmolVlaPolicy` prefills once at 123.34 ms and replays a step at 2.421 ms, cosine 0.99996, and `python -m vla_cu backend` exits nonzero below the gate. `docs/INTEGRATION.md` states the contract.
+- [ ] Wire `SmolVlaPolicy` into LeRobot Edge itself, which needs that repository in the workspace and a camera plus tokenizer on the host side
 
 Out of scope by decision (DEC-016): 3, 5 and 6-bit bitstreams, and codebook formats
 such as NF4 and FP4. Both are listed in `docs/ARCHITECTURE.md` section 5 and skipped

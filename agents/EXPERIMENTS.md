@@ -1549,3 +1549,40 @@ EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `pre
 - Caveat: the first call is cold in the OS file cache in both processes, while an earlier warm run of the same code read 335.42 ms, so the first call number depends on the file cache as much as on the code. Holding 629.27 MB of fp32 text weights is the largest resident object in the repo, and it is one entry, so a second checkpoint drops the first.
 - Verdict: worked. A warm prefill is 117.50 ms against 782.52 at the start of the day, a 6.66x cut, with every cosine unchanged.
 - Follow-ups: a prepacked file so the first call skips the read too; hold the text weights at int8 for the deployed path, 157.84 MB instead of 629.27; the 10 step loop re-timed on the warm prefill.
+
+## EXP-116: bitsandbytes and torchao against this repo, one matrix at batch 1  (2026-11-24)
+- Goal / question: the repository description claimed a benchmark against bitsandbytes and torchao, and the README called them "the comparisons once kernels exist". Do they exist, and where does this repo stand?
+- Change (one thing): new `bench/baselines.py` (task `baselines`); `pip install --no-deps bitsandbytes torchao` into the venv.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu baselines`.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, batch 1, one seeded fp32 matrix per shape, torch 2.8.0+cu129, bitsandbytes 0.50.2, torchao 0.14.1.
+- Result (measured): 8192 x 16384: fp32 1.473 ms, bf16 0.768, this repo's int8 0.375, this repo's int4 0.254, bitsandbytes nf4 0.319. Stored 537.0, 268.5, 134.3, 75.6 and 75.6 MB. Cosine 1.00000, 1.00000, 0.99996, 0.99439 and 0.99568; relative L2 0, 2.88e-03, 9.37e-03, 1.07e-01 and 9.29e-02. 2560 x 960: fp32 0.027, bf16 0.025, int8 0.031, int4 0.037, nf4 0.055 ms. 1920 x 768: 0.019, 0.023, 0.030, 0.037, 0.055 ms. torchao: 0.18.0 fails to import against torch 2.8 (`ImportError: cannot import name 'ScalingType'`), and 0.14.1 imports but its int4 weight-only path raises `ImportError: Requires fbgemm-gpu-genai >= 1.2.0`.
+- Explanation / hypothesis: at 8192 x 16384 both 4-bit paths move the same 75.6 MB, so the 1.26x is the dequant arithmetic, and nf4 buys 0.0013 of cosine for it. At the two real widths every path lands in 19 to 55 us, which is the launch floor (EXP-076), so the ordering there measures dispatch and not bandwidth.
+- Caveat: one run per shape, best of two passes, no paired alternation; the small shapes are L2 resident, so their GB/s column is cache bandwidth. torchao is absent rather than slow, which is a platform result and not a statement about the library.
+- Verdict: the comparison exists for bitsandbytes: 5.81x fp32 at cosine 0.99439 here against 4.62x at 0.99568 for nf4. torchao is blocked on Windows.
+- Follow-ups: repeat under paired timing; nf4 with double quantizing off; torchao under WSL2.
+
+## EXP-117: one pack file for the int8 tower and the 16 text layers  (2026-11-24)
+- Goal / question: EXP-115 left about 0.5 s of reads on the first call in a process. Can one file hold what the two caches build, so a new process copies instead of reading and quantizing?
+- Change: new `vla_cu/packfile.py` (`pack_path`, `save_pack`, `load_pack` with mmap, `forget_packs`); `_Projection.state` and `from_state`, `Tower.state` and `from_state`, `prefix.weights_state` and `forget_backbone`, `vision.forget_tower`; `tower_for` and `backbone_weights` read the file when it matches the int8 tower and 16 layers; new `bench/prepack.py` (task `prepack`) and `tests/test_packfile.py`.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu prepack`; `python -m vla_cu fullprefix`; `python -m vla_cu fullmodel`; suite in vcvars.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, checkpoint 906,712,520 bytes, 416 pack tensors.
+- Result (measured): pack 417.83 MB written in 308.93 ms. Second read of the same tensors: 495.20 ms from the checkpoint against 192.41 ms from the pack, 2.57x. Round trip bit exact over 32 cache tensors and one 64 x 960 row block. `fullprefix` cosines unchanged, 0.99992 at int8 down and 0.99852 at int4 down; `fullmodel` 11.740 ms one graph against 32.166 eager, cosine 0.99990, every path bit exact. Suite 271 passed in vcvars, 57 passed and 214 skipped with no device, style 0, 49 tasks.
+- First attempt (failure): the pack stored fp32 text weights, so the file was 732.46 MB and the second read 314.45 ms; and the first run tried to overwrite a file this process had memory mapped, which Windows refuses, so `prepack` now deletes an existing pack before measuring.
+- Explanation / hypothesis: 629 MB of fp32 text weights dominated the copy. The checkpoint stores them as bf16, so the pack now does too and the load casts on the GPU, which is exact and halves the bytes: 417.83 MB and 192.41 ms.
+- Caveat: both columns are a second read, because the page cache decides the rest. The first cold touch of the pack in a later process read 6740.62 ms inside `fullprefix`, and the checkpoint column has read 494, 766 and 2991 ms across runs. So the ratio is a page cache ratio, and a cold start is a disk read either way.
+- Verdict: worked and bit exact, 2.57x on a cached read. It does not make a cold start fast.
+- Follow-ups: text weights at int8, 157.84 MB; a checkpoint hash in the file name so a stale pack cannot be loaded; measure a genuinely cold start by dropping the Windows file cache.
+
+## EXP-118: the int8 policy behind one object, and the 0.98 gate  (2026-11-24)
+- Goal / question: everything a backend needs is measured, but a host still has to assemble prefill, cache binding, capture and replay. Does one object do it, and does it clear the gate the backlog names?
+- Change: new `vla_cu/policy.py` with `SmolVlaPolicy` (`prefill`, `act`), exported from `vla_cu`, and `bench/backend.py` (task `backend`); `docs/INTEGRATION.md` states the contract a host meets.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu backend`.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, 241 prefix rows, 50 action tokens, int8 tower, attention and down, seeded frames, zero state.
+- Result (measured): prefill 1069.68 ms on the first call, which includes Triton compilation and the graph capture, and 123.34 ms after it. One step 2.421 ms graphed, ten steps 24.21 ms. Cosine against the fp32 expert chain over the same prefix 0.99996, relative L2 8.44e-03, gate 0.98 pass. Expert weights 98.68 MB.
+- Explanation / hypothesis: the steady prefill is the 117.50 ms of EXP-115 plus the copy into the held key and value buffers, so the backend adds no work to the path it wraps. The step matches EXP-109's 2.258 ms within the session drift.
+- Caveat: the reference is the fp32 expert on the int8 prefix, so this gate covers the backbone and the expert; the tower's own 0.99956 is outside it and the whole model figure is 0.99990 (EXP-114). Frames are noise and the state is zeros.
+- Verdict: worked, the gate passes at 0.99996.
+- Follow-ups: a tokenizer and real frames; hold the prefix across an episode; the host wiring in the other repository.

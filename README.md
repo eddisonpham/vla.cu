@@ -5,7 +5,24 @@ vision-language-action policies (SmolVLA scale, about 450M parameters) running a
 batch size 1 on one consumer GPU.
 
 This is a learning project. The goal is that the author can explain every line and
-every number, not that the repo grows large.
+every number, not that the repo grows large. MIT licensed.
+
+## What it costs at batch 1
+
+SmolVLA, three frames and a state row through the prefix, then a 50 token action chunk,
+with every weight at int8 and every step in a CUDA graph:
+
+| Measurement | Value | Entry |
+|---|---|---|
+| Whole model, one graph | 11.72 ms, against 32.23 ms eager | EXP-114 |
+| One denoising step | 2.42 ms graphed, 24.21 ms for ten | EXP-118 |
+| Warm prefix build | 117.50 ms, 88.36 for the frames and 29.15 for the text layers | EXP-115 |
+| Prefix build from the pack file | 192.41 ms, against 495.20 from the checkpoint, both page cached | EXP-117 |
+| End to end cosine | 0.99990 for the whole model, 0.99992 for the prefix | EXP-112, EXP-114 |
+| int4 GEMV, 8192 x 16384 | 0.254 ms, against 1.473 fp32 and 0.319 bitsandbytes nf4 | EXP-116 |
+
+Every number, including the negative results, is logged with its command in
+`agents/EXPERIMENTS.md`.
 
 ## Why this problem
 
@@ -49,12 +66,15 @@ dequant GEMV runs in 0.230 ms against 1.587 ms for the fp32 path, a 6.89x speedu
 85.5 percent of DRAM peak and a relative L2 error of 1.07e-1. The same kernel exists
 twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 
+<details>
+<summary>Every measured row, the long table</summary>
+
 | Piece | State |
 |---|---|
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 46 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 49 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -114,6 +134,11 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Graph wrapper | `Int4Linear.graphed()` replays a captured call bit for bit, opt in, output buffer reused; `graphed(x)` binds the input buffer and drops the copy (EXP-089, EXP-096) |
 | Where capture pays | with a copied input, 2.20x at 0.09 MB of packed weights down to 0.94x at 18.87 MB (EXP-092); bound to the caller's buffer, 4.18x down to 1.00 to 1.02x, so the copy was the loss (EXP-096) |
 | One-command sanitizer gate | `python -m vla_cu sanitize` runs memcheck over every CUDA kernel and returns nonzero on an error |
+| Reproducible first call | `python -m vla_cu prepack` writes the tower and text weights to one 417.83 MB file, a 2.57x faster second read, bit exact (EXP-117) |
+| Comparison against bitsandbytes | nf4 reads 0.319 ms against this repo's int4 at 0.254 ms on 8192 x 16384, cosine 0.99568 against 0.99439 (EXP-116) |
+| Backend object | `SmolVlaPolicy` prefills once and replays a graph per step at cosine 0.99996, gated at 0.98 (EXP-118) |
+
+</details>
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -141,7 +166,9 @@ pip install -e .[triton,dev]
 The base install needs torch only. The Triton extra resolves to `triton-windows` on
 Windows, because the official wheel has no Windows build. `visioncheck` is the one task
 that needs `transformers`, which `requirements.txt` installs and the CPU gate never
-imports.
+imports. `pip install -e .[compare]` brings `bitsandbytes`, which is the alternative
+`python -m vla_cu baselines` measures; torchao is also a target there but has no working
+Windows wheel for weight-only int4.
 
 ## Use it in your model
 
@@ -200,6 +227,9 @@ python -m vla_cu fullprefix
 python -m vla_cu tower
 python -m vla_cu denoise
 python -m vla_cu visioncheck
+python -m vla_cu prepack
+python -m vla_cu baselines
+python -m vla_cu backend
 python -m vla_cu graphed
 python -m vla_cu style
 ```
@@ -216,7 +246,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 |---|---|---|
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
-| Test suite | `python -m pytest -q` | a CUDA device, except the 51 tests marked `cpu` |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 54 tests that run without one |
 | CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 
@@ -243,6 +273,7 @@ when no device is visible.
 | File | Contents |
 |---|---|
 | `docs/ARCHITECTURE.md` | layers, naive vs fused traffic, roofline, kernel roadmap |
+| `docs/INTEGRATION.md` | the contract a policy runtime calls: inputs, outputs, the 0.98 gate |
 | `agents/STATE.md` | where the work stands |
 | `agents/EXPERIMENTS.md` | every run, failures included: prediction, result, explanation |
 | `agents/RESEARCH.md` | lookups with sources and dates |
@@ -251,7 +282,10 @@ when no device is visible.
 
 ## Reference points
 
-Plain PyTorch, `bitsandbytes`, and `torchao` are the comparisons once kernels
-exist. Marlin and similar projects solve the language-model version of this
-problem with far deeper engineering. This repo is a from-scratch learning build,
-not a competitor.
+Plain PyTorch, `bitsandbytes`, and `torchao` are the comparisons. bitsandbytes nf4 is
+measured beside this repo's int4 in `python -m vla_cu baselines`: on one 8192 x 16384
+matrix the two read 0.319 and 0.254 ms at cosine 0.99568 and 0.99439. torchao's
+weight-only int4 does not run here, because it needs `fbgemm-gpu-genai` and there is no
+Windows wheel, so that row reports the ImportError instead of a time. Marlin and similar
+projects solve the language-model version of this problem with far deeper engineering.
+This repo is a from-scratch learning build, not a competitor.

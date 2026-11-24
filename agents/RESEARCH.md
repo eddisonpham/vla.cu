@@ -220,3 +220,9 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local transformers 5.24.1 and safetensors 0.8.0 install, `python -m vla_cu visioncheck`, 2026-11-24.
 - Confidence: high, it is a direct numerical comparison on the real weights.
 - Relevance to vla.cu: EXP-110 and DEC-095. The residual 2e-4 is accumulation order, not a model difference.
+## bitsandbytes and torchao on Windows, torch 2.8, sm_120  (2026-11-24)
+- Question: can the two named comparisons load and run int4 weight-only on this machine?
+- Finding: bitsandbytes 0.50.2 has a `py3-none-win_amd64` wheel that imports and runs, warning `No prebuilt binary for CUDA 12.9, loading CUDA 12.8 instead`. torchao 0.18.0 fails to import against torch 2.8.0+cu129 (`ImportError: cannot import name 'ScalingType' from torch.nn.functional`), and 0.14.1 imports but `Int4WeightOnlyConfig` raises `ImportError: Requires fbgemm-gpu-genai >= 1.2.0`, which has no Windows wheel. torchao also prints `Skipping import of cpp extensions due to incompatible torch version 2.8.0+cu129 for torchao version 0.14.1`.
+- Source: local pip installs with `--no-deps` and imports, 2026-11-24; torchao issue 2919 is quoted by the package itself.
+- Confidence: high for these versions on this machine. Unknown whether a newer torch or a Linux install changes the answer.
+- Relevance to vla.cu: EXP-116 measures bitsandbytes and reports torchao as unavailable, and DEC-102 keeps the comparison table honest about a row that cannot run here.

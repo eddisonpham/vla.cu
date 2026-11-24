@@ -747,3 +747,19 @@
 - Consequences: 629.27 MB resident between calls, the largest object in the repo, and one entry, so a second checkpoint or layer count drops the first.
 - Revisit if: memory pressure appears, or the deployed path wants int8 text weights.
 - Status: active
+
+## DEC-101: One pack file beside the checkpoint, int8 tower and bf16 text weights  (2026-11-24)
+- Context: EXP-115 left 495 to 620 ms of reads on the first call in a process, and the tower and text caches already hold exactly the tensors a build produces.
+- Options considered: (a) keep reading the checkpoint per process; (b) store what the caches hold in one file and map it; (c) store int8 text weights, which changes the deployed precision.
+- Chosen and why: (b), with the text weights stored as bf16 because the checkpoint stores them that way, so the cast back is exact. It cannot move a number, the round trip is bit exact, and (c) is a precision decision that belongs in its own experiment.
+- Consequences: a 417.83 MB file in `models/`, gitignored by `*.pt`; the second read drops from 495.20 to 192.41 ms; a cold read is still a disk read, so the file is keyed by name only and holds no checkpoint hash. Delete it when the checkpoint changes until a hash is added.
+- Revisit if: int8 text weights land, which would cut the file to about 180 MB.
+- Status: active
+
+## DEC-102: `SmolVlaPolicy` is the integration boundary, the host stays a separate repo  (2026-11-24)
+- Context: the backlog asks for a LeRobot Edge backend gated at cosine 0.98, and DEC-001 kept the two repositories apart.
+- Options considered: (a) clone and edit the other repo from here; (b) export one object with a documented contract and let the host call it; (c) leave the assembly in a bench file.
+- Chosen and why: (b). This repo owns the kernels, the cache and the graph; the host owns the camera, the tokenizer and the robot. `docs/INTEGRATION.md` states the inputs, outputs and gate, and `bench/backend.py` exits nonzero below 0.98 so it can run as an acceptance test.
+- Consequences: no import of the other repository, and the wiring itself remains untested here. The gate covers the backbone and the expert at 0.99996; the tower's 0.99956 is measured separately and the whole model reads 0.99990.
+- Revisit if: the host repository is available in this workspace and the wiring can be measured end to end.
+- Status: active

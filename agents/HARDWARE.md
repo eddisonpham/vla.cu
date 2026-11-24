@@ -59,6 +59,7 @@ peak", not as an expectation for any single run.
 - 2026-11-18: recorded that both Visual Studio installs sit under `Program Files (x86)`, and that ninja appears only in a vcvars shell. Added the `cuda-check` task (EXP-005).
 - 2026-11-23: installed `ninja 1.13.2` into the venv (it is now in `requirements.txt`). A `torch.utils.cpp_extension` build still needs `cl.exe`, so builds and every `cuda` task run happen inside `vcvars64.bat`; outside it, torch invalidates the cached build and fails on ninja. First successful extension build and load: EXP-016.
 - 2026-11-23: `compute-sanitizer` 2025.2.1 cannot instrument this extension's launch (`CUDA_ERROR_INVALID_HANDLE` on `cuKernelGetFunction`), so the CUDA kernel has no sanitizer pass. Triton kernels remain clean (EXP-016).
+- 2026-11-24: installed `bitsandbytes` 0.50.2 and `torchao` 0.14.1 into the venv with `--no-deps`. bitsandbytes loads its CUDA 12.8 binary on 12.9 and runs int4 at cosine 0.99568; torchao imports, but its int4 weight-only path needs `fbgemm-gpu-genai`, which has no Windows wheel (RESEARCH 2026-11-24, EXP-116).
 ## Clock control (2026-11-23)
 
 | Fact | Value |
