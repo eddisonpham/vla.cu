@@ -715,3 +715,19 @@
 - Consequences: `image_tokens` and `full_prefix_inputs` take a `bits` and `tower_bits` argument; `full_prefix_inputs` now runs the tower once instead of twice, which was a bug.
 - Revisit if: a cached packed tower makes the read cheap, or real frames change the int8 error.
 - Status: active
+
+## DEC-097: the tower is built once per process and held  (2026-11-24)
+- Context: a prefill re-read 172.87 MB of bf16 to build the tower, and EXP-112 measured 259.35 ms for it against 0.005 ms once held.
+- Options considered: (a) build a tower per call; (b) a one entry module cache keyed by checkpoint path, header length, width and group; (c) a prepacked tower written to disk next to the checkpoint.
+- Chosen and why: (b). It needs no new artifact, cannot serve stale bytes because the header length is in the key, and one entry bounds the GPU memory kept between calls, since a different key drops the previous tower (392.59 MB at fp32, 102.73 at int8). (c) would also cut the read on the first call, which is the remaining 259 ms, so it stays on BACKLOG.
+- Consequences: `image_tokens` now returns rows from a module-level object, so a caller that wants a fresh tower builds `Tower` directly. Processes are short lived under `python -m vla_cu`, so only the benches and a server see the reuse.
+- Revisit if: the first-call 259 ms matters, which points at (c), or if several precisions must be resident at once.
+- Status: active
+
+## DEC-098: the int4 tower is refused at group 64, 32 and 16  (2026-11-24)
+- Context: EXP-111 swept the int4 group size on the tower at 0.98 as the gate.
+- Options considered: (a) ship int4 at group 16; (b) ship int4 above 64 only after a W4A8 study; (c) refuse int4 for the tower.
+- Chosen and why: (c). Row cosine reads 0.94484, 0.95583 and 0.97059 for groups 64, 32 and 16, so four times the scales buys 0.026 and still misses the gate by 0.01; group 16 also costs 78.21 MB against int8's 102.73 and 146.78 ms for 3 frames against 87.53. The 4-bit code, not the scale granularity, sets the error. DEC-096 stands and this entry extends it.
+- Consequences: `Tower` still accepts `bits=4` and `group_size`, because the bench and a future W4A8 rung need them; nothing in a default path uses it.
+- Revisit if: a W4A8 path, int4 weights with int8 activations, moves the 0.97, or a per-channel or Hadamard rotation reduces the outlier cost.
+- Status: active

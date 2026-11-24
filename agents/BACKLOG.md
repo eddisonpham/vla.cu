@@ -41,9 +41,13 @@
 - [ ] Three real camera frames in place of seeded noise, so the image rows carry scene content.
 - [x] A transformers cross-check of one frame's 64 rows. Done 2026-11-24, EXP-110: 197 tensors, nothing missing, patches within 2.16e-04 and cosine 1.00000.
 - [x] Quantize the SigLIP tower. Done 2026-11-24, EXP-108: int8 reads cosine 0.99956 and saves 53 ms of a 782.52 ms prefill, int4 reads 0.94484 and is 29 ms slower, and the 172.87 MB bf16 read is the same at every width, so packing saves compute and not traffic.
-- [ ] Cache the packed tower across calls, so the 172.87 MB read is paid once per process and not once per prefill (EXP-108). Either a small cache file next to the checkpoint or a tower held on the module.
-- [ ] Group 16 or 32 for the int4 tower, which reads 0.94484 at group 64 and fails the 0.98 gate (EXP-108).
-- [ ] Use the int8 tower in `fullprefix`, `denoise` and the whole model, so the end to end cosine reflects the 1023 patch error of 0.99956 (EXP-108).
+- [x] Cache the packed tower across calls. Done 2026-11-24, EXP-112 and DEC-097: `tower_for` holds one tower per process, 259.35 ms on the first call and 0.005 ms after, so a warm int8 prefill is 471.99 ms against 710.08.
+- [x] Group 16 or 32 for the int4 tower. Done 2026-11-24, EXP-111 and DEC-098: row cosine 0.94484, 0.95583 and 0.97059, so the 4-bit code sets the error and int4 is refused at every measured group.
+- [x] Use the int8 tower end to end. Done 2026-11-24, EXP-112: `fullprefix` reads 0.99992 at int8 down against an fp32 tower, and the whole model reads 0.99990 over 240 rows because the state row has no block mask in the fused attention kernel.
+- [ ] Cache or prepack the 16 text backbone layers, which are now 384.45 ms of a 471.99 ms warm prefill (EXP-112). Same argument as the tower: the read is the cost, not the math.
+- [ ] Add a block mask to the fused attention kernel, so the state row can enter the whole model graph and the prefix is 241 rows there too (EXP-112).
+- [ ] A prepacked tower written to disk, so even the first call in a process skips the 172.87 MB read and the 0.2 s of packing (EXP-112, DEC-097).
+- [ ] A W4A8 rung for the tower, int4 weights with int8 activations, to see how much of the 0.97059 is the activation rounding (EXP-111).
 - [ ] Time one cold prefill, since every read measured so far is warm in the OS file cache (EXP-108).
 - [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
 - [x] The 10 step denoising loop with the prefix cache held across steps. Done 2026-11-24, EXP-109: cache 818.98 ms once, then 2.258 ms per graphed step, so a chunk is 841.37 ms against 8212.38 rebuilt every step.

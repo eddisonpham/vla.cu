@@ -9,64 +9,62 @@
 
 ## Campaign
 
-The deployed prefix is built, packed and now numerically verified, and the 10 step loop is
-measured: a chunk costs the prefill, not the steps. What is left is content (real frames, a
-real state) and making the prefill read cheaper, not more structure.
+The prefix pipeline is settled: the int8 tower ships at a 0.99992 end to end cosine, it is
+built once per process, and int4 is refused at every group. What is left is the other half
+of the prefill, the 16 text layers, and content rather than structure.
 
 ## Closed in this pass
 
-- **The tower is packed and verified.** `Tower` reads the 12 SigLIP layers once per prefill
-  and holds them at 32, 8 or 4 bits through `_Projection`. transformers 5.24.1 reproduces
-  the 1024 patches to 2.16e-04 max abs, cosine 1.00000 (EXP-110, DEC-095).
-- **The prefill split.** Tower 393.72 ms against 388.80 ms for the 16 text layers at fp32.
-  The checkpoint stores the tower as 172.87 MB of bf16 and every stored width reads it in
-  full, so int8 saves compute only (EXP-108, DEC-096).
-- **The 10 step loop.** Cache built once at 818.98 ms, ten graphed steps 22.393 ms, so a
-  chunk is 841.37 ms against 8212.38 ms with the cache rebuilt every step (EXP-109).
+- **int4 tower, group 64, 32 and 16.** Row cosine 0.94484, 0.95583 and 0.97059, so the
+  4-bit code and not the scale granularity sets the error. Refused (EXP-111, DEC-098).
+- **The tower cache.** `tower_for` holds one tower per process: 259.35 ms first call,
+  0.005 ms after, so a warm int8 prefill is 471.99 ms against 710.08 (EXP-112, DEC-097).
+- **int8 end to end.** `fullprefix` reads 0.99992 at int8 down against an fp32 tower; the
+  whole model over 240 rows reads 0.99990 (EXP-112).
 
 ## What the numbers say
 
 | Measurement | Value |
 |---|---|
-| tower as bf16 in the checkpoint | 172.87 MB |
-| tower held at fp32 / int8 / int4 | 392.59 / 102.73 / 60.07 MB |
-| tower, 3 frames, fp32 / int8 / int4 | 170.64 / 89.96 / 174.33 ms |
-| tower cosine against fp32, int8 / int4 | 0.99956 / 0.94484 |
-| prefill fp32 / int8 / int4 | 782.52 / 729.55 / 812.06 ms |
-| one expert step, graph / eager | 2.258 / 6.928 ms |
-| chunk, cache held / rebuilt | 841.37 / 8212.38 ms |
-| tower against transformers, 1024 patches | 2.16e-04 max abs, cosine 1.00000 |
+| tower patch cosine, int8 / int4 g64 / g32 / g16 | 0.99851 / 0.85119 / 0.88169 / 0.91617 |
+| tower row cosine, int8 / int4 g64 / g32 / g16 | 0.99956 / 0.94484 / 0.95583 / 0.97059 |
+| tower held, int8 / int4 g64 / g16 | 102.73 / 60.07 / 78.21 MB |
+| tower cache, first / later call | 259.35 / 0.005 ms |
+| warm prefill, fp32 / int8 | 542.42 / 471.99 ms, text layers 384.45 ms of it |
+| full prefix end to end, int8 down / int4 down | 0.99992 at 2.395 ms / 0.99852 at 2.806 ms |
+| whole model, one graph / two graphs / eager | 11.764 / 11.568 / 32.670 ms, cosine 0.99990 |
 
 ## Gates
 
-- GPU suite 258 passed in a vcvars shell, CPU suite 54 passed and 204 skipped, style 0, 46 tasks.
-- `tower`, `denoise`, `visioncheck`, `fullprefix` exit 0; graphs bit exact against eager.
+- GPU suite 261 passed in a vcvars shell, CPU suite 54 passed and 207 skipped, style 0, 46 tasks.
+- `tower`, `fullprefix`, `fullmodel` exit 0; every graph bit exact against eager.
 - A plain shell without vcvars fails one test that builds the cooperative extension (ninja), which is the documented requirement, not a code failure.
 
 ## What works
 
-- `python -m vla_cu tower` splits the prefill into tower and text layers at three widths.
-- `python -m vla_cu denoise` prices the 10 step loop against rebuilding the cache.
-- `python -m vla_cu visioncheck` compares the tower with a transformers SigLIP run.
+- `python -m vla_cu tower` sweeps width and group and splits the prefill.
+- `python -m vla_cu fullprefix` reports the 241 row path end to end with the int8 tower.
+- `python -m vla_cu fullmodel` runs 240 prefix rows plus 50 action tokens in one graph.
+- `python -m vla_cu denoise` prices the 10 step loop with the cache held.
 
 ## Open edges
 
-- Frames and state are synthetic, the loop uses seeded guesses, and no timestep embedding is
-  modelled because this checkpoint carries no time projection.
-- Every read measured is warm in the OS file cache; no cold prefill exists in this pass.
-- The int4 tower fails the 0.98 gate at group 64.
+- The whole model drops the state row, because the fused attention kernel takes no block mask.
+- Frames and state are synthetic, and the denoise loop uses seeded guesses with no timestep
+  embedding, because this checkpoint carries no time projection.
+- Every read measured is warm in the OS file cache; no cold prefill exists.
+- The 16 text layers are 384.45 ms of a 471.99 ms warm prefill and are not cached.
 - `ncu` needs the elevated shell; racecheck never returns on the cooperative kernel; the int4
-  CUDA extension cannot be instrumented; CI is CPU only.
-- Rope wavelength is unresolved: LeRobot rotates at 10000, the config says 100000.
+  CUDA extension cannot be instrumented; CI is CPU only. Rope wavelength still unresolved.
 
 ## What the human can do
 
-1. Pick the next item from `agents/BACKLOG.md`, for example three real frames or a cached packed tower.
+1. Pick the next item from `agents/BACKLOG.md`, for example caching the text layers.
 2. Run `python -m vla_cu ncu` from the elevated shell on the int4 attention GEMM.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Cache the packed tower across calls, since the prefill is the weight read.
-2. Three real camera frames, so the image rows carry scene content.
-3. int4 down on the whole path, to see whether the model cosine tracks the expert 0.99847.
+1. Cache or prepack the 16 text layers, which are 81 percent of a warm prefill.
+2. A block mask in the fused attention kernel, so the state row enters the graph.
+3. Three real camera frames, so the image rows carry scene content.
