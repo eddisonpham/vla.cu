@@ -39,10 +39,14 @@
 - [x] The expert stack at 50 tokens with the real VLM prefix instead of a random one. Done 2026-11-24, EXP-104: cosine 0.99997 at int8 and 0.99847 at int4, identical to the random prefix, 1.977 and 2.378 ms.
 - [x] The full 241 row prefix: 192 image rows through the SigLIP tower and connector, 48 language rows, 1 state row. Done 2026-11-24, EXP-107: cache 9.87 MB, build 415.64 ms, expert cosine 0.99996 at int8 down and 0.99858 at int4 down.
 - [ ] Three real camera frames in place of seeded noise, so the image rows carry scene content.
-- [ ] A transformers cross-check of one frame's 64 rows, since the vision forward has no numerical reference yet.
-- [ ] Quantize the SigLIP tower, which is most of the 415.64 ms prefix build.
+- [x] A transformers cross-check of one frame's 64 rows. Done 2026-11-24, EXP-110: 197 tensors, nothing missing, patches within 2.16e-04 and cosine 1.00000.
+- [x] Quantize the SigLIP tower. Done 2026-11-24, EXP-108: int8 reads cosine 0.99956 and saves 53 ms of a 782.52 ms prefill, int4 reads 0.94484 and is 29 ms slower, and the 172.87 MB bf16 read is the same at every width, so packing saves compute and not traffic.
+- [ ] Cache the packed tower across calls, so the 172.87 MB read is paid once per process and not once per prefill (EXP-108). Either a small cache file next to the checkpoint or a tower held on the module.
+- [ ] Group 16 or 32 for the int4 tower, which reads 0.94484 at group 64 and fails the 0.98 gate (EXP-108).
+- [ ] Use the int8 tower in `fullprefix`, `denoise` and the whole model, so the end to end cosine reflects the 1023 patch error of 0.99956 (EXP-108).
+- [ ] Time one cold prefill, since every read measured so far is warm in the OS file cache (EXP-108).
 - [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
-- [ ] The 10 step denoising loop with the prefix cache held across steps, which is what a real action chunk costs instead of one expert pass (EXP-106).
+- [x] The 10 step denoising loop with the prefix cache held across steps. Done 2026-11-24, EXP-109: cache 818.98 ms once, then 2.258 ms per graphed step, so a chunk is 841.37 ms against 8212.38 rebuilt every step.
 - [ ] int4 down on the whole path, to see whether the model level cosine tracks the expert level 0.99847.
 - [ ] Decide the rope wavelength for the expert and the prefix: LeRobot's `apply_rope` uses 10000 while the config says 100000, and this repo uses 100000 (RESEARCH 2026-11-24).
 - [ ] A state row in the prefix, from `state_proj` on a real robot state instead of no state at all.

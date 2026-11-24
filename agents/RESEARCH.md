@@ -213,3 +213,10 @@ These came from the planning discussion, not from lookups. Verify before relying
 - Source: local run of `python -m vla_cu m50` on Triton 3.9.0, error raised from `triton/compiler/compiler.py::_init_handles`, 2026-11-23.
 - Confidence: high for this shape and version, because it is the compiler's own number. Unknown whether the extra buffer scales with BLOCK_N, BLOCK_K or the pipeline depth.
 - Relevance to vla.cu: the menu only lists tiles that the sweep actually launched, and `shared_memory_bytes` is a pre-check, not a proof. If the menu grows, add a candidate by sweeping it, not by computing that it fits (EXP-064).
+
+## transformers 5.24.1 SigLIP: key names and config for a cross-check  (2026-11-24)
+- Question: what does it take to load SmolVLA's vision tower into transformers and compare it with this repo's fp32 forward?
+- Finding: transformers 5 owns the transformer directly, so `SiglipVisionModel` state dict keys are `embeddings.*`, `encoder.layers.N.*` and `post_layernorm.*` with no `vision_model.` wrapper; the 4.x spelling maps every key to unexpected while `strict=False` still reports success. `SiglipVisionConfig` needs `hidden_size=768`, `intermediate_size=3072`, `num_hidden_layers=12`, `num_attention_heads=12`, `image_size=512`, `patch_size=16`, `hidden_act=gelu_pytorch_tanh`, `layer_norm_eps=1e-6`, and `vision_use_head=False` drops the classification head. With the checkpoint's 197 tensors loaded, patches agree to 2.16e-04 max abs and connector rows to 6.77e-05.
+- Source: local transformers 5.24.1 and safetensors 0.8.0 install, `python -m vla_cu visioncheck`, 2026-11-24.
+- Confidence: high, it is a direct numerical comparison on the real weights.
+- Relevance to vla.cu: EXP-110 and DEC-095. The residual 2e-4 is accumulation order, not a model difference.

@@ -1451,3 +1451,40 @@ EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `pre
 - Verdict: negative. The dot is 5.5x slower than the reshape reduction at the measured shape, so the reshape was not what cost the wide mapping its bandwidth.
 - Follow-ups: measure `tf32` to separate the precision cost from the layout cost; decide whether the wide file keeps the dot or returns to the reshape reduction (DEC-058).
 
+
+## EXP-108: the SigLIP tower at int8 and int4, and where the prefill time goes  (2026-11-24)
+- Goal / question: the 241 row prefill was 289.93 to 415.64 ms in EXP-107, and the tower was named as most of it without a measurement separating the tower from the 16 text layers. Can packing the tower's projections move the number, and what is the split?
+- Change (one thing): `vla_cu/vision.py` gained a `Tower` that reads every tower tensor once and holds each projection as fp32, int8 or int4 through `_Projection`, with `hidden` and `rows` on the tower; `image_tokens` builds one tower per call and `full_prefix_inputs` stopped calling `image_tokens` twice, which it did for the row count. New `bench/tower_precision.py` (task `tower`) times the build, three frames on a shared tower, three frames with a tower rebuilt per frame, the 16 text layers, and the prefill. New `tests/test_vision.py` holds cosine floors for one int8 and one int4 projection.
+- Prediction: none filed by the human. The working guess before the run was that int8 would cut the prefill, on the reading that the tower is most of the build.
+- Command: `python -m vla_cu tower`, wall clock, median of 3, two runs; full suite in vcvars; CPU suite with no device; `python -m vla_cu style`.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, checkpoint 906,712,520 bytes, 3 seeded noise frames.
+- Result (measured), run 2 of 2: the checkpoint stores the tower as 172.87 MB of bf16. fp32 build 231.13 ms, 3 frames 170.64 ms, 3 rebuilt frames 815.74 ms, 392.59 MB held, cosine 1.00000. int8 build 247.39 ms, 3 frames 89.96 ms, rebuilt 810.42 ms, 102.73 MB, cosine 0.99956, rel L2 2.99e-02. int4 build 256.62 ms, 3 frames 174.33 ms, rebuilt 921.68 ms, 60.07 MB, cosine 0.94484, rel L2 3.38e-01. Text layers 388.80 ms over 241 rows. Prefill fp32 782.52 ms, int8 729.55 ms, int4 812.06 ms. Run 1 read fp32 210.19 / 157.13 / 845.48, int8 255.24 / 88.79 / 777.54, int4 248.90 / 164.09 / 901.08, text 423.80, prefill 796.91 / 772.63 / 839.54. Suite 258 passed in vcvars, 54 passed and 204 skipped with no device, style 0.
+- Explanation / hypothesis: the read is 172.87 MB of bf16 whatever the stored width, because packing happens after the file read, so only the patch compute moves. int8 cuts 3 frames from 170.64 to 89.96 ms and the prefill from 782.52 to 729.55, about 6.8 percent; its build is 16 ms slower because quantizing 85M weights costs about what it saves. int4 loses twice: the int4 GEMM body reads at 20 to 23 GB/s (EXP-079), so 3 frames read 174.33 ms against int8's 89.96, and per-group int4 over 12 layers reads cosine 0.94484, below the 0.98 gate. The larger finding is the split: the tower is about half the prefill at fp32 and the 16 text layers, about 315 MB of bf16 between them, are the other half. One tower for three frames is 393.72 ms against 815.74 rebuilt, and the old `full_prefix_inputs` paid that twice.
+- Caveat: every read here is warm in the OS file cache; EXP-107's 415.64 ms cold build is the only cold number in the repo. Frames are seeded noise, so the compute is real and the content is not. The 2.99e-02 relative L2 at int8 is over the whole 3 x 64 x 960 row block.
+- Verdict: packed and measured. int8 is the accurate choice and saves 53 ms of 782.52; int4 is refused. fp32 stays the default and the read, not the precision, sets the prefill.
+- Follow-ups: cache the packed tower across calls so the 172.87 MB read is paid once per process; group 16 or 32 for the int4 tower; use int8 in `fullprefix` and the whole model.
+
+## EXP-109: the 10 step denoising loop with the prefix cache held  (2026-11-24)
+- Goal / question: EXP-106 ran one expert chunk. A real action chunk is 10 denoising steps over the same observation, so what does a chunk cost when the 241 row cache is built once and held?
+- Change (one thing): new `bench/denoise.py` (task `denoise`). It builds the full prefix with the tower at int8, captures the 16 expert layers into one graph, writes one of ten seeded action guesses into the captured input buffer, replays, and compares that with rebuilding the cache every step. CUDA events time the replays; wall clock times the build.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu denoise`, warmup 5, 20 iterations, one run.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, 50 action tokens, 241 prefix rows, int8 attention and down.
+- Result (measured): prefix build 818.98 ms, cache 9.87 MB held. One step 6.928 ms eager and 2.258 ms graphed. Ten steps 68.754 ms eager and 22.393 ms graphed. Chunk with the cache held 841.37 ms; chunk with the cache rebuilt every step 8212.38 ms, which is 10 x (measured build + measured step) and is derived, not timed. The graph is bit exact against eager.
+- Explanation / hypothesis: the loop is 2.7 percent of a chunk at this shape. The build is 97.3 percent, because it is 241 rows through 12 SigLIP layers plus 16 backbone layers while the expert is 50 rows of 720. So the cache is worth holding and the work that matters next is the prefill, not the step.
+- Caveat: the guesses are seeded noise and the timestep embedding is not modelled, because this checkpoint carries no time projection (`model.action_in_proj` is [720, 32] and there is nothing else at the model level). One run, and the machine is shared.
+- Verdict: the loop works and its cost is the build. Holding the cache is a 9.76x chunk saving against rebuilding.
+- Follow-ups: the same loop with the cache in fp16 or int8; a real observation; the state row and action_in_proj wired into the step.
+
+## EXP-110: the SigLIP tower against a transformers run  (2026-11-24)
+- Goal / question: EXP-107 built the image rows from a hand-written tower with no independent check of the math. Given the same weights and the same frame, does transformers produce the same 1024 patches?
+- Change: installed transformers 5.24.1 and safetensors 0.8.0 (DEC-095), new `bench/vision_check.py` (task `visioncheck`). It builds `SiglipVisionConfig` from the shapes this repo reads, loads the checkpoint's 197 vision tensors with `strict=False`, runs one seeded frame, and compares the 768 wide patches and the connector's 64 rows.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu visioncheck`.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, one 512 frame, fp32 on both sides.
+- Result (measured): 197 tensors loaded, 0 missing, 0 unexpected. Patches [1024, 768]: max abs 2.16e-04, relative L2 4.42e-06, cosine 1.00000. Connector rows [64, 960]: max abs 6.77e-05, relative L2 2.07e-06, cosine 1.00000.
+- Explanation / hypothesis: the two implementations agree to fp32 accumulation order, so the hand-written reading of the tower is correct, including the row major position table, the 1 / sqrt(64) scale, the tanh GELU and the 1e-6 layer norm.
+- First attempt (failure): the state dict was mapped to `vision_model.<suffix>`, the transformers 4.x spelling. transformers 5 owns the transformer directly, so all 197 keys were unexpected and the comparison read cosine -0.01193 while `strict=False` still reported success. The fix drops the wrapper prefix, and `vision_use_head=False` keeps the random classification head out of the state.
+- Caveat: one frame of seeded noise, not a camera image. The comparison covers the tower and the connector, not the 48 language rows or the cache.
+- Verdict: the tower is verified numerically against an independent implementation.
+- Follow-ups: the same check with three real frames; a tolerance assertion in the suite once a checkpoint is guaranteed present in CI (it is not).

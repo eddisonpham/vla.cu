@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 43 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 46 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -90,7 +90,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 253 tests on a GPU, 51 passed and 202 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
+| CI and gates | 258 tests on a GPU, 54 passed and 204 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
 | Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094); `fused=True` runs its tail in one launch, measured slower than a captured chain (EXP-097) |
@@ -98,7 +98,11 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Real expert at 50 tokens | all 16 expert layers on the GEMM path, cross attention on the odd ones reading the real 48 row VLM key and value cache: fp32 392.98 MB and 7.082 ms, int8 attention and down 98.68 MB and 2.290 ms (3.09x, cosine 0.99997), int4 down 88.31 MB and 2.698 ms (2.63x, cosine 0.99847), int4 attention and down 76.71 MB and 3.516 ms (2.01x, cosine 0.99613) (EXP-104, EXP-105) |
 | int4 attention on real weights | 4-bit q, k, v and o at 50 tokens costs 1.000 ms more than int8 attention (3.290 against 2.290 ms) for 11.60 MB less and a lower cosine (0.99761 against 0.99997), so int8 attention stays the default (EXP-105) |
 | Whole model, one graph | 16 backbone layers over 48 prefix rows plus 16 expert layers over 50 action tokens, int8 attention and down, captured together: 4.899 ms against 19.638 eager (4.01x), 256.52 MB, cosine 0.99992 (EXP-106) |
-| Full 241 row prefix | 3 frames through the real SigLIP tower and connector (192 rows), 48 language rows, 1 state row: cache 9.87 MB, build 289.93 ms, expert on 241 keys reads 2.628 ms at cosine 0.99996 (int8 down) and 2.920 ms at 0.99858 (int4 down) (EXP-107) |
+| Full 241 row prefix | 3 frames through the real SigLIP tower and connector (192 rows), 48 language rows, 1 state row: cache 9.87 MB, the 16 text layers alone are 289.93 to 388.80 ms across runs, expert on 241 keys reads 2.628 ms at cosine 0.99996 (int8 down) and 2.920 ms at 0.99858 (int4 down) (EXP-107) |
+| SigLIP tower precision | the tower is 172.87 MB of bf16 in the checkpoint and is read in full at any stored width: fp32 build 231.13 ms plus 170.64 ms for 3 frames, int8 build 247.39 ms plus 89.96 ms at cosine 0.99956, int4 256.62 ms plus 174.33 ms at 0.94484, so int8 moves the prefill 782.52 to 729.55 ms and int4 loses on both axes (EXP-108) |
+| Prefill split | vision 393.72 ms against 388.80 ms for the 16 text layers at fp32, so the tower is about half of a prefill and the string of 16 backbone weight reads is the other half (EXP-108) |
+| 10 step denoising loop | the 241 row cache built once at 818.98 ms, then 10 graphed expert steps at 2.258 ms each, so a chunk is 841.37 ms against 8212.38 ms if the cache were rebuilt every step (EXP-109) |
+| Tower cross-check | all 197 vision tensors load into transformers 5.24.1 `SiglipVisionModel` with nothing missing; patches agree to 2.16e-04 max abs and 4.42e-06 relative L2, connector rows to 6.77e-05, cosine 1.00000 (EXP-110) |
 | int4 attention rung | int4 attention with int8 down reads 0.93242 over four blocks, against 0.90671 with int4 down and 0.97606 with int8 attention, so 4-bit attention costs more accuracy than 4-bit down (EXP-103) |
 | Captured tail at 720 | at one token the cooperative tail reads 0.58x the captured chain at 720/1920 and 0.50x at 960/2560, so the smaller width does not change the verdict (EXP-100) |
 | Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |
@@ -131,7 +135,9 @@ pip install -e .[triton,dev]
 ```
 
 The base install needs torch only. The Triton extra resolves to `triton-windows` on
-Windows, because the official wheel has no Windows build.
+Windows, because the official wheel has no Windows build. `visioncheck` is the one task
+that needs `transformers`, which `requirements.txt` installs and the CPU gate never
+imports.
 
 ## Use it in your model
 
@@ -187,6 +193,9 @@ python -m vla_cu realstack
 python -m vla_cu expertstack
 python -m vla_cu fullmodel
 python -m vla_cu fullprefix
+python -m vla_cu tower
+python -m vla_cu denoise
+python -m vla_cu visioncheck
 python -m vla_cu graphed
 python -m vla_cu style
 ```

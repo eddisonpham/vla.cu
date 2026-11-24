@@ -9,67 +9,64 @@
 
 ## Campaign
 
-The deployed prefix shape is built: 192 image rows from the real SigLIP tower and
-connector, 48 language rows, 1 state row. The expert holds its cosine on 241 keys. What is
-left is content, not structure: real frames, a numerical cross-check of the tower, and the
-10 step loop.
+The deployed prefix is built, packed and now numerically verified, and the 10 step loop is
+measured: a chunk costs the prefill, not the steps. What is left is content (real frames, a
+real state) and making the prefill read cheaper, not more structure.
 
 ## Closed in this pass
 
-- **The full 241 row prefix.** `vla_cu/vision.py` runs the 12 layer SigLIP tower in fp32
-  over a 512 frame and the connector's 4x4 pixel shuffle plus projection, 64 rows per
-  frame. `full_prefix_inputs` adds 48 language rows and 1 state row with the state block
-  mask. Cache 16 x [241, 320] fp32, 9.87 MB, build 415.64 ms (EXP-107, DEC-094).
-- **Expert on 241 keys.** int8 down 2.710 ms at cosine 0.99996; int4 down 2.817 ms at
-  0.99858, both against fp32, both graphs bit exact.
+- **The tower is packed and verified.** `Tower` reads the 12 SigLIP layers once per prefill
+  and holds them at 32, 8 or 4 bits through `_Projection`. transformers 5.24.1 reproduces
+  the 1024 patches to 2.16e-04 max abs, cosine 1.00000 (EXP-110, DEC-095).
+- **The prefill split.** Tower 393.72 ms against 388.80 ms for the 16 text layers at fp32.
+  The checkpoint stores the tower as 172.87 MB of bf16 and every stored width reads it in
+  full, so int8 saves compute only (EXP-108, DEC-096).
+- **The 10 step loop.** Cache built once at 818.98 ms, ten graphed steps 22.393 ms, so a
+  chunk is 841.37 ms against 8212.38 ms with the cache rebuilt every step (EXP-109).
 
 ## What the numbers say
 
 | Measurement | Value |
 |---|---|
-| prefix rows | 241 = 3 x 64 image + 48 language + 1 state |
-| prefix cache | 16 layers x [241, 320] fp32, 9.87 MB |
-| prefix build | 289.93 ms per call, weight reads included (415.64 on the cold first run) |
-| expert on 241 keys, int8 down | 2.628 ms, cosine 0.99996, 98.68 MB |
-| expert on 241 keys, int4 down | 2.920 ms, cosine 0.99858, 88.31 MB |
-| expert on 48 keys, int8 down | 2.290 ms, cosine 0.99997 (EXP-105) |
-
-Key count moves timing by about 0.42 ms and cosine by about 1e-5, so it is not an
-accuracy lever.
+| tower as bf16 in the checkpoint | 172.87 MB |
+| tower held at fp32 / int8 / int4 | 392.59 / 102.73 / 60.07 MB |
+| tower, 3 frames, fp32 / int8 / int4 | 170.64 / 89.96 / 174.33 ms |
+| tower cosine against fp32, int8 / int4 | 0.99956 / 0.94484 |
+| prefill fp32 / int8 / int4 | 782.52 / 729.55 / 812.06 ms |
+| one expert step, graph / eager | 2.258 / 6.928 ms |
+| chunk, cache held / rebuilt | 841.37 / 8212.38 ms |
+| tower against transformers, 1024 patches | 2.16e-04 max abs, cosine 1.00000 |
 
 ## Gates
 
-- GPU suite 253 passed, CPU suite 51 passed and 202 skipped, style 0, clocks pinned at 1987 MHz.
-- `fullprefix`, `fullmodel`, `expertstack`, `realstack` exit 0; graphs bit exact.
-- 43 tasks, every one imported by `tests/test_tasks.py`.
-- Pixel shuffle order has two CPU tests; memcheck ran on the int4 attention path (EXP-105).
+- GPU suite 258 passed in a vcvars shell, CPU suite 54 passed and 204 skipped, style 0, 46 tasks.
+- `tower`, `denoise`, `visioncheck`, `fullprefix` exit 0; graphs bit exact against eager.
+- A plain shell without vcvars fails one test that builds the cooperative extension (ninja), which is the documented requirement, not a code failure.
 
 ## What works
 
-- `python -m vla_cu fullprefix` builds the 241 row cache and times the expert on it.
-- `vla_cu.vision.image_tokens(checkpoint, frames)` returns 64 rows per frame.
-- `vla_cu.prefix.full_prefix_inputs` returns the rows and the visibility mask.
+- `python -m vla_cu tower` splits the prefill into tower and text layers at three widths.
+- `python -m vla_cu denoise` prices the 10 step loop against rebuilding the cache.
+- `python -m vla_cu visioncheck` compares the tower with a transformers SigLIP run.
 
 ## Open edges
 
-- **Frames and state are synthetic.** Seeded noise and a zero state, so the structure is
-  real and the content is not.
-- **The tower has no numerical reference.** No transformers run exists to check the fp32
-  SigLIP forward; the pixel shuffle order is tested, the weights are the checkpoint's.
-- **One action chunk, not ten steps.** The real loop holds the prefix cache across 10
-  denoising passes.
-- **Rope wavelength is unresolved.** LeRobot rotates at 10000, the config says 100000.
-- **`ncu` is blocked** by ERR_NVGPUCTRPERM; the int4 extension cannot be instrumented.
-- **CI proves style, imports and collection**, not kernel correctness.
+- Frames and state are synthetic, the loop uses seeded guesses, and no timestep embedding is
+  modelled because this checkpoint carries no time projection.
+- Every read measured is warm in the OS file cache; no cold prefill exists in this pass.
+- The int4 tower fails the 0.98 gate at group 64.
+- `ncu` needs the elevated shell; racecheck never returns on the cooperative kernel; the int4
+  CUDA extension cannot be instrumented; CI is CPU only.
+- Rope wavelength is unresolved: LeRobot rotates at 10000, the config says 100000.
 
 ## What the human can do
 
-1. Run `python -m vla_cu ncu` from the elevated shell on the int4 attention GEMM.
-2. Pick the next experiment from BACKLOG, for example the 10 step loop.
+1. Pick the next item from `agents/BACKLOG.md`, for example three real frames or a cached packed tower.
+2. Run `python -m vla_cu ncu` from the elevated shell on the int4 attention GEMM.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. The 10 step denoising loop with the prefix cache held, which is the real chunk cost.
-2. Three real camera frames, to give the image rows scene content.
-3. Quantize the SigLIP tower, which is most of the 415.64 ms build.
+1. Cache the packed tower across calls, since the prefill is the weight read.
+2. Three real camera frames, so the image rows carry scene content.
+3. int4 down on the whole path, to see whether the model cosine tracks the expert 0.99847.

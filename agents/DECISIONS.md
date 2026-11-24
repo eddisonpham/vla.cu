@@ -699,3 +699,19 @@
 - Chosen and why: (b). The batch 1 GEMV is still the right kernel at one or two tokens, where a GEMM pads 1 row to 16 and reads a weight tile for nothing, and the GEMM is the right kernel once a chunk exists. (c) would regress the project's headline case, (a) leaves 500 launches in the path.
 - Cost accepted: two projection paths in `GqaTokenBlock`, and the int4 GEMM is only 3.6 to 7.6 percent of peak at M = 50, so this decision buys the dispatch and the byte count, not peak bandwidth.
 - Status: active, not yet wired
+
+## DEC-095: transformers is a verification-only dependency  (2026-11-24)
+- Context: the SigLIP tower had no independent numerical check, and a second hand-written reference would repeat the same reading of the model.
+- Options considered: (a) keep the tower unverified; (b) write a second fp32 reference here; (c) load the checkpoint into a transformers `SiglipVisionModel` and compare.
+- Chosen and why: (c). It is the only option that tests the reading rather than the arithmetic, it needed one wheel set (about 100 MB with tokenizers and huggingface_hub), and the import sits inside `vision_check.main`, so the test suite and CI never need it. `requirements.txt` lists `transformers<6` and `safetensors` under a note that says verification only.
+- Cost accepted: a CPU image that installs `requirements.txt` now pulls transformers for nothing, and a future major may rename keys again, which the first attempt in EXP-110 already hit.
+- Revisit if: CI install time matters, or the key mapping breaks on a transformers upgrade.
+- Status: active
+
+## DEC-096: one tower per prefill, fp32 by default, int8 as the accurate option  (2026-11-24)
+- Context: EXP-108 measured the tower at 32, 8 and 4 bits. int8 reads cosine 0.99956 and saves 53 ms of a 782.52 ms prefill; int4 reads 0.94484 and runs 29 ms slower than fp32.
+- Options considered: (a) default int8; (b) default fp32 with `bits` as an option; (c) default int4.
+- Chosen and why: (b). The default keeps the reference reading and the smallest surprise, `Tower` is one object per call so the weights are read once for three frames, and any caller can pass `bits=8` where the 53 ms matters. int4 is refused at group 64 because it fails the 0.98 gate.
+- Consequences: `image_tokens` and `full_prefix_inputs` take a `bits` and `tower_bits` argument; `full_prefix_inputs` now runs the tower once instead of twice, which was a bug.
+- Revisit if: a cached packed tower makes the read cheap, or real frames change the int8 error.
+- Status: active
