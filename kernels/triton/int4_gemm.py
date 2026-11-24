@@ -58,7 +58,7 @@ TILES: tuple[Tile, ...] = (
 
 
 @triton.jit
-def _int4_step(
+def int4_step(
     packed_ptr,
     scale_ptr,
     x_ptr,
@@ -153,7 +153,7 @@ def int4_gemm_kernel(
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     for k in range(split * BLOCK_K, K, BLOCK_K * SPLITS):
-        acc += _int4_step(packed_ptr, scale_ptr, x_ptr, m_offsets, n_offsets, m_mask, n_mask, k, K, GROUP, BLOCK_K)
+        acc += int4_step(packed_ptr, scale_ptr, x_ptr, m_offsets, n_offsets, m_mask, n_mask, k, K, GROUP, BLOCK_K)
 
     output = m_offsets[:, None] * N + n_offsets[None, :]
     out_mask = m_mask[:, None] & n_mask[None, :]
@@ -337,7 +337,7 @@ def int4_stream_k_kernel(
             out_mask = m_mask[:, None] & n_mask[None, :]
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for kk in range(k_first, k_last):
-                acc += _int4_step(
+                acc += int4_step(
                     packed_ptr, scale_ptr, x_ptr, m_offsets, n_offsets, m_mask, n_mask, kk * BLOCK_K, K, GROUP, BLOCK_K
                 )
             output = m_offsets[:, None] * N + n_offsets[None, :]
