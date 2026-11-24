@@ -17,6 +17,7 @@ TASKS: dict[str, str] = {
     "launch": "bench.launch_overhead",
     "gemv": "bench.int8_gemv_bench",
     "graph": "bench.graph_chain",
+    "graphed": "bench.graph_layer",
     "tune": "bench.int8_gemv_tune",
     "matrix": "bench.matrix",
     "layer": "bench.layer",
