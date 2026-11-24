@@ -85,6 +85,30 @@ def test_tile_for_covers_the_token_count_with_the_smallest_row_tile() -> None:
     assert [tile_for(tokens, 720)[1] for tokens in (1, 50)] == [64, 64]
 
 
+@pytest.mark.parametrize("splits", (2, 4))
+def test_split_k_matches_the_single_launch(splits: int) -> None:
+    """Splitting K changes the summation order, so the answer must stay within rounding."""
+    packed, scales, x, expected = reference(50, 720, 720, 16)
+    whole = int4_gemm(packed, scales, x, group_size=16)
+    partial = torch.empty((splits, 50, 720), device="cuda")
+    split = torch.empty((50, 720), device="cuda")
+
+    int4_gemm_into(packed, scales, x, split, group_size=16, splits=splits, partial=partial)
+
+    assert torch.allclose(split, whole, atol=1e-3, rtol=1e-3)
+    similarity = torch.nn.functional.cosine_similarity(split.flatten(), expected.flatten(), dim=0)
+    assert similarity.item() > 0.9995
+
+
+def test_split_k_needs_a_workspace() -> None:
+    """A split launch writes partials, so a missing buffer must fail before it launches."""
+    packed, scales, x, _ = reference(50, 720, 720, 16)
+    out = torch.empty((50, 720), device="cuda")
+
+    with pytest.raises(ValueError, match="partial"):
+        int4_gemm_into(packed, scales, x, out, group_size=16, splits=2)
+
+
 def test_rejects_shape_mismatch() -> None:
     """The activation width must equal twice the packed row length."""
     w = torch.zeros((4, 64), device="cuda")

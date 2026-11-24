@@ -27,6 +27,7 @@ from vla_cu.bench_utils import (
     enforce_memory_budget,
     fraction_of_peak,
     time_call,
+    time_pair,
     warm_gpu,
 )
 from vla_cu.quant import dequantize_int4, pack_int4
@@ -39,6 +40,8 @@ GROUP_FOR_INTERMEDIATE = 64
 SHAPES = ((EXPERT_INTERMEDIATE, EXPERT_HIDDEN, GROUP_FOR_HIDDEN), (EXPERT_HIDDEN, EXPERT_INTERMEDIATE, GROUP_FOR_INTERMEDIATE))
 WARMUP = 5
 ITERATIONS = 20
+REPEATS = 5
+SPLITS = (1, 2, 4)
 CANDIDATES = (
     (16, 64, 64, 2),
     (16, 64, 128, 3),
@@ -80,12 +83,19 @@ def main() -> int:
         def half_gemm() -> None:
             torch.matmul(half_activations, half.transpose(0, 1), out=half_out)
 
+        partials = {s: torch.empty((s, TOKENS, n_out), device="cuda") for s in SPLITS if s > 1}
+
         def int4_gemm() -> None:
             int4_gemm_into(packed, scales, activations, out, group_size=group)
+
+        def split_gemm(splits: int) -> None:
+            int4_gemm_into(packed, scales, activations, out, group_size=group, splits=splits, partial=partials[splits])
 
         gemv_loop()
         half_gemm()
         int4_gemm()
+        for splits in SPLITS[1:]:
+            split_gemm(splits)
         torch.cuda.synchronize()
 
         gemv_bytes = TOKENS * (n_out * n_in // 2 + 4 * n_out * n_in // group + 4 * n_in) + 4 * TOKENS * n_out
@@ -94,6 +104,9 @@ def main() -> int:
         gemv_seconds = time_call(gemv_loop, WARMUP, ITERATIONS)
         gemm_seconds = time_call(half_gemm, WARMUP, ITERATIONS)
         int4_seconds = time_call(int4_gemm, WARMUP, ITERATIONS)
+        split_seconds = {1: int4_seconds}
+        for splits in SPLITS[1:]:
+            split_seconds[splits] = time_call(lambda s=splits: split_gemm(s), WARMUP, ITERATIONS)
 
         for name, n_bytes, seconds in (
             ("gemv loop x50", gemv_bytes, gemv_seconds),
@@ -126,8 +139,20 @@ def main() -> int:
                 f"{candidate[0]:>7}  {candidate[1]:>7}  {candidate[2]:>7}  {candidate[3]:>6}  "
                 f"{staged / 1e6:>9.2f}  {seconds * 1e3:>8.3f}  {'yes' if candidate == chosen else '':>5}"
             )
+        print("split k, paired against the single launch, partials summed by a second launch")
+        print(f"{'splits':>6}  {'ms':>8}  {'speedup':>8}  {'range':>13}  {'MB partial':>10}")
+        for splits in SPLITS:
+            partial_mb = 4 * splits * TOKENS * n_out / 1e6 if splits > 1 else 0.0
+            if splits == 1:
+                print(f"{splits:>6}  {split_seconds[1] * 1e3:>8.3f}  {'1.00x':>8}  {'':>13}  {partial_mb:>10.2f}")
+                continue
+            pair = time_pair(int4_gemm, lambda s=splits: split_gemm(s), ITERATIONS, REPEATS, WARMUP)
+            print(
+                f"{splits:>6}  {pair.b * 1e3:>8.3f}  {pair.ratio:>7.2f}x  "
+                f"{pair.ratio_low:.2f} to {pair.ratio_high:.2f}  {partial_mb:>10.2f}"
+            )
         print()
-        del w, packed, scales, activations, half, half_activations, out, half_out
+        del w, packed, scales, activations, half, half_activations, out, half_out, partials
 
     return 0
 
