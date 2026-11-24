@@ -16,6 +16,7 @@ triton = [
     "triton-windows>=3.9; sys_platform == 'win32'",
 ]
 dev = ["pytest>=8", "ninja>=1.13"]
+compare = ["bitsandbytes>=0.50; sys_platform == 'win32'", "bitsandbytes>=0.50; sys_platform != 'win32'"]
 
 [tool.setuptools.packages.find]
 include = ["vla_cu*", "kernels*", "bench*", "scripts*"]
