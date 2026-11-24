@@ -49,6 +49,27 @@ def _norm(x: Tensor, weight: Tensor) -> Tensor:
     return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + EPS) * weight
 
 
+_WEIGHTS: dict[tuple[str, int, int], list[list[Tensor]]] = {}
+
+
+def backbone_weights(checkpoint: Checkpoint, layers: int = LAYERS) -> list[list[Tensor]]:
+    """Return the fp32 tensors of every backbone layer, read once per process.
+
+    A prefill re-reads about 315 MB of bf16 to rebuild the key and value cache, so the
+    layer weights are held the way `vision.tower_for` holds the tower. One entry, keyed by
+    path, header length and layer count; a different key drops the previous set, which
+    bounds the GPU memory kept between calls.
+    """
+    key = (str(checkpoint.path), checkpoint.header_bytes, layers)
+    held = _WEIGHTS.get(key)
+    if held is None:
+        _WEIGHTS.clear()
+        held = _WEIGHTS[key] = [
+            [_read(checkpoint, f"{BASE}.layers.{index}.{name}") for name in WEIGHTS] for index in range(layers)
+        ]
+    return held
+
+
 def prefix_inputs(checkpoint: Checkpoint, tokens: int = TOKENS) -> Tensor:
     """Return the prefix rows [tokens, 960]: real embedding rows scaled as the prefill scales them."""
     embed = checkpoint.read(f"{BASE}.embed_tokens.weight")
@@ -68,10 +89,9 @@ def cache_from_rows(
     x = rows
     keys: list[Tensor] = []
     values: list[Tensor] = []
+    held = backbone_weights(checkpoint, layers)
     for index in range(layers):
-        prefix = f"{BASE}.layers.{index}"
-        weights = [_read(checkpoint, f"{prefix}.{name}") for name in WEIGHTS]
-        input_norm, post_norm, wq, wk, wv, wo, gate, up, down = weights
+        input_norm, post_norm, wq, wk, wv, wo, gate, up, down = held[index]
         normed = _norm(x, input_norm)
         q = normed @ wq.T
         k = normed @ wk.T

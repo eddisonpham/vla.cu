@@ -55,18 +55,21 @@ def main() -> int:
     print("frames are seeded uniform noise and the state is zeros, not measured inputs")
 
     rows = {}
-    caches = {}
     for tower_bits in (32, 8):
         rows[tower_bits], visible = full_prefix_inputs(checkpoint, frames, state, tower_bits=tower_bits)
-        caches[tower_bits] = cache_from_rows(checkpoint, rows[tower_bits], visible)
+    first_seconds = elapsed(lambda: cache_from_rows(checkpoint, rows[8], visible), repeats=1)
+    build_seconds = elapsed(lambda: cache_from_rows(checkpoint, rows[8], visible))
+    caches = {tower_bits: cache_from_rows(checkpoint, rows[tower_bits], visible) for tower_bits in (32, 8)}
     cached_keys, cached_values = caches[8]
     n_bytes = sum(tensor.numel() * 4 for tensor in cached_keys + cached_values)
-    build_seconds = elapsed(lambda: cache_from_rows(checkpoint, rows[8], visible))
     print(
         f"tower int8 rows read cosine {cosine(rows[8].reshape(-1), rows[32].reshape(-1)):.5f} against fp32 | "
         f"cache {len(cached_keys)} layers x {tuple(cached_keys[0].shape)} fp32, {n_bytes / 1e6:.2f} MB"
     )
-    print(f"text cache build {build_seconds * 1e3:.2f} ms per call, wall clock, weights read included; the tower is timed by `tower`")
+    print(
+        f"text cache {first_seconds * 1e3:.2f} ms on the first call and {build_seconds * 1e3:.2f} ms after it, "
+        f"wall clock; the 16 layers' weights are held after the first read"
+    )
     print(f"warmup {WARMUP}, iterations {ITERATIONS}, expert attention at int8")
 
     def build(index: int, bits: int):
