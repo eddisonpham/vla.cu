@@ -866,6 +866,29 @@
 - Verdict: it answers the question and stays unusable. The staged mapping remains the one to keep.
 - Follow-ups: none for this file.
 
+## EXP-060: the causal chain at 50 tokens, the expert's real action chunk  (2026-11-23)
+- Goal / question: the longest case so far was 8 tokens. The expert predicts a 50 action chunk, where a layer costs one GEMV per token per projection. What does that cost, and what dominates it?
+- Change (one thing): `token_chain` takes `depths`, `warmup` and `iterations`, and `main` runs it once at 50 tokens over depths 1, 4 and 16 with 5 warmup and 10 iterations.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu scale`, clocks pinned, part of the same run as EXP-057.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, 16 real expert layers, int8 q/k/v/o and up, int4 down, fp32 reference, causal attention.
+- Result (measured), depth, MB, eager ms, graph ms, cos, rel L2: 1, 4.16, 20.879, 1.469, 0.99965, 2.66e-02. 4, 16.15, 83.799, 6.360, 0.99874, 5.03e-02. 16, 64.59, 336.872, 25.120, 0.99637, 8.53e-02. Exact at every depth.
+- Explanation / hypothesis: a layer is 200 launches at 50 tokens, four projections times 50 tokens, plus 50 o GEMVs. At depth 16 eager is 21.05 ms per layer, which is 105 us per launch, and graphed is 1.57 ms per layer, which is 7.85 us per launch. So the graph removes 93 percent of the cost and the remaining 25.120 ms is 3200 kernel launches that each do 4 MB of work or less. The scaling from 8 to 50 tokens is 4.86x for 6.25x the tokens, because a layer's 4 MB of weights partly stays in the 33.6 MB L2 across those launches.
+- Caveat: 5 warmup and 10 iterations, not the 20 and 100 used elsewhere, because a single eager call at depth 16 takes 0.34 s. Rows from this block are therefore noisier than the 2 to 8 token block, which is why it is reported separately.
+- Verdict: worked. The chain now covers the model's real chunk length, and the limit it names is the per-token GEMV, not attention.
+- Follow-ups: batch the projections over the token axis, so a layer is 4 launches instead of 200, then compare that batched GEMV against an int4 GEMM that reads each weight once per chunk.
+
+## EXP-061: the real expert matrices are launch bound, not bandwidth bound  (2026-11-23)
+- Goal / question: the plateau grid uses shapes from 256 x 1024 up. What do the actual 720 and 960 wide expert matrices cost, and what fraction of peak do they reach?
+- Change (one thing): none, this is the `real` task as it stands, run again on the current drivers.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu real` in vcvars, 20 warmup and 100 iterations, no repeats.
+- Result (measured): every path on every matrix lands between 0.021 and 0.031 ms. The smallest is expert.0.attn.o at 720 x 960 in 0.69 MB of int8 in 0.022 ms, 31 GB/s, 8 percent of peak. The largest is vlm.0.mlp.gate at 2560 x 960 in 2.47 MB of int8 in 0.023 ms, 107 GB/s, 28 percent. int4 g64, int4 g16 and the rotated variant differ by less than 0.01 ms from int8 on the same matrix, although their byte counts differ by up to 2x.
+- Explanation / hypothesis: if time did not move while bytes moved by 2x, the kernel is not waiting on memory. About 22 us is launch and grid overhead for a shape whose DRAM time is 2 to 7 us. That is the same floor EXP-015 saw on the MLP block, and it is why `scale` and `layer` graph their chains.
+- Caveat: no repeats and one process, so each cell carries the run's thermal state. Cosines match EXP-043, so the numbers are comparable in accuracy, not in time.
+- Verdict: the real shapes are a dispatch problem before they are a bandwidth problem.
+- Follow-ups: none new, this is the evidence behind the batched launch item in the backlog.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

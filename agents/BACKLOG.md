@@ -101,7 +101,10 @@ on purpose, not forgotten.
 - [x] Add a causal mask to `gqa_mix`. Done 2026-11-23, EXP-057, DEC-059: the mask exposed that the score contraction batched on tokens, so it now uses einsums and scores are [heads, tokens, tokens].
 - [x] Compare the config `rms_norm_eps` 1e-05 against the EPS the RMSNorm kernel uses. Done 2026-11-23, EXP-058, DEC-060: the kernel was 1e-6, now 1e-05, cosine unchanged to five decimals.
 - [x] Measure the wide kernel at `input_precision="tf32"`. Done 2026-11-23, EXP-059: 0.41x of staged, 0.174 ms at 4096 x 8192, but max abs diff 4.00e-03, so it is a diagnostic only.
-- [ ] Run the causal chain over a 50 token action chunk, which is the expert's real sequence length and the first case where the n x n score matrix costs more than the projections (EXP-057).
+- [x] Re-time the staged int4 GEMV at the expert's real 720 and 960 wide shapes. Done 2026-11-23, EXP-061: every path is 0.021 to 0.031 ms while bytes move 0.39 to 2.5 MB, so the real shapes are launch bound at about 22 us.
+- [x] Run the causal chain over a 50 token action chunk. Done 2026-11-23, EXP-060: 336.872 ms eager against 25.120 ms graphed at depth 16, exact, cosine 0.99637. The limit is 200 launches per layer, not the score matrix.
+- [ ] Batch the projections over the token axis so a 50 token layer is 4 launches instead of 200. This keeps the same weight traffic as today and removes the dispatch, and it is the cheapest test of the batched idea (EXP-060).
+- [ ] Compare that batched GEMV against an int4 GEMM at M = 50, which reads each weight once per chunk instead of once per token and is the shape the expert actually runs.
 - [ ] Replace the two einsums in `gqa_mix` with a small fused attention kernel once the token count is realistic (DEC-059).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches

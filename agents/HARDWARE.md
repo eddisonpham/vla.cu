@@ -129,3 +129,5 @@ The sections above record the state before an elevated shell was used. These row
 | 2026-11-23, pinned clock | wide Triton with a `tl.dot` reduction, 4096 x 8192 | 0.422 ms, 11.7 percent, 0.18x of staged, 970 instructions, 264 FFMA, 83 LDS | `python -m vla_cu plateau` in vcvars | EXP-056 |
 | 2026-11-23, pinned clock | wide dot at tf32, 4096 x 8192 | 0.174 ms, 28.3 percent, 0.41x of staged, 682 instructions, 8 FFMA, 24 LDS, max abs diff 4.00e-03 against ieee's 1.91e-06 | `python -m vla_cu plateau` in vcvars | EXP-059 |
 | 2026-11-23, pinned clock | depth 16 causal chain at 2, 3, 4 and 8 tokens | 30.500 / 39.244 / 39.159 / 84.353 ms eager, 2.723 / 3.025 / 3.068 / 4.897 ms graphed, exact, cosine 0.99783 to 0.99712 | `python -m vla_cu scale` | EXP-057 |
+| 2026-11-23, pinned clock | depth 16 causal chain at 50 tokens | 336.872 ms eager, 25.120 ms graphed, 200 launches per layer, exact, cosine 0.99637 | `python -m vla_cu scale` | EXP-060 |
+| 2026-11-23, pinned clock | real expert matrices, one GEMV each | 0.021 to 0.031 ms for 0.39 to 2.5 MB, 8 to 28 percent of peak, launch bound at about 22 us | `python -m vla_cu real` | EXP-061 |
