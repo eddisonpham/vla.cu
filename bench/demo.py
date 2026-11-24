@@ -101,7 +101,7 @@ def main() -> int:
 
     current = torch.empty(HIDDEN, device="cuda")
     following = torch.empty(HIDDEN, device="cuda")
-    fp32_a = torch.empty(HIDDEN, device="cuda")
+    fp32_a = torch.empty(INTERMEDIATE, device="cuda")
     fp32_b = torch.empty(HIDDEN, device="cuda")
 
     def chain() -> torch.Tensor:
