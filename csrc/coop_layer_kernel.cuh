@@ -7,18 +7,21 @@
 
 namespace vla_cu_coop {
 
-namespace cg = cooperative_groups;
-
-constexpr int HIDDEN = 720;
-constexpr int INTERMEDIATE = 1920;
 constexpr int GROUP = 64;
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
 constexpr int MAX_TOKENS = 64;
 constexpr int UP_TOKENS = 16;
 constexpr int DOWN_TOKENS = 8;
-constexpr int SHARED_FLOATS = INTERMEDIATE * DOWN_TOKENS;
 constexpr float EPS = 1e-5f;
+
+inline int shared_bytes_for(int hidden, int intermediate) {
+    const int up = UP_TOKENS * hidden;
+    const int down = DOWN_TOKENS * intermediate;
+    const int largest = up > down ? up : down;
+    const int staged = largest > hidden + THREADS ? largest : hidden + THREADS;
+    return (staged + 16) * static_cast<int>(sizeof(float));
+}
 
 __device__ __forceinline__ float silu(float value) {
     return value / (1.0f + __expf(-value));
@@ -52,21 +55,22 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
                                   float* __restrict__ normed,
                                   float* __restrict__ act,
                                   float* __restrict__ out,
-                                  int tokens) {
-    cg::grid_group grid = cg::this_grid();
+                                  int tokens,
+                                  int hidden,
+                                  int intermediate) {
     extern __shared__ float shared[];
     float* row = shared;
-    float* partial = shared + HIDDEN;
+    float* partial = shared + hidden;
 
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
 
     for (int token = blockIdx.x; token < tokens; token += gridDim.x) {
         float squares = 0.0f;
-        for (int k = threadIdx.x; k < HIDDEN; k += THREADS) {
-            const float value = x[token * HIDDEN + k] + other[token * HIDDEN + k];
+        for (int k = threadIdx.x; k < hidden; k += THREADS) {
+            const float value = x[token * hidden + k] + other[token * hidden + k];
             row[k] = value;
-            added[token * HIDDEN + k] = value;
+            added[token * hidden + k] = value;
             squares += value * value;
         }
         partial[threadIdx.x] = squares;
@@ -77,40 +81,40 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
             }
             __syncthreads();
         }
-        const float inverse = rsqrtf(partial[0] / HIDDEN + EPS);
-        for (int k = threadIdx.x; k < HIDDEN; k += THREADS) {
-            normed[token * HIDDEN + k] = row[k] * inverse * weight[k];
+        const float inverse = rsqrtf(partial[0] / hidden + EPS);
+        for (int k = threadIdx.x; k < hidden; k += THREADS) {
+            normed[token * hidden + k] = row[k] * inverse * weight[k];
         }
         __syncthreads();
     }
 
-    grid.sync();
+    cooperative_groups::this_grid().sync();
 
     for (int first = 0; first < tokens; first += UP_TOKENS) {
         const int held = tokens - first < UP_TOKENS ? tokens - first : UP_TOKENS;
-        for (int i = threadIdx.x; i < held * HIDDEN; i += THREADS) {
-            shared[i] = normed[(first + i / HIDDEN) * HIDDEN + i % HIDDEN];
+        for (int i = threadIdx.x; i < held * hidden; i += THREADS) {
+            shared[i] = normed[(first + i / hidden) * hidden + i % hidden];
         }
         __syncthreads();
-        for (int out_row = blockIdx.x + gridDim.x * warp; out_row < INTERMEDIATE; out_row += gridDim.x * WARPS) {
-            const signed char* weights = up + static_cast<long>(out_row) * HIDDEN;
+        for (int out_row = blockIdx.x + gridDim.x * warp; out_row < intermediate; out_row += gridDim.x * WARPS) {
+            const signed char* weights = up + static_cast<long>(out_row) * hidden;
             const float scale = up_scales[out_row];
             float acc[UP_TOKENS];
             for (int t = 0; t < held; ++t) {
                 acc[t] = 0.0f;
             }
-            for (int base = 0; base < HIDDEN; base += 128) {
+            for (int base = 0; base < hidden; base += 128) {
                 const int col = base + lane * 4;
-                if (col + 4 <= HIDDEN) {
+                if (col + 4 <= hidden) {
                     const int word = *reinterpret_cast<const int*>(weights + col);
                     for (int t = 0; t < held; ++t) {
-                        acc[t] += dot_four(word, *reinterpret_cast<const float4*>(shared + t * HIDDEN + col));
+                        acc[t] += dot_four(word, *reinterpret_cast<const float4*>(shared + t * hidden + col));
                     }
                 } else {
-                    for (int c = col; c < HIDDEN; ++c) {
+                    for (int c = col; c < hidden; ++c) {
                         const float value = static_cast<float>(weights[c]);
                         for (int t = 0; t < held; ++t) {
-                            acc[t] += value * shared[t * HIDDEN + c];
+                            acc[t] += value * shared[t * hidden + c];
                         }
                     }
                 }
@@ -118,36 +122,36 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
             for (int t = 0; t < held; ++t) {
                 const float total = warp_sum(acc[t]);
                 if (lane == 0) {
-                    act[(first + t) * INTERMEDIATE + out_row] = silu(total * scale);
+                    act[(first + t) * intermediate + out_row] = silu(total * scale);
                 }
             }
         }
         __syncthreads();
     }
 
-    grid.sync();
+    cooperative_groups::this_grid().sync();
 
     for (int first = 0; first < tokens; first += DOWN_TOKENS) {
         const int held = tokens - first < DOWN_TOKENS ? tokens - first : DOWN_TOKENS;
-        for (int i = threadIdx.x; i < held * INTERMEDIATE; i += THREADS) {
-            shared[i] = act[(first + i / INTERMEDIATE) * INTERMEDIATE + i % INTERMEDIATE];
+        for (int i = threadIdx.x; i < held * intermediate; i += THREADS) {
+            shared[i] = act[(first + i / intermediate) * intermediate + i % intermediate];
         }
         __syncthreads();
-        for (int out_row = blockIdx.x + gridDim.x * warp; out_row < HIDDEN; out_row += gridDim.x * WARPS) {
-            const unsigned char* bytes = down + static_cast<long>(out_row) * (INTERMEDIATE / 2);
-            const float* scales = down_scales + static_cast<long>(out_row) * (INTERMEDIATE / GROUP);
+        for (int out_row = blockIdx.x + gridDim.x * warp; out_row < hidden; out_row += gridDim.x * WARPS) {
+            const unsigned char* bytes = down + static_cast<long>(out_row) * (intermediate / 2);
+            const float* scales = down_scales + static_cast<long>(out_row) * (intermediate / GROUP);
             float acc[DOWN_TOKENS];
             for (int t = 0; t < held; ++t) {
                 acc[t] = 0.0f;
             }
-            for (int base = 0; base < INTERMEDIATE; base += 256) {
+            for (int base = 0; base < intermediate; base += 256) {
                 const int weight_index = base + lane * 8;
-                if (weight_index < INTERMEDIATE) {
+                if (weight_index < intermediate) {
                     const unsigned int word = *reinterpret_cast<const unsigned int*>(bytes + weight_index / 2);
                     const float group_scale = scales[weight_index / GROUP];
                     for (int t = 0; t < held; ++t) {
-                        const float4 lo = *reinterpret_cast<const float4*>(shared + t * INTERMEDIATE + weight_index);
-                        const float4 hi = *reinterpret_cast<const float4*>(shared + t * INTERMEDIATE + weight_index + 4);
+                        const float4 lo = *reinterpret_cast<const float4*>(shared + t * intermediate + weight_index);
+                        const float4 hi = *reinterpret_cast<const float4*>(shared + t * intermediate + weight_index + 4);
                         acc[t] += vla_cu_int4::dot_eight(word, lo, hi) * group_scale;
                     }
                 }
@@ -156,7 +160,7 @@ __global__ void coop_layer_kernel(const float* __restrict__ x,
                 const float total = warp_sum(acc[t]);
                 if (lane == 0) {
                     const int token = first + t;
-                    out[token * HIDDEN + out_row] = added[token * HIDDEN + out_row] + total;
+                    out[token * hidden + out_row] = added[token * hidden + out_row] + total;
                 }
             }
         }

@@ -4,11 +4,14 @@ Concept: a grid barrier is only legal when every block of the grid is resident a
 same time, and `cudaLaunchCooperativeKernel` is what makes the driver promise that.
 Inside the kernel `cooperative_groups::this_grid().sync()` then separates the stages,
 so the residual add, the norm, the int8 up projection, SiLU, the int4 down projection
-and the second residual add run as one launch instead of five.
+and the second residual add run as one launch instead of five. Both projections are
+16 x 16 WMMA tiles: the block stages one 16 token activation tile in shared memory,
+each warp owns a 16 column output tile, and the K loop dequantizes the weight tile into
+shared memory and issues one tensor core dot per step.
 
-The kernel is written for one expert layer: hidden 720, intermediate 1920, group 64 for
-the int4 weights, and at most 64 tokens. It launches one block per SM, so the barrier
-cannot wait on a block the scheduler has not started.
+Widths come from the tensors, not from a constant, so any layer whose hidden width is a
+multiple of 16 and whose intermediate width is a multiple of 64 can use it. Shared memory
+is sized from those widths on the host.
 
 Task: python -m vla_cu coop
 """
@@ -72,23 +75,28 @@ def coop_layer_into(
     """Write the layer tail for every token with one cooperative launch.
 
     Computes added = x + other, normed = rmsnorm(added), act = silu(up @ normed) and
-    out = added + down @ act. Shapes: x, other, added, normed and out are fp32
-    [tokens, 720]; weight fp32 [720]; up int8 [1920, 720] with fp32 rows scales [1920];
-    down uint8 [720, 960] with fp32 group scales [720, 30]; act fp32 [tokens, 1920].
-    `blocks` defaults to one per SM, which is the most a cooperative launch may ask for
-    unless occupancy says otherwise.
+    out = added + down @ act. Shapes come from the tensors: x, other, added, normed and
+    out are fp32 [tokens, hidden]; weight fp32 [hidden]; up int8 [intermediate, hidden]
+    with fp32 row scales [intermediate]; down uint8 [hidden, intermediate // 2] with fp32
+    group scales [hidden, intermediate // 64]; act fp32 [tokens, intermediate]. The hidden
+    width must divide by 16 and the intermediate width by 64. `blocks` defaults to the
+    co-resident block capacity, at most one per SM.
     """
     tokens = x.shape[0]
     require(1 <= tokens <= MAX_TOKENS, f"the cooperative kernel holds 1 to {MAX_TOKENS} tokens, got {tokens}")
-    require(tuple(x.shape) == (tokens, HIDDEN), f"expected x [{tokens}, {HIDDEN}], got {tuple(x.shape)}")
-    require(weight.shape == (HIDDEN,), f"expected weight [{HIDDEN}], got {tuple(weight.shape)}")
-    require(tuple(up.shape) == (INTERMEDIATE, HIDDEN), f"expected up [{INTERMEDIATE}, {HIDDEN}], got {tuple(up.shape)}")
+    require(x.dim() == 2 and weight.dim() == 1, f"expected x [tokens, hidden] and weight [hidden], got {tuple(x.shape)} and {tuple(weight.shape)}")
+    hidden = weight.shape[0]
+    require(x.shape == (tokens, hidden), f"expected x [{tokens}, {hidden}], got {tuple(x.shape)}")
+    require(hidden % 16 == 0, f"hidden must divide by 16 for the tensor core K step, got {hidden}")
+    require(up.dim() == 2 and up.shape[1] == hidden, f"expected up [intermediate, {hidden}], got {tuple(up.shape)}")
+    intermediate = up.shape[0]
+    require(intermediate % GROUP == 0, f"intermediate must divide by {GROUP} for the int4 groups, got {intermediate}")
     require(up.dtype == torch.int8, f"expected int8 codes for up, got {up.dtype}")
-    require(up_scales.shape == (INTERMEDIATE,), f"expected up scales [{INTERMEDIATE}], got {tuple(up_scales.shape)}")
-    require(tuple(down.shape) == (HIDDEN, INTERMEDIATE // 2), f"expected down [{HIDDEN}, {INTERMEDIATE // 2}], got {tuple(down.shape)}")
+    require(up_scales.shape == (intermediate,), f"expected up scales [{intermediate}], got {tuple(up_scales.shape)}")
+    require(tuple(down.shape) == (hidden, intermediate // 2), f"expected down [{hidden}, {intermediate // 2}], got {tuple(down.shape)}")
     require(down.dtype == torch.uint8, f"expected uint8 packed down weights, got {down.dtype}")
-    require(tuple(down_scales.shape) == (HIDDEN, INTERMEDIATE // GROUP), f"expected down scales [{(HIDDEN, INTERMEDIATE // GROUP)}], got {tuple(down_scales.shape)}")
-    require(tuple(act.shape) == (tokens, INTERMEDIATE), f"expected act [{tokens}, {INTERMEDIATE}], got {tuple(act.shape)}")
+    require(tuple(down_scales.shape) == (hidden, intermediate // GROUP), f"expected down scales [{(hidden, intermediate // GROUP)}], got {tuple(down_scales.shape)}")
+    require(tuple(act.shape) == (tokens, intermediate), f"expected act [{tokens}, {intermediate}], got {tuple(act.shape)}")
     extension().coop_layer_launch(
         x, other, weight, up, up_scales, down, down_scales, added, normed, act, out, blocks
     )
