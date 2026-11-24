@@ -1,9 +1,9 @@
 """The whole action expert at 50 tokens, int8 against int4 down, against the fp32 chain.
 
 Concept: the expert runs over an action chunk, so every projection is a GEMM over 50 rows,
-and every second layer cross attends to a 960 wide prefix while q reads the 720 wide expert
-stream. This builds every expert layer through `layer_from_checkpoint` at 50 tokens, checks
-each depth against fp32 with the same fixed prefix, and times captured graphs.
+and every second layer cross attends to the 48 row VLM key and value cache while q reads
+the 720 wide expert stream. This builds every expert layer through `layer_from_checkpoint`,
+checks each depth against fp32 with the same real prefix, and times captured graphs.
 
 Task: python -m vla_cu expertstack
 """
@@ -19,6 +19,7 @@ from vla_cu.bench_utils import enforce_memory_budget, time_call, warm_gpu
 from vla_cu.blocks import gqa_mix
 from vla_cu.build import layer_from_checkpoint
 from vla_cu.checkpoint import open_checkpoint
+from vla_cu.prefix import TOKENS as PREFIX_TOKENS, prefix_cache
 
 LAYERS = 16
 TOKENS = 50
@@ -49,13 +50,18 @@ def normalize(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 
 def reference_layer(
-    x: torch.Tensor, weights: tuple[torch.Tensor, ...], other: torch.Tensor | None
+    x: torch.Tensor, weights: tuple[torch.Tensor, ...], prefix: tuple[torch.Tensor, torch.Tensor] | None
 ) -> torch.Tensor:
-    """Return one expert layer in fp32 for `x` [tokens, hidden], cross attending to `other` when given."""
+    """Return one expert layer in fp32 for `x` [tokens, hidden], reading the cached keys and values when given."""
     input_norm, post_norm, wq, wk, wv, wo, gate, up, down = weights
     normed = normalize(x, input_norm)
-    source = normed if other is None else other
-    residual = x + (gqa_mix(normed @ wq.T, source @ wk.T, source @ wv.T) @ wo.T)
+    query = normed @ wq.T
+    if prefix is None:
+        mixed = gqa_mix(query, normed @ wk.T, normed @ wv.T)
+    else:
+        cached_keys, cached_values = prefix
+        mixed = gqa_mix(query, cached_keys @ wk.T, cached_values @ wv.T, causal=False, rotate_keys=False)
+    residual = x + (mixed @ wo.T)
     normed = normalize(residual, post_norm)
     return residual + (F.silu(normed @ gate.T) * (normed @ up.T)) @ down.T
 
@@ -64,8 +70,11 @@ def run_stack(layers, prefixes, x, first, second, result) -> None:
     """Run every layer from `x`, alternating two chunk buffers, and copy the last output into `result`."""
     current, target = first, second
     current.copy_(x)
-    for layer, other in zip(layers, prefixes):
-        layer.into(current, target, other)
+    for layer, prefix in zip(layers, prefixes):
+        if prefix is None:
+            layer.into(current, target)
+        else:
+            layer.into(current, target, prefix[0], prefix[1])
         current, target = target, current
     result.copy_(current)
 
@@ -77,19 +86,24 @@ def main() -> int:
     checkpoint = open_checkpoint(CHECKPOINT)
     print(f"GPU {torch.cuda.get_device_name(0)} | {checkpoint.path.name} | {LAYERS} expert layers | {TOKENS} tokens")
     print(f"warmup {WARMUP}, iterations {ITERATIONS}, down at int8 against int4, gate and up at int8")
+    print(f"prefix {PREFIX_TOKENS} real VLM rows from {LAYERS} backbone layers, keys and values read separately")
 
-    int8_layers = [
-        layer_from_checkpoint(checkpoint, index, tokens=TOKENS, down_bits=8, part="expert") for index in range(LAYERS)
-    ]
-    int4_layers = [
-        layer_from_checkpoint(checkpoint, index, tokens=TOKENS, down_bits=4, part="expert") for index in range(LAYERS)
-    ]
+    def build(index: int, bits: int):
+        """Build one expert layer, sizing the cross buffers for the prefix rows."""
+        other = PREFIX_TOKENS if index % 2 else TOKENS
+        return layer_from_checkpoint(
+            checkpoint, index, tokens=TOKENS, down_bits=bits, part="expert", other_tokens=other
+        )
+
+    int8_layers = [build(index, 8) for index in range(LAYERS)]
+    int4_layers = [build(index, 4) for index in range(LAYERS)]
     hidden = int8_layers[0].hidden_width
+    cached_keys, cached_values = prefix_cache(checkpoint)
     generator = torch.Generator(device="cuda").manual_seed(0)
-    prefixes = []
-    for layer in int8_layers:
-        width = layer.attention.other_width
-        prefixes.append(None if width == hidden else torch.randn((TOKENS, width), device="cuda", generator=generator))
+    prefixes = [
+        None if layer.attention.other_width == hidden else (cached_keys[index], cached_values[index])
+        for index, layer in enumerate(int8_layers)
+    ]
     x = torch.randn((TOKENS, hidden), device="cuda", generator=generator)
     reference = [read_reference(checkpoint, index) for index in range(LAYERS)]
 
@@ -100,8 +114,8 @@ def main() -> int:
     def fp32_chain() -> None:
         current, target = fp32_first, fp32_second
         current.copy_(x)
-        for weights, other in zip(reference, prefixes):
-            target.copy_(reference_layer(current, weights, other))
+        for weights, prefix in zip(reference, prefixes):
+            target.copy_(reference_layer(current, weights, prefix))
             current, target = target, current
         fp32_result.copy_(current)
 
@@ -114,9 +128,12 @@ def main() -> int:
         first, second = torch.empty_like(x), torch.empty_like(x)
         source = x
         per_layer = []
-        for index, (layer, other) in enumerate(zip(layers, prefixes)):
+        for index, (layer, prefix) in enumerate(zip(layers, prefixes)):
             target = first if index % 2 == 0 else second
-            layer.into(source, target, other)
+            if prefix is None:
+                layer.into(source, target)
+            else:
+                layer.into(source, target, prefix[0], prefix[1])
             source = target
             per_layer.append(target.clone())
         states[bits] = per_layer
