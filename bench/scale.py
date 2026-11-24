@@ -33,6 +33,10 @@ SHAPES = ((256, 1024), (1024, 1024), (2048, 4096), (4096, 8192), (8192, 16384), 
 GROUPS = (64, 32, 16, 8)
 STACKS = (1, 2, 4, 8, 16)
 TOKENS = (2, 3, 4, 8)
+CHUNK_TOKENS = 50
+CHUNK_STACKS = (1, 4, 16)
+CHUNK_WARMUP = 5
+CHUNK_ITERATIONS = 10
 EXPERT_LAYERS = 16
 WARMUP = 20
 ITERATIONS = 100
@@ -214,7 +218,9 @@ def stack_scale(checkpoint) -> None:
     print()
 
 
-def token_chain(checkpoint, tokens: int) -> None:
+def token_chain(
+    checkpoint, tokens: int, depths: tuple[int, ...] = STACKS, warmup: int = WARMUP, iterations: int = ITERATIONS
+) -> None:
     """Run the 16 real expert layers at `tokens` visible tokens.
 
     Two tokens make the softmax choose between two keys, up to eight make it choose among
@@ -226,6 +232,8 @@ def token_chain(checkpoint, tokens: int) -> None:
     CUDA graph, checked exact against the eager run before its time is printed.
     """
     print(f"stage 4: {tokens} tokens through the expert stack, q and k included")
+    if depths != STACKS:
+        print(f"subset of depths {depths}, {warmup} warmup and {iterations} iterations because a layer is {4 * tokens} launches")
     print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
     generator = torch.Generator(device="cuda").manual_seed(0)
     names = (
@@ -290,11 +298,11 @@ def token_chain(checkpoint, tokens: int) -> None:
         reference = reference + context @ wo.T
         normalized = torch.stack([reference_norm(reference[token], post_norm) for token in range(tokens)])
         reference = reference + F.silu(normalized @ up.T) @ down.T
-        if depth in STACKS:
+        if depth in depths:
             references[depth] = reference.clone()
         del wq, wk, wv, wo, up, down
 
-    for depth in STACKS:
+    for depth in depths:
         result = chain(depth).clone()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -303,8 +311,8 @@ def token_chain(checkpoint, tokens: int) -> None:
         graph.replay()
         torch.cuda.synchronize()
         exact = torch.equal(following if depth % 2 else current, result)
-        seconds = time_call(lambda d=depth: chain(d), WARMUP, ITERATIONS)
-        graph_seconds = time_call(graph.replay, WARMUP, ITERATIONS)
+        seconds = time_call(lambda d=depth: chain(d), warmup, iterations)
+        graph_seconds = time_call(graph.replay, warmup, iterations)
         n_bytes = sum(attention.bytes + mlp.bytes for attention, mlp, _, _ in blocks[:depth])
         flat = result.reshape(-1)
         expected = references[depth].reshape(-1)
@@ -312,7 +320,7 @@ def token_chain(checkpoint, tokens: int) -> None:
             f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
             f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
-    print(f"note: q and k rotate by position with theta {THETA:.0f} and the Llama pairing, attention is causal")
+    print(f"note: {4 * tokens} launches per layer, theta {THETA:.0f} with the Llama pairing, attention is causal")
     print()
 
 
@@ -328,6 +336,7 @@ def main() -> int:
     stack_scale(checkpoint)
     for tokens in TOKENS:
         token_chain(checkpoint, tokens)
+    token_chain(checkpoint, CHUNK_TOKENS, depths=CHUNK_STACKS, warmup=CHUNK_WARMUP, iterations=CHUNK_ITERATIONS)
     return 0
 
 
