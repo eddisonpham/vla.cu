@@ -1337,6 +1337,42 @@
 - Verdict: no win at either width. DEC-089 stands.
 - Follow-ups: none; the captured chain is the fast path for the tail.
 
+## EXP-101: all 16 backbone layers at int8 and int4  (2026-11-24)
+- Goal / question: EXP-099 measured three layers and the BACKLOG asked for the whole backbone. Where does cosine land after all 16 layers, and how do the bytes and time scale?
+- Change (one thing): `bench/real_stack.py` builds every backbone layer (`LAYERS = 16`) instead of three. No library change.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu realstack` inside vcvars, warmup 10, iterations 50.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, one token, checkpoint 906,712,520 bytes.
+- Result (measured): fp32 629.27 MB, 4.334 ms; int8 down 157.84 MB, 1.176 ms, 3.69x, cosine 0.99998, rel L2 6.74e-03; int4 down 140.57 MB, 1.101 ms, 3.94x, cosine 0.99965, rel L2 6.11e-02. Per layer int4 reads 0.99860, 0.99768, 0.99505, then 0.99965 from layer 4 to 16; int8 reads 0.99998 at every depth. Graphs bit exact.
+- Explanation / hypothesis: the first three layers sit at positions where their change moves the output most, and deeper layers add smaller changes to a large residual, so the final stack reads 0.99965 rather than continuing down. int4 saves 17.27 MB of 157.84 because only down is 4-bit, which is why 3.94x is barely above int8's 3.69x.
+- Caveat: one token, Gaussian activations, no VLM prefix. Total working set is under 1 GB, inside the 7 GB cap.
+- Verdict: worked. The full backbone holds 0.99965 at int4 down.
+- Follow-ups: the same 16 layers at 50 tokens with a real prefix; all 16 expert layers at 50 tokens, which EXP-102 then ran.
+
+## EXP-102: the expert stack at 50 tokens  (2026-11-24)
+- Goal / question: the expert runs over a chunk, so every projection is a GEMM. Does int4 down still pay at 50 tokens, and where does cosine land over all 16 expert layers?
+- Change (one thing): added `bench/expert_stack.py` (task `expertstack`). It builds all 16 expert layers through `layer_from_checkpoint` at 50 tokens, feeds a fixed random 320 wide prefix to the cross-attention layers (wk and wv are [320, 32] there), checks each depth against fp32, and times captured graphs.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu expertstack` inside vcvars, warmup 10, iterations 50.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, 50 tokens.
+- Result (measured): fp32 392.98 MB, 7.814 ms; int8 down 98.68 MB, 2.260 ms, 3.46x, cosine 0.99996, rel L2 8.40e-03; int4 down 88.31 MB, 2.731 ms, 2.86x, cosine 0.99847, rel L2 5.55e-02. Per layer int4 falls from 0.99989 to 0.99847 and int8 stays at 0.99996 to 1.00000. Graphs bit exact.
+- Explanation / hypothesis: int4 down saves 10.37 MB but runs 0.471 ms slower, because at 50 tokens down is an int4 GEMM whose body reads at 20 to 23 GB/s (EXP-079) while the int8 GEMM streams faster. Accuracy is not the cost at this depth; speed is.
+- Caveat: the prefix is random [50, 320], not a real VLM KV cache, and the activations are Gaussian. Expert layers alternate self and cross attention, and both are captured in the same graph.
+- Verdict: worked, and it changes the recommendation: int4 down is an accuracy-safe but speed-negative choice at 50 tokens.
+- Follow-ups: the same stack with the real 48 token VLM prefix and a measured key value cache; int4 attention plus int8 down at 50 tokens.
+
+## EXP-103: the int4 attention rung  (2026-11-24)
+- Goal / question: EXP-036 named int4 attention as the larger error but never measured it with int8 down, so the two error sources were entangled. Add the missing mix.
+- Change (one thing): `bench/block.py` MIXES gains (4, 8, "int4 attn, int8 down"). No kernel change.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu block`, warmup 10, iterations 50, four blocks, one token.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, 960/2560 synthetic Gaussian weights.
+- Result (measured), cosine after 1, 2, 3, 4 blocks: int4 attention and int4 down 0.98219, 0.96186, 0.94526, 0.90671 at 23.7 MB and 0.178 ms; int4 attention and int8 down 0.98754, 0.97180, 0.96195, 0.93242 at 28.0 MB and 0.121 ms; int8 attention and int4 down 0.99401, 0.98824, 0.98336, 0.97606 at 30.2 MB and 0.216 ms; int8 everywhere 0.99985, 0.99975, 0.99965, 0.99951 at 34.5 MB and 0.224 ms. fp32 stack 0.700 ms. Every graph bit exact.
+- Explanation / hypothesis: moving attention from int8 to int4 costs 0.044 at four blocks while moving down from int8 to int4 costs 0.023, so the attention projections are the larger 4-bit error even though they are one quarter of the bytes. The int4 attention with int8 down row is also the fastest at 0.121 ms, which is a tile effect, not a byte effect, and is not recommended without a repeat.
+- Caveat: synthetic Gaussian weights, four blocks, one token, projections only (no norms or residuals), so the absolute cosines are not the model's.
+- Verdict: worked. Int4 attention is the rung to avoid before int4 down.
+- Follow-ups: the same mix on real weights, where attention is int8 today; the 0.121 ms ordering needs a repeat before it is believed.
+
 ## EXP-087: one-command memcheck, and what it can actually see  (2026-11-24)
 - Goal / question: the memcheck gate existed as a pasted command. Can it be one task, and does it cover the CUDA kernels?
 - Change: `bench/sanitize.py` (task `sanitize`) runs memcheck over two probes: `bench/probes/int4.py` (three variants at K 320 and 1024) and `bench/probes/coop.py` (3, 17 and 26 tokens). A probe is a separate process because the tool instruments at launch.

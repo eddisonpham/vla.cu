@@ -28,10 +28,13 @@
 - [x] Grouped launch in a real attention block. Done 2026-11-23, EXP-031: two launches, 0.011 ms graphed against fp32's 0.052, bit exact, cosine 0.98804.
 - [x] An int8 grouped kernel. Done 2026-11-23, EXP-035: the attention block reads 0.99994 at int8 for 1.54x the int4 time.
 - [x] Package the project, add a style gate and CPU CI. Done 2026-11-23, EXP-039: editable install works, 47 CUDA comment lines moved to `docs/ARCHITECTURE.md`, gate at zero.
-- [ ] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error.
+- [x] The missing rung from EXP-036: int4 attention with int8 down, which separates the attention error from the down-projection error. Done 2026-11-24, EXP-103: 0.93242 at four blocks against 0.97606 for int8 attention with int4 down, so 4-bit attention is the larger error.
+- [ ] int4 attention with int8 down on real weights at one token and at 50 tokens.
 - [x] CI removed 2026-11-23 at the human's request (DEC-042). The local gate is `style`, `pytest`, `fuzz`, and the vcvars suite. A GPU runner is moot until CI returns.
 - [x] Read real weights from `lerobot/smolvla_base`. Done 2026-11-23, EXP-043: five matrices, `python -m vla_cu real`. Three layers measured 2026-11-24, EXP-099, `python -m vla_cu realstack`.
-- [ ] All 16 backbone layers at int8 and int4, one token, graphed; the expert stack at 50 tokens.
+- [x] All 16 backbone layers at int8 and int4, one token, graphed. Done 2026-11-24, EXP-101: cosine 0.99998 at int8 and 0.99965 at int4.
+- [x] The expert stack at 50 tokens. Done 2026-11-24, EXP-102: cosine 0.99996 at int8 and 0.99847 at int4; int4 down is 0.471 ms slower on the GEMM path.
+- [ ] The expert stack at 50 tokens with the real 48 token VLM prefix instead of a random one.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
 - [x] A real checkpoint with and without rotation. Done 2026-11-23, EXP-043 and DEC-045: rotation is inconsistent on real weights. A three layer stack at int8 and int4 is done 2026-11-24, EXP-099: cosine 0.99986 at int8 and 0.99505 at int4, 4.2 to 5.5x fp32.
 - [x] Explain the four-block cosine of 0.975. Done 2026-11-23, EXP-036: the MLP down projection is the limit. int4 down reads 0.976 over four blocks with int8 attention, int8 down reads 0.99951, and int4 attention on top of it reads 0.90671.
