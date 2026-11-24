@@ -18,7 +18,7 @@ from vla_cu.blocks import MlpTokenBlock
 from vla_cu.cuda_coop import HIDDEN, INTERMEDIATE, coop_layer_into
 from vla_cu.quant import GROUP_SIZE, pack_int4, quantize_int8
 
-TOKENS = (1, 2, 3, 8, 50)
+TOKENS = (1, 2, 3, 4, 8, 16, 32, 50, 64)
 REPEATS = 5
 ITERATIONS = 20
 WARMUP = 5

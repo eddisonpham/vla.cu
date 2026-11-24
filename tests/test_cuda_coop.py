@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     reason="no CUDA build toolchain on PATH; on Windows, run inside vcvars64.bat",
 )
 
-TOKENS = (1, 2, 3, 8, 50)
+TOKENS = (1, 2, 3, 8, 16, 17, 50, 64)
 
 
 def reference(
@@ -69,6 +69,25 @@ def test_matches_the_five_launch_path(tokens: int) -> None:
     torch.testing.assert_close(fused_added, added, rtol=1e-6, atol=1e-6)
     torch.testing.assert_close(fused_normed, normed, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(fused_out, expected, rtol=2e-2, atol=2e-2)
+
+
+def test_rejects_a_non_contiguous_input() -> None:
+    """The kernel reads float4 words, so a transposed view must be refused, not misread."""
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn((HIDDEN, 4), device="cuda", generator=generator).t()
+    other = torch.randn((4, HIDDEN), device="cuda", generator=generator)
+    weight = torch.randn(HIDDEN, device="cuda", generator=generator)
+    up = torch.randn((INTERMEDIATE, HIDDEN), device="cuda", generator=generator)
+    down = torch.randn((HIDDEN, INTERMEDIATE), device="cuda", generator=generator)
+    up_codes, up_scales = quantize_int8(up)
+    down_packed, down_scales = pack_int4(down, group_size=GROUP_SIZE)
+
+    with pytest.raises(RuntimeError):
+        coop_layer_into(
+            x, other, weight, up_codes, up_scales, down_packed, down_scales,
+            torch.empty((4, HIDDEN), device="cuda"), torch.empty((4, HIDDEN), device="cuda"),
+            torch.empty((4, INTERMEDIATE), device="cuda"), torch.empty((4, HIDDEN), device="cuda"),
+        )
 
 
 def test_rejects_more_tokens_than_the_kernel_holds() -> None:
