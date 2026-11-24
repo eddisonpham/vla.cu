@@ -55,6 +55,13 @@ CANDIDATES = (
 )
 
 
+def split_buffers(tokens: int, n_out: int, splits: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the partials and the zeroed arrival counters a one launch split needs."""
+    block_m, block_n, _, _ = tile_for(tokens, n_out)
+    tiles = -(-tokens // block_m) * -(-n_out // block_n)
+    return torch.empty((splits, tokens, n_out), device="cuda"), torch.zeros(tiles, device="cuda", dtype=torch.int32)
+
+
 def main() -> int:
     """Time the per-row GEMV loop against one int4 GEMM and one bf16 GEMM."""
     enforce_memory_budget()
@@ -83,13 +90,23 @@ def main() -> int:
         def half_gemm() -> None:
             torch.matmul(half_activations, half.transpose(0, 1), out=half_out)
 
-        partials = {s: torch.empty((s, TOKENS, n_out), device="cuda") for s in SPLITS if s > 1}
+        partials = {s: split_buffers(TOKENS, n_out, s) for s in SPLITS if s > 1}
 
         def int4_gemm() -> None:
             int4_gemm_into(packed, scales, activations, out, group_size=group)
 
         def split_gemm(splits: int) -> None:
-            int4_gemm_into(packed, scales, activations, out, group_size=group, splits=splits, partial=partials[splits])
+            workspace, counters = partials[splits]
+            int4_gemm_into(
+                packed,
+                scales,
+                activations,
+                out,
+                group_size=group,
+                splits=splits,
+                partial=workspace,
+                counters=counters,
+            )
 
         gemv_loop()
         half_gemm()
@@ -139,7 +156,11 @@ def main() -> int:
                 f"{candidate[0]:>7}  {candidate[1]:>7}  {candidate[2]:>7}  {candidate[3]:>6}  "
                 f"{staged / 1e6:>9.2f}  {seconds * 1e3:>8.3f}  {'yes' if candidate == chosen else '':>5}"
             )
-        print("split k, paired against the single launch, partials summed by a second launch")
+        split_gemm(SPLITS[-1])
+        first = out.clone()
+        split_gemm(SPLITS[-1])
+        print(f"split {SPLITS[-1]} repeats bit for bit: {torch.equal(first, out)}")
+        print("stream k, paired against the single launch, partials summed inside the launch")
         print(f"{'splits':>6}  {'ms':>8}  {'speedup':>8}  {'range':>13}  {'MB partial':>10}")
         for splits in SPLITS:
             partial_mb = 4 * splits * TOKENS * n_out / 1e6 if splits > 1 else 0.0

@@ -85,16 +85,26 @@ def test_tile_for_covers_the_token_count_with_the_smallest_row_tile() -> None:
     assert [tile_for(tokens, 720)[1] for tokens in (1, 50)] == [64, 64]
 
 
+def split_buffers(tokens: int, n_out: int, splits: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the partials and the zeroed arrival counters a one launch split needs."""
+    block_m, block_n, _, _ = tile_for(tokens, n_out)
+    tiles = -(-tokens // block_m) * -(-n_out // block_n)
+    return torch.empty((splits, tokens, n_out), device="cuda"), torch.zeros(tiles, device="cuda", dtype=torch.int32)
+
+
 @pytest.mark.parametrize("splits", (2, 4))
-def test_split_k_matches_the_single_launch(splits: int) -> None:
-    """Splitting K changes the summation order, so the answer must stay within rounding."""
+def test_stream_k_matches_the_single_launch(splits: int) -> None:
+    """The in launch recombine must sum in a fixed order and repeat bit for bit."""
     packed, scales, x, expected = reference(50, 720, 720, 16)
     whole = int4_gemm(packed, scales, x, group_size=16)
-    partial = torch.empty((splits, 50, 720), device="cuda")
+    partial, counters = split_buffers(50, 720, splits)
     split = torch.empty((50, 720), device="cuda")
 
-    int4_gemm_into(packed, scales, x, split, group_size=16, splits=splits, partial=partial)
+    int4_gemm_into(packed, scales, x, split, group_size=16, splits=splits, partial=partial, counters=counters)
+    first = split.clone()
+    int4_gemm_into(packed, scales, x, split, group_size=16, splits=splits, partial=partial, counters=counters)
 
+    assert torch.equal(split, first)
     assert torch.allclose(split, whole, atol=1e-3, rtol=1e-3)
     similarity = torch.nn.functional.cosine_similarity(split.flatten(), expected.flatten(), dim=0)
     assert similarity.item() > 0.9995
@@ -107,6 +117,33 @@ def test_split_k_needs_a_workspace() -> None:
 
     with pytest.raises(ValueError, match="partial"):
         int4_gemm_into(packed, scales, x, out, group_size=16, splits=2)
+
+
+def test_stream_k_survives_a_cuda_graph() -> None:
+    """A split launch uses atomics and counters, so it must still capture and replay exactly."""
+    packed, scales, x, _ = reference(50, 720, 720, 16)
+    partial, counters = split_buffers(50, 720, 2)
+    out = torch.empty((50, 720), device="cuda")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        int4_gemm_into(packed, scales, x, out, group_size=16, splits=2, partial=partial, counters=counters)
+    out.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    expected = int4_gemm(packed, scales, x, group_size=16)
+    assert torch.allclose(out, expected, atol=1e-3, rtol=1e-3)
+
+
+def test_split_k_needs_counters() -> None:
+    """The last arrival is found through the counters, so a missing table must fail early."""
+    packed, scales, x, _ = reference(50, 720, 720, 16)
+    partial, _ = split_buffers(50, 720, 2)
+    out = torch.empty((50, 720), device="cuda")
+
+    with pytest.raises(ValueError, match="counters"):
+        int4_gemm_into(packed, scales, x, out, group_size=16, splits=2, partial=partial)
 
 
 def test_rejects_shape_mismatch() -> None:

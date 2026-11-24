@@ -19,6 +19,11 @@ The tile is chosen from a menu, not from taste: shared memory decides which tile
 stage count fit, and `m50` sweeps the menu at the expert shapes. Long K steps amortize
 the loop, and deeper stages hide the load latency that a 12 to 30 step loop cannot.
 
+A K split combines inside the same launch: every program writes its partial to a
+workspace, then the last one to arrive sums the partials in split order and resets the
+arrival counter. The separate reduce launch this replaces was measured as the whole cost
+of the split (EXP-068, EXP-071).
+
 Task: python -m vla_cu m50
 """
 
@@ -34,7 +39,6 @@ from vla_cu.validate import check_int4_gemm, check_power_of_two, require
 BLOCK_N = 64
 BLOCK_K = 128
 NUM_STAGES = 2
-REDUCE_BLOCK = 1024
 MAX_BLOCK_M = 128
 SHARED_LIMIT_BYTES = 101376
 WIDE_ROWS = 1024
@@ -54,6 +58,8 @@ def int4_gemm_kernel(
     scale_ptr,
     x_ptr,
     out_ptr,
+    workspace_ptr,
+    counter_ptr,
     M,
     N,
     K,
@@ -66,13 +72,17 @@ def int4_gemm_kernel(
     """Dequantize int4 weight tiles in registers and dot them with a block of rows.
 
     packed: uint8 [N, K // 2], scales: fp32 or fp16 [N, K // GROUP], x: fp32 [M, K],
-    out: fp32 [M, N] when SPLITS is 1, otherwise partials [SPLITS, M, N].
+    out: fp32 [M, N], workspace: fp32 [SPLITS, M, N], counters: int32 [tiles], the last two
+    used only when SPLITS is above 1.
     Mapping: program (m, n, split) owns tokens [m*BLOCK_M, +BLOCK_M), outputs
     [n*BLOCK_N, +BLOCK_N) and walks every SPLITS'th K step, starting at its own. Each step
     loads a [BLOCK_N, BLOCK_K // 2] byte tile sitting on whole groups, splits it into low
     and high nibbles, applies the group scale, and issues two dots against the even and odd
-    halves of the activation tile. Expected bottleneck: compute once M grows, memory at
-    M = 1, and program count when N is narrow, which is what SPLITS buys.
+    halves of the activation tile.
+    A split launch then writes its partial, raises its tile's arrival counter with release
+    semantics, and the last arrival loads every partial with the L1 bypassed, sums them in
+    split order and resets the counter, which makes the sum deterministic and keeps the
+    kernel to one launch. Expected bottleneck: compute once M grows, memory at M = 1.
     """
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -117,23 +127,25 @@ def int4_gemm_kernel(
         acc += tl.dot(activations_even.to(tl.float16), tl.trans(low.to(tl.float16)))
         acc += tl.dot(activations_odd.to(tl.float16), tl.trans(high.to(tl.float16)))
 
-    partial_offsets = split * M * N + m_offsets[:, None] * N + n_offsets[None, :]
-    tl.store(out_ptr + partial_offsets, acc, mask=m_mask[:, None] & n_mask[None, :])
-
-
-@triton.jit
-def split_reduce_kernel(partial_ptr, out_ptr, M, N, SPLITS: tl.constexpr, BLOCK: tl.constexpr) -> None:
-    """Sum the split partials [SPLITS, M, N] into `out` [M, N], one program per tile.
-
-    The sum runs in a fixed split order, so a split launch is deterministic and can be
-    captured in a graph that replays bit for bit.
-    """
-    offsets = tl.program_id(axis=0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < M * N
-    total = tl.zeros((BLOCK,), dtype=tl.float32)
-    for split in tl.static_range(SPLITS):
-        total += tl.load(partial_ptr + split * M * N + offsets, mask=mask, other=0.0)
-    tl.store(out_ptr + offsets, total, mask=mask)
+    output = m_offsets[:, None] * N + n_offsets[None, :]
+    out_mask = m_mask[:, None] & n_mask[None, :]
+    if SPLITS == 1:
+        tl.store(out_ptr + output, acc, mask=out_mask)
+    else:
+        tl.store(workspace_ptr + split * M * N + output, acc, mask=out_mask)
+        tile = pid_m * tl.cdiv(N, BLOCK_N) + pid_n
+        arrived = tl.atomic_add(counter_ptr + tile, 1, sem="acq_rel", scope="gpu")
+        if arrived == SPLITS - 1:
+            total = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for other in tl.static_range(SPLITS):
+                total += tl.load(
+                    workspace_ptr + other * M * N + output,
+                    mask=out_mask,
+                    other=0.0,
+                    cache_modifier=".cg",
+                )
+            tl.store(out_ptr + output, total, mask=out_mask)
+            tl.store(counter_ptr + tile, 0)
 
 
 def shared_memory_bytes(tile: Tile) -> int:
@@ -181,6 +193,7 @@ def int4_gemm_into(
     tile: Tile | None = None,
     splits: int = 1,
     partial: torch.Tensor | None = None,
+    counters: torch.Tensor | None = None,
 ) -> None:
     """Write (packed weights dequantized) @ x transpose into `out`, no fp32 weights.
 
@@ -189,8 +202,8 @@ def int4_gemm_into(
     contiguous, all on one CUDA device. K must be divisible by group_size, the tile's K
     step must be a multiple of group_size, and its row count pads M. `tile` overrides the
     menu, which is what the `m50` sweep varies. `splits` divides the K loop across
-    programs for a narrow output width, and then `partial` must be a contiguous fp32
-    buffer [splits, M, N] that the reduce launch sums in a fixed order.
+    programs in one launch, and then `partial` must be a contiguous fp32 buffer
+    [splits, M, N] and `counters` a zeroed int32 buffer of one counter per output tile.
     """
     n_tokens, n_rows, n_cols, _ = check_int4_gemm(packed, scales, x, out, group_size)
     block_m, block_n, block_k, stages = tile_for(n_tokens, n_rows) if tile is None else tile
@@ -214,6 +227,15 @@ def int4_gemm_into(
             and partial.is_contiguous(),
             f"expected a contiguous fp32 partial buffer {(splits, n_tokens, n_rows)}, got {shaped}",
         )
+        n_tiles = triton.cdiv(n_tokens, block_m) * triton.cdiv(n_rows, block_n)
+        held = None if counters is None else tuple(counters.shape)
+        require(
+            counters is not None
+            and counters.dtype == torch.int32
+            and counters.shape == (n_tiles,)
+            and counters.is_contiguous(),
+            f"expected int32 counters for {n_tiles} tiles, got {counters.dtype if counters is not None else None} {held}",
+        )
     if n_tokens == 0 or n_rows == 0:
         return
 
@@ -222,7 +244,9 @@ def int4_gemm_into(
         packed,
         scales,
         x,
-        out if splits == 1 else partial,
+        out,
+        partial if splits > 1 else out,
+        counters if splits > 1 else out,
         n_tokens,
         n_rows,
         n_cols,
@@ -233,15 +257,6 @@ def int4_gemm_into(
         SPLITS=splits,
         num_stages=stages,
     )
-    if splits > 1:
-        split_reduce_kernel[(triton.cdiv(n_tokens * n_rows, REDUCE_BLOCK),)](
-            partial,
-            out,
-            n_tokens,
-            n_rows,
-            SPLITS=splits,
-            BLOCK=REDUCE_BLOCK,
-        )
 
 
 def int4_gemm(
