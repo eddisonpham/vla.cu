@@ -9,30 +9,40 @@
 
 ## Campaign
 
-The launch floor is named and now attacked twice. A cooperative CUDA kernel fuses the
-whole layer tail into one launch: 3.13x at 1 token, 2.55x at 2, 2.22x at 3, 1.25x at 8,
-0.24x at 50 (EXP-078). Above 3 tokens the body, not the launch, is the cost, and the
-body split says the int4 GEMM moves bytes at 20 to 23 GB/s, 5 to 6 percent of peak,
-while its int8 twin reaches 91 and cuBLAS bf16 172 (EXP-079).
+The project now has three layers of proof: numbers, gates and CI. The cooperative tail
+is hardened and sanitized (memcheck 0 errors, 10 tests from 1 to 64 tokens), CI runs
+style, the task registry and the suite on a CPU runner (35 passed, 169 skipped), and the
+fused path's crossover is measured at 8 to 16 tokens (EXP-082).
+
+## Closed in this pass
+
+- **Cooperative launcher hardened.** Shared memory limit configured once per device under
+  a mutex, co-residency bound from the occupancy API, alignment checks, non-contiguous
+  input refused. 10 tests, 1 to 64 tokens (EXP-081).
+- **Sanitizer gate named.** memcheck clean; racecheck serializes blocks and deadlocks on
+  any grid barrier, so it is documented as unusable, not skipped quietly (DEC-078).
+- **CI added.** `.github/workflows/ci.yml` on ubuntu with CPU torch. `tests/conftest.py`
+  keys the skip on `device_count()`, because `is_available()` reads true with no visible
+  device (EXP-083).
+- **Crossover measured.** Fused is 3.13x at 1 token, 1.26x at 8, 0.74x at 16, 0.27x at
+  64. A tiled body is the only way to widen it (EXP-082).
+- **README truth pass.** 35 tasks, a checks table with commands, the current status rows.
 
 ## What works
 
-- 35 tasks, `pytest -q` 165 passed with vcvars active, `style` at zero.
-- `coop` builds `csrc/coop_layer.cu` and matches the five launch path at 1, 2, 3, 8 and
-  50 tokens within 1.3e-3.
-- The int8 menu now gives a chunk above 32 tokens a 16 row, 128 wide tile (EXP-080).
-- 33 tasks before this pass, now `int8pair`, `body` and `coop` join.
+- `pytest -q` with a GPU: 204 passed. With no device: 35 passed, 169 skipped, exit 0.
+- `python -m vla_cu style`: 0 violations. `python -m vla_cu --help`: 35 tasks.
+- `compute-sanitizer --tool memcheck python -m vla_cu coop`: 0 errors.
 
 ## Open edges
 
-- **The fused body is a GEMV.** The cooperative kernel re-reads the activation tile per
-  output row and uses no tensor core, so it loses 4x at 50 tokens. Tiling is the fix.
-- **The int4 dequant path.** Two dots per K step, a group scale expanded across the tile
-  and a transpose in shared memory. That, not DRAM, is where the 5 to 6 percent of peak
-  goes, and `ncu` is still blocked by ERR_NVGPUCTRPERM.
-- **The cooperative launch assumes no other process takes a block.** Fine here, not a
-  promise on a shared desktop.
-- **Above 64 tokens the einsum mix is back**, 25x slower, covered by one test.
+- **The fused body is still a GEMV.** It wins at 1 to 8 tokens only.
+- **The int4 dequant path** runs at 5 to 6 percent of peak and `ncu` is still blocked by
+  ERR_NVGPUCTRPERM.
+- **Shared memory races** in the cooperative kernel are argued from the code, not
+  measured, since racecheck cannot run there.
+- **CI proves style, imports and collection**, not kernel correctness. That needs a
+  self-hosted GPU runner.
 
 ## What the human can do
 
@@ -42,6 +52,6 @@ while its int8 twin reaches 91 and cuBLAS bf16 172 (EXP-079).
 
 ## Best next options
 
-1. Tile the cooperative body with tensor core dots and one shared activation tile.
-2. An int4 variant without the group scale and transpose, to separate them.
-3. Pair the new int8 tile at 8 tokens and at 1920 x 720.
+1. Tile the cooperative body and rerun the 1 to 64 table for a new crossover.
+2. An int4 variant without the group scale and transpose.
+3. A self-hosted GPU runner so CI runs the 169 device tests.

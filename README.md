@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, tasks `env`, `probe`, `cuda-check`, `bench`, `launch`, `gemv`, `graph`, `tune`, `matrix`, `layer`, `cuda`, `stream`, `grouped`, `m50`, `rotate`, `fastpath`, `crossover`, `attn`, `block`, `fuzz`, `bundle`, `style` |
+| Task runner (`python -m vla_cu`) | done, 35 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -85,6 +85,11 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Seeded fuzz gate | 160 cases across five kernels, zero failures (EXP-037) |
 | Versioned weight bundle | bit-exact round trip, 5.81x smaller than fp32 at int4, 5.68 ms to load four blocks (EXP-038) |
 | Model widths | hidden 960 and intermediate 2560 confirmed from the SmolVLM2-500M config, expert 720 and 1920 from the 0.75 multiplier (RESEARCH 2026-11-23) |
+| Cooperative layer tail | one launch instead of five: 3.13x at 1 token, 1.26x at 8, 0.74x at 16 (EXP-078, EXP-082) |
+| Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
+| int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
+| int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
+| CI and gates | 204 tests on a GPU, 35 passed and 169 skipped on a CPU runner, style and task list checked in both (EXP-081) |
 
 The CUDA toolkit and a host compiler nvcc accepts are installed. `python -m
 vla_cu cuda-check` reports which ones a build would use and what it still needs.
@@ -115,27 +120,12 @@ Windows, because the official wheel has no Windows build.
 ## How to run
 
 ```bash
+python -m vla_cu --help
 python -m vla_cu env
 python -m vla_cu probe
-python -m vla_cu cuda-check
-python -m vla_cu bench
-python -m vla_cu launch
 python -m vla_cu gemv
-python -m vla_cu graph
-python -m vla_cu tune
-python -m vla_cu matrix
 python -m vla_cu layer
-python -m vla_cu cuda
-python -m vla_cu stream
-python -m vla_cu grouped
-python -m vla_cu m50
-python -m vla_cu rotate
-python -m vla_cu fastpath
-python -m vla_cu crossover
-python -m vla_cu attn
-python -m vla_cu block
-python -m vla_cu fuzz
-python -m vla_cu bundle
+python -m vla_cu coop
 python -m vla_cu style
 ```
 
@@ -144,6 +134,21 @@ ninja on PATH: run it from a shell where `vcvars64.bat` has been called (EXP-004
 
 Expected: `VERDICT: triton works on this GPU`, with `max abs err 0.0e+00` for both
 tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
+
+## Checks and CI
+
+| Gate | Command | Needs |
+|---|---|---|
+| Style and doc invariants | `python -m vla_cu style` | nothing |
+| Task registry and help | `python -m vla_cu --help` | nothing |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 35 tests marked `cpu` |
+| CUDA memory errors | `compute-sanitizer --tool memcheck python -m vla_cu coop` | the built extension, and minutes |
+| Race conditions | not usable on the cooperative kernel, see EXP-081 | |
+
+`.github/workflows/ci.yml` runs on `ubuntu-latest` with the CPU torch wheel: the style
+check, the task list and the suite. `tests/conftest.py` skips every device test there with
+a reason, because `torch.cuda.is_available()` can read true while `device_count()` is zero
+when no device is visible.
 
 ## Ground rules
 

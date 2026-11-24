@@ -1127,6 +1127,38 @@
 - Verdict: menu changed. `LONG_TOKENS` 33 selects `LONG_TILE` `(16, 128, 128, 2)`, and the token to tile test follows.
 - Follow-ups: pair the 16 row tile at 1920 x 720 and at 8 tokens, where the same six program argument applies.
 
+## EXP-081: the cooperative kernel under the gates  (2026-11-24)
+- Goal / question: EXP-078's kernel works, but a fused kernel with a grid barrier and 61 KB of shared memory needs the same gates as everything else before it is trusted, and CI has to run somewhere.
+- Change (one thing): harden the launcher, then run the sanitizer. The launcher now configures the dynamic shared memory limit once per device under a mutex instead of a bare `static bool`, computes the co-resident block bound with `cudaOccupancyMaxActiveBlocksPerMultiprocessor` instead of assuming one per SM, and checks 16-byte and 4-byte alignment of every buffer that is read with vector loads. Tests cover 1, 2, 3, 8, 16, 17, 50 and 64 tokens plus a non-contiguous input.
+- Prediction: none filed by the human.
+- Commands: `compute-sanitizer --tool memcheck --error-exitcode 9 python bench/results/coop_probe.py` where the probe runs the fused tail at 3, 17 and 26 tokens, and the same with `--tool racecheck`.
+- GPU / environment: RTX 5060 Laptop, 10 tests in 34 s, sanitizer runs from a vcvars shell.
+- Result (measured): memcheck reports 0 errors across all three token widths and exits 0. Racecheck printed `probe ok` and then never produced an error summary: killed after 500 s. 10 tests pass.
+- Explanation / hypothesis: racecheck serializes blocks to detect shared memory races, which breaks the co-residency a cooperative launch depends on, so the grid barrier waits on a block that never runs. Memcheck instrumentation keeps blocks concurrent, which is why it finishes.
+- Verdict: memcheck is the gate for this kernel. Racecheck is not usable on any grid-barrier kernel here, which is a limitation of the tool and not a finding about the code.
+- Follow-ups: a race tool that understands cooperative launch, which is not installed here.
+
+## EXP-082: where the fused path stops paying  (2026-11-24)
+- Goal / question: EXP-078 showed the fused tail losing at 50 tokens. Where exactly does the five launch path become the better one?
+- Change (one thing): `bench/coop.py` gains 4, 16, 32 and 64 tokens, so one run covers 1 to 64 with the same paired method.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu coop`, 5 warmup, 5 repeats and 20 iterations per repeat.
+- GPU / environment: RTX 5060 Laptop, clocks pinned at 1972 MHz, other processes holding part of the GPU.
+- Result (measured): fused against the five launches, in ms: 0.038 against 0.120 at 1 token (3.13x), 0.047 against 0.118 at 2 (2.52x), 0.054 against 0.117 at 3 (2.15x), 0.064 against 0.117 at 4 (1.83x), 0.093 against 0.118 at 8 (1.26x), 0.159 against 0.117 at 16 (0.74x), 0.306 against 0.120 at 32 (0.39x), 0.485 against 0.163 at 50 (0.34x), 0.596 against 0.158 at 64 (0.27x). Max difference stays at 9.7e-4 to 1.4e-3.
+- Explanation / hypothesis: the fused time grows about 0.009 to 0.011 ms per token because the body re-reads the activation tile for every output row and does no tensor core work, while the five launch path stays flat at 0.117 to 0.120 ms up to 32 tokens. The two cross between 8 and 16 tokens, near 10 to 12. Above 32 tokens the eager path itself climbs to 0.158 and 0.163 ms, which is the int8 and int4 GEMM grids losing their program count, not a launch effect.
+- Verdict: the fusion is worth it at the batch sizes this project cares about, 1 to 8 tokens, and a tiled body is the only way to widen that.
+- Follow-ups: after a tiled body, rerun this exact table and find the new crossover.
+
+## EXP-083: CI that runs without a GPU  (2026-11-24)
+- Goal / question: the suite needs a CUDA device; a hosted runner has none. What does a gate that can run everywhere cover?
+- Change (one thing): `.github/workflows/ci.yml` on `ubuntu-latest` with the CPU torch wheel runs `python -m vla_cu style`, `python -m vla_cu --help` and `pytest -q`, and `tests/conftest.py` skips device tests with a reason while `tests/test_tasks.py` (marked `cpu`) checks that all 35 registry entries import and expose `main`.
+- Prediction: none filed by the human.
+- Command: `CUDA_VISIBLE_DEVICES= python -m pytest -q` locally, which is how a CPU image looks.
+- Result (measured): first attempt 85 failed and 86 passed, because `torch.cuda.is_available()` reported true while `torch.cuda.device_count()` was 0. After keying the guard on the count: 35 passed and 169 skipped, exit 0. With a GPU: 204 passed.
+- Explanation / hypothesis: on this Windows build `is_available()` answers from the driver, not from the visible device list, so a machine with CUDA installed but no visible device passes a naive check and then fails deep inside a kernel.
+- Verdict: CI catches style, docs invariants, the task registry and test collection on every push, and the GPU-only assertion lives on the workstation. The count check is the part worth remembering.
+- Follow-ups: a self-hosted GPU runner would let CI run the suite itself, which needs a label and a machine, not code.
+
 ## EXP-056: the wide int4 tile reduced with `tl.dot` instead of a reshape and two sums  (2026-11-23)
 - Goal / question: EXP-054 left the wide mapping reducing through a reshape, and the reshape is what drives the layout Triton picks. Can a dot against a constant matrix keep the tile in the load's shape and recover the staged kernel's speed?
 - Change (one thing): the wide kernel unpacks the flat word run into a `[groups, GROUP]` product tile, dots it with a `[GROUP, 16]` matrix of 1 / 16, accumulates `[groups, 16]`, and sums the columns once at the end. The reshape moved from the weights to the products.

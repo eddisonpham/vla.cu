@@ -123,6 +123,9 @@ kernels, so they are used as references and as performance baselines.
 | 33 | cooperative tail | add, norm, int8 up, SiLU, int4 down, add in one launch with two grid barriers | `csrc/coop_layer.cu`, `bench/coop.py` | done, 3.13x at 1 token and 2.55x at 2, 1.25x at 8, 0.24x at 50, within 1.3e-3 |
 | 34 | body split | K step size, K length, format and program count at 50 tokens | `bench/body.py` | done, time is linear in bytes at 20 to 23 GB/s and flat in the step count, so the dequant path is the cost |
 | 35 | int8 paired tiles | menu pick against three challengers, alternating inside one process | `bench/int8_pair.py` | done, a 16 row tile won every repeat by 1.07x to 1.53x, so the menu changed |
+| 36 | cooperative hardening | device-aware shared memory setup, occupancy bound, alignment checks, token boundaries 1 to 64 | `csrc/coop_layer.cu` | done, memcheck 0 errors, 10 tests pass |
+| 37 | CI gates | style, task registry and the suite on a CPU runner, device tests skipped with a reason | `.github/workflows/ci.yml`, `tests/conftest.py` | done, 35 passed and 169 skipped with no device |
+| 38 | fused scaling sweep | 1 to 64 tokens, fused against the five launches, paired | `bench/coop.py` | done, 3.13x at 1 token, 1.26x at 8, 0.74x at 16, 0.27x at 64 |
 
 ## 7. Measurement protocol
 

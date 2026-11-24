@@ -511,6 +511,18 @@
 - Status: active
 
 ## DEC-066: a residual and its norm are one launch  (2026-11-23)
+## DEC-077: CI covers what a CPU runner can prove, and device tests skip with a reason (2026-11-24)
+
+- Context: EXP-083. Hosted runners have no GPU, and `torch.cuda.is_available()` reports true on a machine whose visible device count is zero.
+- Decision: CI runs style, the task list and the suite on a CPU torch wheel; `tests/conftest.py` gates every unmarked test on `torch.cuda.device_count() > 0`, and 35 tests marked `cpu` keep the registry and help text honest there.
+- Consequence: CI is a fast regression gate, not proof of kernel correctness. That still needs the workstation, and the exact commands are in the README table.
+
+## DEC-078: memcheck is the sanitizer gate for the cooperative kernel, not racecheck (2026-11-24)
+
+- Context: EXP-081. Memcheck finishes with 0 errors; racecheck prints the work and then never returns, because it serializes blocks and a cooperative grid barrier then waits on a block that cannot start.
+- Decision: require memcheck on every new CUDA kernel and record racecheck as unusable on grid-barrier kernels.
+- Consequence: shared memory races in a cooperative kernel have to be argued from the code and the token boundary tests, not measured.
+
 ## DEC-075: a long int8 chunk gets a 16 row tile, and only the int8 menu moves (2026-11-24)
 
 - Context: EXP-080. Three paired runs at 720 x 1920 and 50 tokens have the 16 row tile ahead every time, by 1.07x to 1.53x, because a 64 row tile leaves six programs at this width.
