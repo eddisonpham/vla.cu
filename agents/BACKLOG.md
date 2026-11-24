@@ -87,8 +87,11 @@ on purpose, not forgotten.
 - [ ] `ncu` the int4 stream variant at 8192 x 16384 from the elevated shell. The command is now `python -m vla_cu ncu` (DEC-049); the existing report is still a 6.75 us small shape.
 - [x] Sweep the native CUDA streaming kernel over the `scale` shape grid. Done 2026-11-23, EXP-047: native 88.0 percent against Triton 69.4 at 4096 x 8192, and the 90.4 in EXP-042 does not repeat as a median.
 - [x] Add a fused RMSNorm and residual so the expert stack can be chained and cosine quoted at depth 16. Done 2026-11-23, EXP-048: 0.99548 at depth 16 against 0.31792 bare.
-- [ ] Diff the SASS of the Triton and native int4 GEMV at 4096 x 8192, to name what separates 69 percent from 88 (EXP-047).
-- [ ] Graph the normed expert chain: it pays 43 us per layer in dispatch and nothing else (EXP-048).
+- [x] Diff the SASS of the Triton and native int4 GEMV at 4096 x 8192, to name what separates 69 percent from 88. Done 2026-11-23, EXP-050: Triton stages the tile through shared memory and loads 4 and 8 bytes at a time, the native kernel uses 16 byte read-only loads and no SMEM.
+- [ ] Try a Triton int4 GEMV with 16 byte loads and no shared memory staging, to see if the 88 percent is the code shape or the compiler (EXP-050).
+- [x] Graph the normed expert chain. Done 2026-11-23, EXP-049: 16 layers 3.475 ms eager against 0.497 ms graphed, exact at every depth, so 186 us of 217 us per layer was dispatch.
+- [x] Add attention to the 16 deep chain. Done 2026-11-23, EXP-049: cosine 0.99795 at depth 16 over 50.78 MB, with the value path only (DEC-050).
+- [ ] Run the chain at two tokens so q and k decide the output and a real softmax has to execute (DEC-050).
 - [ ] Stage the activation tile in shared memory and re-sweep the int4 row tile. Lower priority since EXP-014: the row tile already plateaus at 4, so activation traffic is not what limits the kernel
 - [ ] `torch.compile` the custom op path and compare against the eager launches
 - [ ] torch.compile as a baseline: blocked, inductor fails with `triton_key` ImportError on this venv (EXP-006)

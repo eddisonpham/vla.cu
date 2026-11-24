@@ -9,54 +9,53 @@
 
 ## Campaign
 
-The limitations pass is done except for profiling on the large shape, which needs the
-human's elevated shell. Every kernel now has a correctness check and a sanitizer pass,
-the scaling question is answered in three directions, and the expert stack carries an
-accuracy number at depth 16.
+The limitations pass is closed except for profiling on the large shape, which needs the
+human's elevated shell. Every kernel has a correctness check and a sanitizer pass, the
+scaling question is answered three ways, the expert stack carries an accuracy number at
+depth 16 with attention in the chain, and the gap to Triton now has a SASS explanation.
 
 ## Closed this pass
 
 - **Both CUDA kernels have a standalone sanitizer pass.** int4 in EXP-044, int8 in EXP-046,
-  0 errors and 0 leaks each, from a torch-free header included by a plain .cu harness.
-- **The scale question is answered.** Shapes plateau at 70 to 75 percent for Triton and
-  88 percent for the native kernel, group 8 buys the most cosine per byte, and 16 layers
-  of real expert MLP cost 37.0 MB and 0.850 ms (EXP-045, EXP-047).
-- **Depth 16 has an accuracy number.** With the layer's own post-attention norm and the
-  residual, cosine is 0.99548 against 0.31792 on the bare projection chain (EXP-048).
-- **Profiling is one command now.** `python -m vla_cu ncu` writes the vcvars wrapper and
-  calls ncu with an argument list that needs no shell quoting (DEC-049).
+  0 errors and 0 leaks each, from a torch-free header and a plain .cu harness.
+- **Depth 16 carries an accuracy number with attention.** 16 real layers, int8 attention
+  and int8 up, int4 down: 50.78 MB, cosine 0.99795, graph exact (EXP-048, EXP-049).
+- **Dispatch is measured, not guessed.** 16 layers cost 3.475 ms eager and 0.497 ms
+  graphed, so 186 us of 217 us per layer is Python (EXP-049, DEC-051).
+- **The Triton gap is a memory path fact.** Triton stages its tile through shared memory
+  with 4 and 8 byte loads; the native unroll issues 16 byte read-only loads and no SMEM,
+  with comparable nibble arithmetic (EXP-050).
+- **Profiling is one command.** `python -m vla_cu ncu` writes the vcvars wrapper and calls
+  ncu with no shell quoting (DEC-049).
 
 ## What works
 
-- 26 tasks, `pytest -q` 96 passed and 23 skipped outside vcvars, 119 passed inside it.
-- `plateau` sweeps seven shapes for four implementations, median of five repeats: native
-  unroll 338.0 GB/s and 88.0 percent at 4096 x 8192, Triton 266.4 and 69.4 (EXP-047).
-- `scale` reports shape, group size and depth, bare and normed (EXP-045, EXP-048).
-- Locked `cuda` table at 8192 x 16384: stream 0.218 ms, 347.2 GB/s, 90.4 percent, which
-  EXP-047 could not repeat as a median; the repeated number there is 307.2 GB/s and 80.0.
-- int8 action blocks 0.99951 cosine at 0.140 ms, 3.94x fp32 (EXP-036).
+- 27 tasks, `pytest -q` 96 passed and 23 skipped outside vcvars, 119 passed inside it.
+- `plateau` median of 5: native unroll 88.0 percent, Triton 69.4 at 4096 x 8192 (EXP-047).
+- `scale` reports shape, group size and depth, with proj, layer and graphed columns.
+- `sass` dumps both kernels and counts 344 to 544 instructions per function (EXP-050).
 - `style` zero violations, `bundle` bit exact, `fuzz` 160 seeded cases clean.
 
 ## Still open
 
 - **`ncu` on the large shape** needs the elevated shell: `python -m vla_cu ncu`. A normal
   shell reaches ncu and stops at `ERR_NVGPUCTRPERM`, which is the expected outcome.
-- **Triton's plateau is unexplained.** It reads 69 to 73 percent within 5 MB of the native
-  kernel's 88, so the next step is SASS, not another tuning knob.
+- **The SASS reading is static.** Counters would confirm the shared memory round trip is
+  the cost, and no run has read them yet.
 - **The largest shape is not trustworthy.** 16384 x 32768 spans 0.9 to 1.4 ms across five
-  repeats, so quote it only with that range (EXP-047).
+  repeats (EXP-047).
+- **The chain is not a full block.** q and k are skipped at one token, and cross layers
+  read a random prefix, so cosine covers the value path only (DEC-050).
 - **No three layer stack at M = 50** on real weights; EXP-043 measures one matrix at a time.
-- Group 16 was not retested above 720, and the 0.98 gate has not been checked end to end on
-  real weights.
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell, then say what the report shows.
-2. Pick the next kernel question: attention in the chain, or SASS against Triton.
+2. Pick the next question: a 16 byte Triton rewrite, or a two token chain with q and k.
 3. Reset the lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. Add attention to the 16 deep chain, so cosine describes a layer and not a projection.
-2. Compare SASS at 4096 x 8192 to name what Triton emits differently.
-3. Graph the normed chain, which pays 43 us per layer in dispatch alone.
+1. Read the two SASS loop bodies line by line and name the instruction that differs.
+2. Add q and k with a two token softmax, so the chain covers real attention.
+3. Stage the packed weights through shared memory in the native kernel to test 88 percent.

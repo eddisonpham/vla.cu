@@ -389,3 +389,19 @@
 - Consequence: `bench/results/ncu_run.bat` is generated per run and stays out of git. A normal shell still stops at `ERR_NVGPUCTRPERM`, which the task explains in one sentence.
 - Revisit if: counters become readable by a normal user, or profiling moves to another machine.
 - Status: active
+
+## DEC-050: the chain computes the value path only, and cross layers read a fixed prefix  (2026-11-23)
+- Context: EXP-049. SmolVLA's expert has self attention on layers 0, 2, 4, 6, 8, 10, 12, 14 with `v_proj` [320, 720] and cross attention on the odd layers with `v_proj` [320, 320]. The chain runs at one visible token, where the softmax over one key is 1.
+- Options considered: (a) compute q, k and v anyway so the bytes look like a full block; (b) compute only v and o; (c) fold the whole attention into one precomputed matrix.
+- Chosen and why: (b). With one token q and k cancel out of the output exactly, so computing them would add bytes and time and change nothing. The cross layers take a fixed random prefix [320] because the VLM stream is not part of this harness; the residual flow and the weight bytes stay faithful.
+- Cost accepted: the depth 16 cosine describes the value path, o_proj, the MLP and both norms, not a full attention block. The table states this.
+- Revisit if: the chain moves to two or more tokens, where q and k decide the output and a real softmax has to run.
+- Status: active
+
+## DEC-051: the graphed layer chain is the number to quote, eager is the number to explain  (2026-11-23)
+- Context: EXP-049. The 16 layer chain is 3.475 ms eager and 0.497 ms graphed, exact at every depth by `torch.equal`, and 86 percent of the eager time is dispatch.
+- Options considered: (a) quote eager, as every earlier table did; (b) quote graphed; (c) quote both and say which one a model would use.
+- Chosen and why: (c), with graphed as the cost and eager kept as the dispatch measurement. A model forward pass captures once and replays, so the graphed number is what the hardware does; the eager number is what changing a kernel call costs the schedule.
+- Consequence: every future layer level table carries both columns, and a graph must pass an exactness check before its time is printed.
+- Revisit if: a path cannot be captured, as with a data dependent shape, in which case eager becomes the honest number again.
+- Status: active

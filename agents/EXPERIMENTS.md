@@ -731,4 +731,28 @@
 - Verdict: worked. Depth 16 now carries cosine 0.99548. It is a projection chain plus the layer's norm and residual, not attention.
 - Follow-ups: add attention to the chain; graph the normed chain to remove the 43 us per layer of dispatch.
 
-## EXP-045
+## EXP-045 (duplicate header, no body; the entry above it is the record)
+
+## EXP-049: a full expert layer in the chain, and the chain replayed as a graph  (2026-11-23, commit 4c3fb80)
+- Goal / question: does cosine at depth 16 describe a layer rather than a projection pair, and how much of the layer cost is Python?
+- Change (one thing): added `GqaValueBlock` to `vla_cu/blocks.py` and rewrote stage 3 of `bench/scale.py` to run three chains: MLP projections, full layer, graphed full layer.
+- Prediction: none filed by the human. The earlier measurement said the extra launches cost 43 us per layer (EXP-048), so the graph was expected to remove most of that.
+- Command: `python -m vla_cu scale`, clocks pinned near 1985 MHz.
+- GPU / environment: RTX 5060 Laptop, 384 GB/s spec, the 16 real expert layers, layer 1 and every odd layer are cross attention with `v_proj` [320, 320].
+- Result (measured), depth, MB, proj ms, layer ms, graph ms, cos proj, cos layer, graph exact: 1, 3.24, 0.072, 0.230, 0.029, 0.99501, 0.99973, yes. 2, 6.35, 0.129, 0.435, 0.057, 0.98769, 0.99953, yes. 4, 12.70, 0.265, 0.870, 0.105, 0.97800, 0.99912, yes. 8, 25.39, 0.477, 1.638, 0.213, 0.95739, 0.99846, yes. 16, 50.78, 0.967, 3.475, 0.497, 0.29974, 0.99795, yes.
+- Explanation / hypothesis: the graph is exact at every depth, so it measures the same work. At depth 16 the eager layer costs 217 us and the graphed layer 31 us, so 186 us of 217 is dispatch, 86 percent. The layer cosine holds at 0.99795 because the norm and the residual keep the vector on the reference's scale; the projection chain still collapses to 0.29974.
+- Caveat: at one visible token the softmax is 1, so q and k cancel out of the output and are not computed, and a cross-attention layer reads a fixed random prefix [320] rather than the VLM stream (DEC-050). The cosine covers the value path, o_proj, the MLP and both norms.
+- Verdict: worked. The chain is a layer now, and its cost is dispatch bound until it is graphed.
+- Follow-ups: graph the whole model path; add q and k so a two token softmax makes attention real.
+
+## EXP-050: the SASS of both int4 GEMV kernels at 4096 x 8192  (2026-11-23, commit 83f0b3b)
+- Goal / question: what does Triton emit that costs it 18.6 points of bandwidth against the native kernel (EXP-047)?
+- Change (one thing): added `bench/sass.py` and the `sass` task. No kernel changed.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu sass` inside vcvars, clocks pinned. Listings in `bench/results/sass_triton.txt` and `bench/results/sass_cuda.txt`.
+- GPU / environment: RTX 5060 Laptop, Triton 3.9.0, CUDA 12.9 `cuobjdump`, native extension built as `vla_cu_int4_gemv.pyd`.
+- Result (measured), one function, static counts: Triton `int4_gemv_kernel` 416 instructions, 12 LDG and none of them 16 bytes (8 `LDG.E.EL` activation loads, 2 `LDG.E.EF.64`, 2 `LDG.E.EF`), plus 2 `STSM.16.M88.4`, 2 `STS.64` and 4 `LDS.128`, 12 `SHFL.BFLY`, 18 FFMA, 51 LOP3.LUT, 37 IMAD. Native unroll 544 instructions, 32 LDG of which 16 are `LDG.E.128`, 0 shared memory ops, 72 FFMA, 57 LOP3.LUT, 81 SHF, 63 IADD3, 13 BRA, and 5 `SHFL.DOWN` at the end. Native baseline 344 instructions, 20 LDG, 10 of them `LDG.E.128`. Stream matches unroll in count and differs only in the evict-first load qualifier.
+- Explanation / hypothesis: the arithmetic is comparable (51 against 57 LOP3 per function), so the gap is the memory path. Triton reshapes its [4, 16, 32] tile through shared memory to reach the layout `tl.sum` wants, and its weight loads are 4 and 8 bytes wide. The native kernel keeps one 32-bit word per lane in registers, loads 16 bytes at a time through the read-only path (`LDG.E.*.CONSTANT`), and reduces once with 5 shuffles at the end.
+- Caveat: these are static counts per function, and one Triton body covers 4 rows x 1024 columns while one native unroll body covers 1024 columns of one row, so the two instruction totals are not per-weight comparable. Counters are still needed to name the stall.
+- Verdict: worked as an explanation, not as proof. The code shape difference is now named and reproducible in one command.
+- Follow-ups: read the two loop bodies line by line; try a 16 byte load and no shared memory in a Triton rewrite.
