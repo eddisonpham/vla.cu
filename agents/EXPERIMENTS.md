@@ -1512,3 +1512,40 @@ EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `pre
 - Caveat: one run per task. The whole model's reference starts from the fp32 tower's rows, so its cosine includes the tower; the state row is excluded, so 240 rows and not 241. The denoise build in EXP-109 predates the cache, so a second observation in that process would now skip the tower read.
 - Verdict: worked. The tower is paid once per process, the int8 tower ships at 0.99992 end to end, and the text layers are the next target.
 - Follow-ups: cache or prepack the 16 text layers, now 384.45 ms of a 471.99 ms warm prefill; add a block mask to the fused attention kernel so the state row can enter the graph; a W4A8 tower.
+
+## EXP-113: is the int4 tower error the weight or the activation?  (2026-11-24)
+- Goal / question: EXP-111 left the 4-bit tower at row cosine 0.97059. Is that the weight, the fp16 rounding a tensor core applies to both operands, or the activation range a W4A8 kernel would impose?
+- Change (one thing): `_Projection` takes `activation_bits`. At 16 it runs the packed kernel as before. At 32 and 8 it dequantizes the 4-bit weight to fp32 and runs an fp32 matmul, with activations exact at 32 and rounded to int8 per row at 8, so the weight is fixed and only the activation moves. `bench/tower_precision.py` adds the A16, A8 and A32 rows at group 16 and reports patch cosine too. Two tests pin the A32 exactness and the A8 closeness.
+- Prediction: none filed by the human. The working guess was that exact activations would recover part of the 0.03.
+- Command: `python -m vla_cu tower`; `pytest tests/test_vision.py`; style.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, one frame for the patch column, 3 frames for the rows.
+- Result (measured): group 16 patch cosine and row cosine. A16 0.91617 / 0.97059. A32 0.91617 / 0.97059. A8 0.90994 / 0.96827. Held bytes 78.21 MB for all three, since the format is unchanged. Three frames 147.40 ms at A16, 158.27 at A32, 195.38 at A8. Tests pass, style 0.
+- Explanation / hypothesis: exact activations change the row cosine by nothing in five decimals, so the fp16 operand the tensor core rounds to is already far more precise than the 4-bit weight and the whole 0.97059 is weight quantization. Rounding activations to int8 instead costs 0.0023, so a W4A8 kernel cannot recover the rung; it adds error on top.
+- Caveat: A32 and A8 run an fp32 matmul on a dequantized weight, so their times price torch, not a kernel, and are not a speed result. The activation rounding is per row, where a real A8 kernel might use per tile scales.
+- Verdict: answered. The 4-bit weight is the whole error, and W4A8 is closed as a follow-up.
+- Follow-ups: none on this axis. The remaining routes are a rotation before packing (EXP-026) or a mixed precision where only fc1 and fc2 are 4-bit.
+
+## EXP-114: a block mask in the fused attention kernel, and the 241 row whole model  (2026-11-24)
+- Goal / question: EXP-112 ran the whole model on 240 rows because the state row would leak into every other row. Can the fused kernel take the prefill's block mask, so all 241 rows enter one graph?
+- Change: `gqa_attention_kernel` takes a uint8 [tokens, keys] `visible` pointer and a MASKED constexpr, and clears a key row before the softmax. `gqa_attention_into` accepts bool or uint8, `GqaTokenBlock.into` and `LayerBlock.into` forward it, and `bench/full_model.py` runs all 241 rows with the mask the prefix uses.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu fullmodel`; suite in vcvars; CPU suite; style.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, 241 prefix rows, 50 action tokens, seeded frames and zero state.
+- Result (measured): the masked kernel matches `gqa_mix` with the same mask to 1e-5, and an all-true mask is bit identical to no mask. Whole model: eager 32.231 ms, two graphs 11.747 ms, one graph 11.720 ms, stored 256.52 MB, cosine 0.99990, rel L2 1.40e-02, every path bit exact. Tower contribution alone 0.99956. Suite 264 passed in vcvars, 54 passed and 210 skipped with no device, style 0.
+- Explanation / hypothesis: the mask removes exactly one key row per row, and cosine is unchanged from the 240 row run (0.99990), which confirms the state row never influenced another row once masked. One graph is 0.2 percent ahead of two here while EXP-112 read it 1.7 percent behind, so the ordering at 11.7 ms is noise.
+- First attempt (failure): the new mask test used 4 queries and 6 keys with key rotation on, and the kernel read cos and sine past the 4 row tables because it builds the tables from the query count. The library never hits this, since self attention has equal rows and cross attention passes `rotate_keys=False`, but the wrapper now refuses the combination with a message instead of reading out of bounds.
+- Caveat: one run. The mask is read per program per layer, so it adds a load per query tile that this measurement at 241 rows does not isolate; the 11.7 ms is unchanged within noise.
+- Verdict: worked. The whole model now carries the deployed 241 rows, state row included.
+- Follow-ups: use the mask at a short prefix where the fused kernel is the path, and memcheck the masked kernel.
+
+## EXP-115: the 16 text backbone layers held across calls  (2026-11-24)
+- Goal / question: after the tower cache, EXP-112 left 384.45 ms of a 471.99 ms warm prefill in the 16 text layers. How much of that is the weight read, and can it be paid once per process?
+- Change (one thing): `vla_cu/prefix.py` gained `backbone_weights`, a one entry cache keyed by checkpoint path, header length and layer count, and `cache_from_rows` reads through it. `bench/full_prefix.py` and `bench/tower_precision.py` report the first call and the later calls apart.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu fullprefix`, `python -m vla_cu tower`, suite in vcvars, CPU suite, style.
+- GPU / environment: RTX 5060 Laptop GPU, clocks pinned at 1987 MHz, 241 rows, seeded frames.
+- Result (measured): `fullprefix` reads the text cache at 619.91 ms on the first call and 28.95 ms after it. In the `tower` process the same two numbers are 603.84 and 29.15 ms. With the tower held at int8 and the text weights held, a warm prefill is 117.50 ms: 88.36 ms for three frames and 29.15 ms for the 16 layers. Before either cache the same prefill was 782.52 ms. End to end cosines are unchanged, 0.99992 at int8 down and 0.99852 at int4 down. Suite 264 passed, 54 passed and 210 skipped with no device, style 0.
+- Explanation / hypothesis: 590 of the 619.91 ms was reading and casting 315 MB of bf16 into 629.27 MB of fp32, and the remaining 29 ms is the GEMM and norm work over 241 rows with 16 layers. So the text half of the prefill was a read problem all along, the same shape of finding as the tower in EXP-108.
+- Caveat: the first call is cold in the OS file cache in both processes, while an earlier warm run of the same code read 335.42 ms, so the first call number depends on the file cache as much as on the code. Holding 629.27 MB of fp32 text weights is the largest resident object in the repo, and it is one entry, so a second checkpoint drops the first.
+- Verdict: worked. A warm prefill is 117.50 ms against 782.52 at the start of the day, a 6.66x cut, with every cosine unchanged.
+- Follow-ups: a prepacked file so the first call skips the read too; hold the text weights at int8 for the deployed path, 157.84 MB instead of 629.27; the 10 step loop re-timed on the warm prefill.

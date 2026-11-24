@@ -44,10 +44,13 @@
 - [x] Cache the packed tower across calls. Done 2026-11-24, EXP-112 and DEC-097: `tower_for` holds one tower per process, 259.35 ms on the first call and 0.005 ms after, so a warm int8 prefill is 471.99 ms against 710.08.
 - [x] Group 16 or 32 for the int4 tower. Done 2026-11-24, EXP-111 and DEC-098: row cosine 0.94484, 0.95583 and 0.97059, so the 4-bit code sets the error and int4 is refused at every measured group.
 - [x] Use the int8 tower end to end. Done 2026-11-24, EXP-112: `fullprefix` reads 0.99992 at int8 down against an fp32 tower, and the whole model reads 0.99990 over 240 rows because the state row has no block mask in the fused attention kernel.
-- [ ] Cache or prepack the 16 text backbone layers, which are now 384.45 ms of a 471.99 ms warm prefill (EXP-112). Same argument as the tower: the read is the cost, not the math.
-- [ ] Add a block mask to the fused attention kernel, so the state row can enter the whole model graph and the prefix is 241 rows there too (EXP-112).
-- [ ] A prepacked tower written to disk, so even the first call in a process skips the 172.87 MB read and the 0.2 s of packing (EXP-112, DEC-097).
-- [ ] A W4A8 rung for the tower, int4 weights with int8 activations, to see how much of the 0.97059 is the activation rounding (EXP-111).
+- [x] Cache the 16 text backbone layers. Done 2026-11-24, EXP-115 and DEC-100: 603.84 to 619.91 ms on the first call and 28.95 to 29.15 ms after, so a warm int8 prefill is 117.50 ms against 782.52.
+- [x] Add a block mask to the fused attention kernel. Done 2026-11-24, EXP-114 and DEC-099: the kernel takes a uint8 mask, both block levels forward it, and the whole model runs all 241 rows at cosine 0.99990 and 11.720 ms.
+- [ ] Hold the text weights at int8 for the deployed path, 157.84 MB against 629.27, and measure whether the prefix cache cosine moves (DEC-100 raised this and left it open).
+- [ ] Re-time the 10 step loop on the warm prefill, which is now 117.50 ms plus the steps instead of 841.37 ms (EXP-115).
+- [ ] Memcheck and time the masked fused kernel on a short prefix of 64 rows or fewer, where it is the path rather than the einsum (EXP-114).
+- [ ] A prepacked file for the tower and the 16 text layers, so even the first call in a process skips the read: the measured first call is 253.37 ms for the tower and 603.84 to 619.91 ms for the text layers, against 117.50 ms warm (EXP-112, EXP-115).
+- [x] A W4A8 rung for the tower. Done 2026-11-24, EXP-113: exact activations read 0.97059 and int8 activations read 0.96827, so the 4-bit weight is the whole error and W4A8 has nothing to recover.
 - [ ] Time one cold prefill, since every read measured so far is warm in the OS file cache (EXP-108).
 - [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
 - [x] The 10 step denoising loop with the prefix cache held across steps. Done 2026-11-24, EXP-109: cache 818.98 ms once, then 2.258 ms per graphed step, so a chunk is 841.37 ms against 8212.38 rebuilt every step.

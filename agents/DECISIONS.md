@@ -731,3 +731,19 @@
 - Consequences: `Tower` still accepts `bits=4` and `group_size`, because the bench and a future W4A8 rung need them; nothing in a default path uses it.
 - Revisit if: a W4A8 path, int4 weights with int8 activations, moves the 0.97, or a per-channel or Hadamard rotation reduces the outlier cost.
 - Status: active
+
+## DEC-099: the attention block mask lives on the fused kernel and both block levels  (2026-11-24)
+- Context: the deployed prefix has a state row that sees every row and is seen by none, so the whole model could not run 241 rows without a mask.
+- Options considered: (a) keep dropping the state row from the whole model; (b) mask in torch after the kernel, which means not using the fused kernel; (c) a mask pointer in the fused kernel, forwarded by `GqaTokenBlock` and `LayerBlock`.
+- Chosen and why: (c). The kernel clears a key row before the softmax from a uint8 [tokens, keys] buffer, so there is one code path and the einsum above 64 tokens takes the same bool mask. `gqa_attention_into` accepts bool or uint8 and converts, so a caller passes the mask it already has.
+- Consequences: a key rotation with more keys than queries is now refused, because the cos and sine tables are built from the query count and the kernel would read past them; the library never hits it, and EXP-114's first test did.
+- Revisit if: the per program mask load shows up at a short prefix, where the fused kernel is the path; a bitmask would cut the load by 8.
+- Status: active
+
+## DEC-100: the backbone layer weights are cached once per process, like the tower  (2026-11-24)
+- Context: EXP-115 measured 619.91 ms on the first `cache_from_rows` call and 28.95 ms after, so the text read dominated the warm prefill.
+- Options considered: (a) read per call; (b) hold the 629.27 MB of fp32 text weights in a one entry cache; (c) hold them at int8 and change the prefix cache's precision.
+- Chosen and why: (b). It changes no number the repo reports, only when the read happens, and it matches DEC-097's one entry pattern. (c) would move the prefix cache's precision and every cosine that quotes it, which is a separate experiment.
+- Consequences: 629.27 MB resident between calls, the largest object in the repo, and one entry, so a second checkpoint or layer count drops the first.
+- Revisit if: memory pressure appears, or the deployed path wants int8 text weights.
+- Status: active
