@@ -34,9 +34,6 @@ GROUPS = (64, 32, 16, 8)
 STACKS = (1, 2, 4, 8, 16)
 TOKENS = (2, 3, 4, 8)
 CHUNK_TOKENS = 50
-CHUNK_STACKS = (1, 4, 16)
-CHUNK_WARMUP = 5
-CHUNK_ITERATIONS = 10
 EXPERT_LAYERS = 16
 WARMUP = 20
 ITERATIONS = 100
@@ -235,21 +232,22 @@ def token_chain(
     """Run the 16 real expert layers at `tokens` visible tokens.
 
     Two tokens make the softmax choose between two keys, up to eight make it choose among
-    eight, so every token feeds every other one and a layer pays for q, k and v. Above
-    GEMM_MIN_TOKENS the four attention    projections and both MLP projections are one GEMM each, so their launch count stops
-    growing with the token count; only the norms and residual adds still run per token. The
-    reference is the same chain in fp32 with the same weights, the same fixed
-    cross-attention prefix and the same rotation. Attention is causal, so token i reads
-    keys 0 to i, which is the schedule the expert runs. Each depth is also captured as one
-    CUDA graph, checked exact against the eager run before its time is printed.
+    eight, so every token feeds every other one and a layer pays for q, k and v. From
+    GEMM_MIN_TOKENS up, every projection is one GEMM over the chunk and the norm, the fused
+    add-norm and the residual add are one row kernel each, so a layer is 11 launches at any
+    token count. The reference is the same chain in fp32 with the same weights, the same
+    fixed cross-attention prefix and the same rotation. Attention is causal, so token i
+    reads keys 0 to i, which is the schedule the expert runs. Every depth is captured as
+    one CUDA graph, checked exact against the eager run, and both are timed so the ratio
+    is the dispatch cost the graph removes.
     """
     print(f"stage 4: {tokens} tokens through the expert stack, q and k included")
-    if depths != STACKS:
-        print(
-            f"subset of depths {depths}, {warmup} warmup and {iterations} iterations "
-            f"because a layer is {layer_launches(tokens)} launches"
-        )
-    print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
+    print(
+        f"depths 1 to {max(depths)}, {layer_launches(tokens)} launches per layer, "
+        f"{warmup} warmup, {iterations} iterations"
+    )
+    print(f"{'layers':>7}  {'MB':>7}  {'eager ms':>9}  {'graph ms':>9}  {'ratio':>7}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
+    ratios: list[float] = []
     generator = torch.Generator(device="cuda").manual_seed(0)
     names = (
         "self_attn.q_proj.weight",
@@ -328,10 +326,13 @@ def token_chain(
         n_bytes = sum(attention.bytes + mlp.bytes for attention, mlp, _, _ in blocks[:depth])
         flat = result.reshape(-1)
         expected = references[depth].reshape(-1)
+        ratios.append(seconds / graph_seconds)
         print(
             f"{depth:>7}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>9.3f}  {graph_seconds * 1e3:>9.3f}  "
-            f"{cosine(flat, expected):>9.5f}  {relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
+            f"{seconds / graph_seconds:>6.2f}x  {cosine(flat, expected):>9.5f}  "
+            f"{relative_error(flat, expected):>9.2e}  {'yes' if exact else 'NO':>5}"
         )
+    print(f"note: graph {min(ratios):.2f}x to {max(ratios):.2f}x eager over depths 1 to {max(depths)}")
     print(
         f"note: {layer_launches(tokens)} launches per layer, theta {THETA:.0f} with the Llama pairing, "
         "attention is causal"
@@ -349,9 +350,10 @@ def main() -> int:
     checkpoint = open_checkpoint(CHECKPOINT)
     precision_ladder(checkpoint)
     stack_scale(checkpoint)
+    every_depth = tuple(range(1, EXPERT_LAYERS + 1))
     for tokens in TOKENS:
-        token_chain(checkpoint, tokens)
-    token_chain(checkpoint, CHUNK_TOKENS, depths=CHUNK_STACKS, warmup=CHUNK_WARMUP, iterations=CHUNK_ITERATIONS)
+        token_chain(checkpoint, tokens, depths=every_depth)
+    token_chain(checkpoint, CHUNK_TOKENS, depths=every_depth)
     return 0
 
 
