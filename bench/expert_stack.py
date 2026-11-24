@@ -1,9 +1,10 @@
-"""The whole action expert at 50 tokens, int8 against int4 down, against the fp32 chain.
+"""The whole action expert at 50 tokens on the real VLM prefix, four precision mixes.
 
 Concept: the expert runs over an action chunk, so every projection is a GEMM over 50 rows,
 and every second layer cross attends to the 48 row VLM key and value cache while q reads
-the 720 wide expert stream. This builds every expert layer through `layer_from_checkpoint`,
-checks each depth against fp32 with the same real prefix, and times captured graphs.
+the 720 wide expert stream. This builds every expert layer through `layer_from_checkpoint`
+for attention and down at int8 or int4, checks each depth against fp32 with the same real
+prefix, and times captured graphs.
 
 Task: python -m vla_cu expertstack
 """
@@ -25,6 +26,12 @@ LAYERS = 16
 TOKENS = 50
 WARMUP = 10
 ITERATIONS = 50
+MIXES = (
+    (8, 8, "int8 attn, int8 down"),
+    (4, 8, "int4 attn, int8 down"),
+    (8, 4, "int8 attn, int4 down"),
+    (4, 4, "int4 attn, int4 down"),
+)
 WEIGHTS = (
     "input_layernorm.weight",
     "post_attention_layernorm.weight",
@@ -80,29 +87,31 @@ def run_stack(layers, prefixes, x, first, second, result) -> None:
 
 
 def main() -> int:
-    """Build every expert layer at each down precision, check against fp32, then time the graph replays."""
+    """Build every expert layer at each mix, check against fp32 with the real prefix, then time the replays."""
     enforce_memory_budget()
     warm_gpu()
     checkpoint = open_checkpoint(CHECKPOINT)
     print(f"GPU {torch.cuda.get_device_name(0)} | {checkpoint.path.name} | {LAYERS} expert layers | {TOKENS} tokens")
-    print(f"warmup {WARMUP}, iterations {ITERATIONS}, down at int8 against int4, gate and up at int8")
+    print(f"warmup {WARMUP}, iterations {ITERATIONS}, attention and down at int8 against int4")
     print(f"prefix {PREFIX_TOKENS} real VLM rows from {LAYERS} backbone layers, keys and values read separately")
 
-    def build(index: int, bits: int):
+    def build(index: int, attention_bits: int, down_bits: int):
         """Build one expert layer, sizing the cross buffers for the prefix rows."""
         other = PREFIX_TOKENS if index % 2 else TOKENS
         return layer_from_checkpoint(
-            checkpoint, index, tokens=TOKENS, down_bits=bits, part="expert", other_tokens=other
+            checkpoint, index, tokens=TOKENS, down_bits=down_bits, part="expert", other_tokens=other, attention_bits=attention_bits
         )
 
-    int8_layers = [build(index, 8) for index in range(LAYERS)]
-    int4_layers = [build(index, 4) for index in range(LAYERS)]
-    hidden = int8_layers[0].hidden_width
+    variants = [
+        (attention_bits, down_bits, label, [build(index, attention_bits, down_bits) for index in range(LAYERS)])
+        for attention_bits, down_bits, label in MIXES
+    ]
+    hidden = variants[0][3][0].hidden_width
     cached_keys, cached_values = prefix_cache(checkpoint)
     generator = torch.Generator(device="cuda").manual_seed(0)
     prefixes = [
         None if layer.attention.other_width == hidden else (cached_keys[index], cached_values[index])
-        for index, layer in enumerate(int8_layers)
+        for index, layer in enumerate(variants[0][3])
     ]
     x = torch.randn((TOKENS, hidden), device="cuda", generator=generator)
     reference = [read_reference(checkpoint, index) for index in range(LAYERS)]
@@ -124,7 +133,7 @@ def main() -> int:
     exact = fp32_result.clone()
 
     states = {}
-    for bits, layers in ((8, int8_layers), (4, int4_layers)):
+    for attention_bits, down_bits, label, layers in variants:
         first, second = torch.empty_like(x), torch.empty_like(x)
         source = x
         per_layer = []
@@ -136,25 +145,27 @@ def main() -> int:
                 layer.into(source, target, prefix[0], prefix[1])
             source = target
             per_layer.append(target.clone())
-        states[bits] = per_layer
+        states[(attention_bits, down_bits)] = per_layer
     torch.cuda.synchronize()
 
     current = x.clone()
+    names = [f"a{attention_bits}d{down_bits}" for attention_bits, down_bits, _, _ in variants]
     print()
-    print(f"{'layer':>5}  {'int8 cos':>9}  {'int4 cos':>9}")
+    print(f"{'layer':>5}  " + "  ".join(f"{name:>9}" for name in names))
     for index in range(LAYERS):
         current = reference_layer(current, reference[index], prefixes[index])
-        print(
-            f"{index + 1:>5}  {cosine(states[8][index].reshape(-1), current.reshape(-1)):>9.5f}  "
-            f"{cosine(states[4][index].reshape(-1), current.reshape(-1)):>9.5f}"
+        columns = "  ".join(
+            f"{cosine(states[(attention_bits, down_bits)][index].reshape(-1), current.reshape(-1)):>9.5f}"
+            for attention_bits, down_bits, _, _ in variants
         )
+        print(f"{index + 1:>5}  {columns}")
 
     stacks = {}
-    for bits, layers in ((8, int8_layers), (4, int4_layers)):
+    for attention_bits, down_bits, label, layers in variants:
         first, second, result = torch.empty_like(x), torch.empty_like(x), torch.empty_like(x)
         run_stack(layers, prefixes, x, first, second, result)
         torch.cuda.synchronize()
-        eager = states[bits][-1]
+        eager = states[(attention_bits, down_bits)][-1]
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             run_stack(layers, prefixes, x, first, second, result)
@@ -163,7 +174,7 @@ def main() -> int:
         result.zero_()
         graph.replay()
         torch.cuda.synchronize()
-        stacks[bits] = (layers, graph, eager, torch.equal(result, eager))
+        stacks[(attention_bits, down_bits)] = (layers, graph, eager, torch.equal(result, eager))
 
     fp32_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(fp32_graph):
@@ -177,17 +188,17 @@ def main() -> int:
     fp32_seconds = time_call(fp32_graph.replay, WARMUP, ITERATIONS)
     fp32_bytes = sum(weight.numel() * 4 for weights in reference for weight in weights)
     print()
-    print(f"{'path':>10}  {'MB':>7}  {'ms':>8}  {'x fp32':>7}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
+    print(f"{'mix':>22}  {'MB':>7}  {'ms':>8}  {'x fp32':>7}  {'cos':>9}  {'rel L2':>9}  {'exact':>5}")
     print(
-        f"{'fp32':>10}  {fp32_bytes / 1e6:>7.2f}  {fp32_seconds * 1e3:>8.3f}  {'1.00x':>7}  "
+        f"{'fp32':>22}  {fp32_bytes / 1e6:>7.2f}  {fp32_seconds * 1e3:>8.3f}  {'1.00x':>7}  "
         f"{'1.00000':>9}  {'0.00e+00':>9}  {'yes' if fp32_exact else 'NO':>5}"
     )
-    for bits, label in ((8, "int8 down"), (4, "int4 down")):
-        layers, graph, eager, bit_exact = stacks[bits]
+    for attention_bits, down_bits, label, layers in variants:
+        layers, graph, eager, bit_exact = stacks[(attention_bits, down_bits)]
         seconds = time_call(graph.replay, WARMUP, ITERATIONS)
         n_bytes = sum(layer.bytes for layer in layers)
         print(
-            f"{label:>10}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>8.3f}  {fp32_seconds / seconds:>6.2f}x  "
+            f"{label:>22}  {n_bytes / 1e6:>7.2f}  {seconds * 1e3:>8.3f}  {fp32_seconds / seconds:>6.2f}x  "
             f"{cosine(eager.reshape(-1), exact.reshape(-1)):>9.5f}  "
             f"{relative_error(eager.reshape(-1), exact.reshape(-1)):>9.2e}  {'yes' if bit_exact else 'NO':>5}"
         )
