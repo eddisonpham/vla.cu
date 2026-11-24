@@ -345,3 +345,71 @@ class ActionBlock:
         """Write mlp(attention(x)) into `out`, reading `x` [hidden]."""
         self.attention.into(x, self.attention_out)
         self.mlp.into(self.attention_out, out)
+
+
+class GatedMlpBlock:
+    """A SwiGLU MLP: silu(gate @ x) * (up @ x), then down, at 4 or 8 bits.
+
+    gate and up are [intermediate, hidden] and down is [hidden, intermediate], all fp32,
+    which is the three-matrix MLP a SmolVLA layer has. One token reads and writes [hidden]
+    through the GEMVs, a chunk reads and writes [tokens, hidden] through the GEMMs, and the
+    block owns both intermediate buffers.
+    """
+
+    def __init__(
+        self,
+        gate: Tensor,
+        up: Tensor,
+        down: Tensor,
+        down_bits: int = 4,
+        group_size: int = GROUP_SIZE,
+        tokens: int = 1,
+    ) -> None:
+        require(gate.dim() == 2 and up.shape == gate.shape, f"expected equal 2D gate and up, got {tuple(gate.shape)} and {tuple(up.shape)}")
+        require(down.dim() == 2, f"expected a 2D down matrix, got {tuple(down.shape)}")
+        require(down_bits in BITS, f"expected 4 or 8 bits, got {down_bits}")
+        require(tokens > 0, f"token count {tokens} must be positive")
+        intermediate, hidden = gate.shape
+        require(tuple(down.shape) == (hidden, intermediate), f"down {tuple(down.shape)} does not undo gate {tuple(gate.shape)}")
+        self.tokens = tokens
+        self.hidden_width = hidden
+        self.intermediate = intermediate
+        self.down_bits = down_bits
+        self.group_size = group_size
+        self.gate, self.gate_scales = quantize_int8(gate)
+        self.up, self.up_scales = quantize_int8(up)
+        self.down, self.down_scales = _pack(down, down_bits, group_size)
+        self.activated = torch.empty(tokens, intermediate, device=gate.device, dtype=torch.float32)
+        self.up_out = torch.empty(tokens, intermediate, device=gate.device, dtype=torch.float32)
+        self.bytes = (
+            2 * matrix_bytes(intermediate, hidden, 8, group_size)
+            + matrix_bytes(hidden, intermediate, down_bits, group_size)
+        )
+
+    def into(self, x: Tensor, out: Tensor) -> None:
+        """Write down(silu(gate x) * up x) into `out` for `x` [hidden] or [tokens, hidden]."""
+        if self.tokens == 1:
+            require(
+                x.shape == (self.hidden_width,) and out.shape == (self.hidden_width,),
+                f"expected [{self.hidden_width}], got {tuple(x.shape)} and {tuple(out.shape)}",
+            )
+            int8_gemv_into(self.gate, self.gate_scales, x, self.activated[0])
+            int8_gemv_into(self.up, self.up_scales, x, self.up_out[0])
+        else:
+            require(
+                x.shape == (self.tokens, self.hidden_width) and out.shape == (self.tokens, self.hidden_width),
+                f"expected [{(self.tokens, self.hidden_width)}], got {tuple(x.shape)} and {tuple(out.shape)}",
+            )
+            int8_gemm_into(self.gate, self.gate_scales, x, self.activated)
+            int8_gemm_into(self.up, self.up_scales, x, self.up_out)
+        torch.nn.functional.silu(self.activated, inplace=True)
+        self.activated.mul_(self.up_out)
+        if self.tokens == 1:
+            if self.down_bits == 4:
+                int4_gemv_into(self.down, self.down_scales, self.activated[0], out, group_size=self.group_size)
+            else:
+                int8_gemv_into(self.down, self.down_scales, self.activated[0], out)
+        elif self.down_bits == 4:
+            int4_gemm_into(self.down, self.down_scales, self.activated, out, group_size=self.group_size)
+        else:
+            int8_gemm_into(self.down, self.down_scales, self.activated, out)

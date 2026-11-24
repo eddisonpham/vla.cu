@@ -11,6 +11,7 @@ from kernels.triton.rmsnorm import add_into, add_norm_into, rmsnorm_into
 from vla_cu.blocks import (
     ActionBlock,
     AttentionBlock,
+    GatedMlpBlock,
     GqaTokenBlock,
     MlpBlock,
     MlpTokenBlock,
@@ -113,6 +114,54 @@ def test_action_block_composes_attention_and_mlp() -> None:
 
     exact = down @ F.silu(up @ (wo @ (wv @ x)))
     assert cosine(out, exact) > 0.995
+
+
+def test_gated_mlp_matches_the_swiglu_chain() -> None:
+    """silu(gate x) times up x is the three-matrix MLP a real SmolVLA layer stores."""
+    generator = torch.Generator(device="cuda").manual_seed(17)
+    hidden, intermediate = 64, 128
+    gate = torch.randn((intermediate, hidden), device="cuda", generator=generator) * (1.0 / hidden**0.5)
+    up = torch.randn((intermediate, hidden), device="cuda", generator=generator) * (1.0 / hidden**0.5)
+    down = torch.randn((hidden, intermediate), device="cuda", generator=generator) * (1.0 / intermediate**0.5)
+    x = torch.randn(hidden, device="cuda", generator=generator)
+    out = torch.empty(hidden, device="cuda")
+    GatedMlpBlock(gate, up, down).into(x, out)
+
+    exact = down @ (F.silu(gate @ x) * (up @ x))
+    assert cosine(out, exact) > 0.99
+
+    rows = torch.randn((3, hidden), device="cuda", generator=generator)
+    chunk = torch.empty((3, hidden), device="cuda")
+    GatedMlpBlock(gate, up, down, tokens=3).into(rows, chunk)
+
+    exact_chunk = (F.silu(rows @ gate.T) * (rows @ up.T)) @ down.T
+    assert cosine(chunk.reshape(-1), exact_chunk.reshape(-1)) > 0.99
+
+
+def test_gated_mlp_uses_the_gate() -> None:
+    """A block that ignored gate_proj would look fine, so a zero gate must silence the output."""
+    generator = torch.Generator(device="cuda").manual_seed(18)
+    hidden, intermediate = 64, 128
+    gate = torch.zeros((intermediate, hidden), device="cuda")
+    up = torch.randn((intermediate, hidden), device="cuda", generator=generator) * (1.0 / hidden**0.5)
+    down = torch.randn((hidden, intermediate), device="cuda", generator=generator) * (1.0 / intermediate**0.5)
+    x = torch.randn(hidden, device="cuda", generator=generator)
+    out = torch.empty(hidden, device="cuda")
+
+    GatedMlpBlock(gate, up, down).into(x, out)
+
+    torch.testing.assert_close(out, torch.zeros_like(out), rtol=0, atol=1e-6)
+
+
+def test_gated_mlp_rejects_a_down_that_does_not_undo_the_gate() -> None:
+    """A transposed down matrix must fail at construction, not at the first launch."""
+    generator = torch.Generator(device="cuda").manual_seed(19)
+    gate = torch.randn((128, 64), device="cuda", generator=generator)
+    up = torch.randn((128, 64), device="cuda", generator=generator)
+    down = torch.randn((64, 64), device="cuda", generator=generator)
+
+    with pytest.raises(ValueError):
+        GatedMlpBlock(gate, up, down)
 
 
 def test_rejects_matrices_that_do_not_compose() -> None:

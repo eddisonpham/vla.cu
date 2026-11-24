@@ -57,6 +57,46 @@ class Int4Linear(torch.nn.Module):
         require(values.dim() == 2, f"expected [in_features] or [tokens, in_features], got {tuple(values.shape)}")
         return int4_gemm(self.packed, self.scales, values, group_size=self.group_size)
 
+    def graphed(self) -> GraphedInt4Linear:
+        """Capture this layer's launch into a CUDA graph, for a caller who wants no capture code."""
+        sample = torch.empty(self.in_features, device=self.packed.device, dtype=torch.float32)
+        return GraphedInt4Linear(self, sample)
+
     def extra_repr(self) -> str:
         """Report the shape and format a reader needs to place the layer."""
         return f"in_features={self.in_features}, out_features={self.out_features}, group_size={self.group_size}"
+
+
+class GraphedInt4Linear:
+    """One Int4Linear call captured into a CUDA graph and replayed through a static buffer.
+
+    `__call__` copies the input into the captured buffer, replays and returns the captured
+    output, which the next call reuses, so clone it to keep it. A graph only removes Python
+    and Triton dispatch, so it pays off on small layers and does nothing on a DRAM bound one.
+    """
+
+    def __init__(self, layer: Int4Linear, sample: Tensor, warmup: int = 3) -> None:
+        require(sample.dtype == torch.float32, f"expected fp32 activations, got {sample.dtype}")
+        require(sample.device == layer.packed.device, f"expected activations on {layer.packed.device}, got {sample.device}")
+        require(sample.shape[-1] == layer.in_features, f"expected {layer.in_features} in_features, got {sample.shape[-1]}")
+        require(sample.dim() in (1, 2), f"expected [in_features] or [tokens, in_features], got {tuple(sample.shape)}")
+        self.layer = layer
+        self.static_in = sample.detach().clone().contiguous()
+        for _ in range(warmup):
+            self.output = layer(self.static_in)
+        torch.cuda.synchronize()
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.output = layer(self.static_in)
+
+    def __call__(self, x: Tensor) -> Tensor:
+        """Replay the captured call for `x`, whose shape must match the capture."""
+        require(
+            x.shape == self.static_in.shape,
+            f"graph captured a {tuple(self.static_in.shape)} input, got {tuple(x.shape)}",
+        )
+        require(x.dtype == torch.float32, f"expected fp32 activations, got {x.dtype}")
+        require(x.device == self.static_in.device, f"expected activations on {self.static_in.device}, got {x.device}")
+        self.static_in.copy_(x)
+        self.graph.replay()
+        return self.output

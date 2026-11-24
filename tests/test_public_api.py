@@ -24,8 +24,10 @@ def test_the_blocks_and_the_linear_layer_are_classes() -> None:
     names = (
         "ActionBlock",
         "AttentionBlock",
+        "GatedMlpBlock",
         "GqaTokenBlock",
         "GqaValueBlock",
+        "GraphedInt4Linear",
         "Int4Linear",
         "MlpBlock",
         "MlpTokenBlock",
