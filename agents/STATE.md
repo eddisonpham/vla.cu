@@ -9,65 +9,65 @@
 
 ## Campaign
 
-Both precision axes of the expert are now measured on real weights and the real prefix.
-4-bit down holds accuracy at a small speed cost. 4-bit attention is worse on both axes, so
-int8 attention is the default and the int4 path exists to be reproduced.
+The whole policy path is one measured graph: 16 backbone layers produce the prefix cache,
+16 expert layers consume it. The attention and down precision axes are both settled by
+measurement, and the remaining gaps are the prefix content and the denoising loop.
 
 ## Closed in this pass
 
-- **int4 attention in the library.** `GqaTokenBlock` takes `bits` and packs q, k, v and o
-  at group 64, padding K to 768 for the 720 wide stream; `layer_from_checkpoint` takes
-  `attention_bits` (DEC-092). Test at 6 tokens and a memcheck pass.
-- **Four mixes at 50 tokens.** int8/int8 2.290 ms at 0.99997; int4 attention 3.290 ms at
-  0.99761; int4 down 2.698 ms at 0.99847; both at int4 3.516 ms at 0.99613 (EXP-105).
+- **The whole model in one graph.** 48 bidirectional prefix rows through 16 int8 backbone
+  layers write post-rope K and V per layer; 16 int8 expert layers read them on 50 action
+  tokens. One graph 4.899 ms, two graphs 4.938 ms, eager 19.638 ms, cosine 0.99992
+  (EXP-106, DEC-093).
 
 ## What the numbers say
 
-| Mix | Bytes | ms | x fp32 | cosine |
-|---|---|---|---|---|
-| fp32 | 392.98 MB | 7.082 | 1.00x | 1.00000 |
-| int8 attn, int8 down | 98.68 MB | 2.290 | 3.09x | 0.99997 |
-| int4 attn, int8 down | 87.08 MB | 3.290 | 2.15x | 0.99761 |
-| int8 attn, int4 down | 88.31 MB | 2.698 | 2.63x | 0.99847 |
-| int4 attn, int4 down | 76.71 MB | 3.516 | 2.01x | 0.99613 |
+| Path | ms | x eager |
+|---|---|---|
+| eager, 32 layers of Python dispatch | 19.638 | 1.00x |
+| two graphs, backbone then expert | 4.938 | 3.98x |
+| one graph, whole path | 4.899 | 4.01x |
 
-| Decision | Evidence |
+Stored 256.52 MB, end to end cosine 0.99992, rel L2 1.30e-02, every path bit exact.
+
+| Component | Evidence |
 |---|---|
-| int4 attention stays off | 1.000 ms slower and 0.0024 lower cosine than int8 attention |
-| int4 down is an accuracy option | safe at 0.99847, but 0.408 ms slower than int8 down |
+| int8 attention | default; int4 costs 1.000 ms and 0.0024 cosine (EXP-105) |
+| int4 down | 0.99847 at 50 tokens, 0.408 ms slower than int8 down (EXP-105) |
+| prefix content | real 48 row cache and random rows give the same cosine (EXP-104) |
 
 ## Gates
 
-- GPU suite 249 passed, CPU suite 47 passed and 202 skipped, style 0, clocks pinned at 1987 MHz.
-- `expertstack` exit 0 with four stacks, graphs bit exact, under the 7 GB cap.
-- `compute-sanitizer --tool memcheck` on the int4 attention test: 1 passed, 0 errors.
-- 41 tasks, every one imported by `tests/test_tasks.py`.
+- GPU suite 250 passed, CPU suite 48 passed and 202 skipped, style 0, clocks pinned at 1987 MHz.
+- `fullmodel`, `expertstack`, `realstack`, `block` exit 0; graphs bit exact.
+- 42 tasks, every one imported by `tests/test_tasks.py`.
+- `compute-sanitizer --tool memcheck` on the int4 attention test: 0 errors (EXP-105).
 
 ## What works
 
-- `python -m vla_cu expertstack` runs all four attention and down mixes on the real prefix.
-- `layer_from_checkpoint(..., attention_bits=4)` builds a 4-bit attention layer.
-- `vla_cu.prefix.prefix_cache(checkpoint)` returns post-rope K and V per backbone layer.
+- `python -m vla_cu fullmodel` runs the whole path in one graph and in two, against eager.
+- `python -m vla_cu expertstack` runs four attention and down mixes on the real prefix.
+- `vla_cu.prefix.prefix_inputs` and `prefix_cache` give the rows and the fp32 cache.
 
 ## Open edges
 
-- **Cross-stack timing moves between runs.** The same int8/int8 path read 1.977 ms in
-  EXP-104 and 2.290 ms here, so ratios within one run are the comparison.
-- **The prefix is 48 language rows only.** The deployed prefix is about 241 rows: 192
-  image, 48 language, 1 state.
+- **One action chunk, not ten steps.** The real inference runs 10 denoising steps with the
+  prefix cache held, so a real chunk is about ten expert passes plus one prefix pass.
+- **The prefix is 48 language rows**, not the deployed 241 (192 image, 48 language, 1 state).
 - **Rope wavelength is unresolved.** LeRobot rotates at 10000, the config says 100000.
-- **int4 GEMM body** reads 20 to 23 GB/s at these shapes, which is why int4 attention loses.
+- **Timing moves between runs.** The same int8 expert path read 1.977, 2.290 and 2.290 ms
+  across three runs, so compare ratios inside one run.
 - **`ncu` is blocked** by ERR_NVGPUCTRPERM; the int4 extension cannot be instrumented on Windows.
 - **CI proves style, imports and collection**, not kernel correctness.
 
 ## What the human can do
 
 1. Run `python -m vla_cu ncu` from the elevated shell on the int4 attention GEMM.
-2. Pick the next experiment from BACKLOG, for example the full 241 row prefix.
+2. Pick the next experiment from BACKLOG, for example the 10 step loop.
 3. Reset the clock lock with `nvidia-smi -rgc` when the session ends.
 
 ## Best next options
 
-1. An int4 GEMM tuned at 960 by 768, 320 by 768 and 720 by 960, then repeat this table.
+1. The 10 step loop with the prefix cache held, which is the real per action cost.
 2. The full 241 row prefix with the SigLIP tower and three real frames.
-3. int4 attention at one token, where the GEMV body may behave differently.
+3. int4 down on the whole path, to see if the 0.99847 expert cosine holds model level.

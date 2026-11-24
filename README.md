@@ -54,7 +54,7 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Repo skeleton, venv, git workflow | done |
 | Environment check | done |
 | Triton on native Windows, sm_120 | done, verified by a real kernel |
-| Task runner (`python -m vla_cu`) | done, 41 tasks, `python -m vla_cu --help` lists every one |
+| Task runner (`python -m vla_cu`) | done, 42 tasks, `python -m vla_cu --help` lists every one |
 | Timing and 7 GB cap (`bench_utils`) | done, warmup plus CUDA events, 7 GB cap |
 | Vector add kernel and tests | done, exact match from 0 to 1,000,003 elements |
 | Vector add benchmark | done, 330.9 GB/s, 86.2 percent of 384, at 16M elements |
@@ -90,13 +90,14 @@ twice, in Triton and in CUDA C++, and the two agree on every tested shape.
 | Launch floor | 6 us of host gap and a 9 us empty kernel, so the int4 GEMM body is the cost at M = 50 (EXP-076) |
 | int4 body split | time is linear in bytes at 20 to 23 GB/s, 5 to 6 percent of peak; the int8 twin reads more and runs 2.7x faster (EXP-079) |
 | int8 tile menu | a chunk above 32 tokens gets a 16 row tile, the winner in every repeat at 720 x 1920 and 50 tokens (EXP-080) |
-| CI and gates | 249 tests on a GPU, 47 passed and 202 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
+| CI and gates | 250 tests on a GPU, 48 passed and 202 skipped on a CPU runner, style and task list checked in both (EXP-081, EXP-088, EXP-098) |
 | Public API | `Int4Linear`, the block classes, the checkpoint reader and the graph wrapper import from `vla_cu`; `python -m vla_cu demo` runs all of it (EXP-086) |
 | Checkpoint builder | three lines from a safetensors layer to a running block, gated SwiGLU included, at one token or a chunk; a layer index resolves the backbone or expert stack (EXP-088, EXP-093) |
 | Whole layer | one index returns both RMSNorm weights, attention, the gated MLP and the residual pair (EXP-094); `fused=True` runs its tail in one launch, measured slower than a captured chain (EXP-097) |
 | Real 16 layer backbone | every backbone layer at one token, every path a captured graph: fp32 629.27 MB and 4.334 ms, int8 down 157.84 MB and 1.176 ms (3.69x), int4 down 140.57 MB and 1.101 ms (3.94x), cosine 0.99998 against 0.99965 (EXP-101) |
 | Real expert at 50 tokens | all 16 expert layers on the GEMM path, cross attention on the odd ones reading the real 48 row VLM key and value cache: fp32 392.98 MB and 7.082 ms, int8 attention and down 98.68 MB and 2.290 ms (3.09x, cosine 0.99997), int4 down 88.31 MB and 2.698 ms (2.63x, cosine 0.99847), int4 attention and down 76.71 MB and 3.516 ms (2.01x, cosine 0.99613) (EXP-104, EXP-105) |
 | int4 attention on real weights | 4-bit q, k, v and o at 50 tokens costs 1.000 ms more than int8 attention (3.290 against 2.290 ms) for 11.60 MB less and a lower cosine (0.99761 against 0.99997), so int8 attention stays the default (EXP-105) |
+| Whole model, one graph | 16 backbone layers over 48 prefix rows plus 16 expert layers over 50 action tokens, int8 attention and down, captured together: 4.899 ms against 19.638 eager (4.01x), 256.52 MB, cosine 0.99992 (EXP-106) |
 | int4 attention rung | int4 attention with int8 down reads 0.93242 over four blocks, against 0.90671 with int4 down and 0.97606 with int8 attention, so 4-bit attention costs more accuracy than 4-bit down (EXP-103) |
 | Captured tail at 720 | at one token the cooperative tail reads 0.58x the captured chain at 720/1920 and 0.50x at 960/2560, so the smaller width does not change the verdict (EXP-100) |
 | Fused tail in the block | `GatedMlpBlock.tail_into` runs add, norm, gate, up, down and add in one cooperative launch (EXP-095) |
@@ -183,6 +184,7 @@ python -m vla_cu coopgated
 python -m vla_cu whole
 python -m vla_cu realstack
 python -m vla_cu expertstack
+python -m vla_cu fullmodel
 python -m vla_cu graphed
 python -m vla_cu style
 ```
@@ -199,7 +201,7 @@ tensor sizes. Architecture and the kernel roadmap: `docs/ARCHITECTURE.md`.
 |---|---|---|
 | Style and doc invariants | `python -m vla_cu style` | nothing |
 | Task registry and help | `python -m vla_cu --help` | nothing |
-| Test suite | `python -m pytest -q` | a CUDA device, except the 47 tests marked `cpu` |
+| Test suite | `python -m pytest -q` | a CUDA device, except the 48 tests marked `cpu` |
 | CUDA memory errors, every kernel | `python -m vla_cu sanitize` | a vcvars shell; the cooperative kernel is instrumented, the torch extension cannot be attached (EXP-016) |
 | Race conditions | not usable on the cooperative kernel, see EXP-081 | |
 

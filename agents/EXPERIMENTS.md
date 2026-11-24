@@ -1397,6 +1397,18 @@
 - Verdict: int4 attention loses on both axes. It is in the library as an option and int8 stays the default.
 - Follow-ups: int4 attention at one token; an int4 GEMM tuned at the 960, 320 and 720 attention shapes.
 
+## EXP-106: the whole model in one CUDA graph  (2026-11-24)
+- Goal / question: every stack has been measured alone. What does one policy pass cost when the 16 backbone layers produce the prefix cache and the 16 expert layers consume it, and does one graph beat two?
+- Change: `bench/full_model.py` and task `fullmodel` (42 tasks). The backbone runs 48 bidirectional prefix rows at int8 and writes each layer's post-rope keys and values into fixed buffers inside the capture; the expert runs 50 action tokens at int8 down and cross attends on the odd layers. `vla_cu/prefix.py` gained `prefix_inputs` so the graph and the fp32 reference start from the same real embedding rows.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu fullmodel` in vcvars, warmup 10, iterations 50.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, backbone 48 rows, expert 50 rows, int8 attention and down.
+- Result (measured): one graph 4.899 ms; two graphs (backbone, expert) 4.938 ms; eager 19.638 ms, so 4.01x and 3.98x. Stored 256.52 MB. Cosine 0.99992 against the fp32 chain of both stacks, rel L2 1.30e-02. Every path bit exact against eager, and the eager repeat exact.
+- Explanation / hypothesis: the two graphs sit within 0.8 percent of one graph, so at 4.9 ms the remaining launch gap is noise; the graph's value is the 14.7 ms of Python dispatch it removes. The 256.52 MB over 4.899 ms is 52.4 GB/s, because 32 layers of fp32 activations and int8 kernels do not stream the weights once.
+- Caveat: the prefix is 48 language rows, not the deployed 241, and the expert runs one action chunk, not the 10 step denoising loop. The backbone is bidirectional and the expert is causal, which is the real prefill and chunk schedule but not a full episode.
+- Verdict: worked. The whole path is one graph at 4.899 ms with end to end cosine 0.99992.
+- Follow-ups: the 10 step loop with a cached prefix; the 241 row prefix; int4 down on the whole path.
+
 ### CORRECTION to EXP-102 and STATE (2026-11-24)
 
 EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `prefix_length: 0` and `tokenizer_max_length: 48`, and a prefill is 192 image rows (3 cameras x 64) plus 48 language rows plus 1 state row, so a deployed prefix is about 241 rows. 48 is the language segment only. EXP-104 measures that segment.

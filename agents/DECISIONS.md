@@ -529,6 +529,12 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-093: the whole model is one graph, and the second graph is not the cost  (2026-11-24)
+- Context: EXP-106. One graph over 16 backbone and 16 expert layers reads 4.899 ms; the same work in two graphs reads 4.938 ms, a 0.8 percent gap, and eager reads 19.638 ms.
+- Decision: `fullmodel` captures the whole path in one graph, with the backbone writing the prefix key and value buffers that the expert reads. The two graph path stays in the bench as the comparison.
+- Consequence: the headline number is one replay. The bench proves both paths bit exact, so a future change to either stack cannot drift silently.
+- Revisit if: a longer path, a smaller token count, or many short replays make launch overhead visible again.
+
 ## DEC-092: int4 attention exists but stays off  (2026-11-24)
 - Context: EXP-105. `GqaTokenBlock` now takes `bits` and packs q, k, v and o with the same group 64 format as the MLP, padding each K width to whole groups so the 720 wide expert stream reads 768. At 50 tokens on the real expert it saves 11.60 MB, costs 1.000 ms and drops cosine from 0.99997 to 0.99761.
 - Options considered: (a) no int4 attention; (b) support it behind `attention_bits=4`, default 8; (c) default to int4 attention.

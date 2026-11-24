@@ -38,6 +38,9 @@
 - [x] The expert stack at 50 tokens. Done 2026-11-24, EXP-102: cosine 0.99996 at int8 and 0.99847 at int4; int4 down is 0.471 ms slower on the GEMM path.
 - [x] The expert stack at 50 tokens with the real VLM prefix instead of a random one. Done 2026-11-24, EXP-104: cosine 0.99997 at int8 and 0.99847 at int4, identical to the random prefix, 1.977 and 2.378 ms.
 - [ ] The full 241 row prefix: 192 image rows through the SigLIP tower and connector, 48 language rows, 1 state row. Needs a tokenizer and three camera frames.
+- [x] The whole model in one graph, 16 backbone plus 16 expert layers at int8. Done 2026-11-24, EXP-106: 4.899 ms against 19.638 eager, cosine 0.99992, 256.52 MB.
+- [ ] The 10 step denoising loop with the prefix cache held across steps, which is what a real action chunk costs instead of one expert pass (EXP-106).
+- [ ] int4 down on the whole path, to see whether the model level cosine tracks the expert level 0.99847.
 - [ ] Decide the rope wavelength for the expert and the prefix: LeRobot's `apply_rope` uses 10000 while the config says 100000, and this repo uses 100000 (RESEARCH 2026-11-24).
 - [ ] A state row in the prefix, from `state_proj` on a real robot state instead of no state at all.
 - [ ] BLOCK_M = 48 for the int4 GEMM, so M = 50 pads by 1.04x instead of 2x, and a CUDA port of that GEMM.
