@@ -1385,6 +1385,18 @@
 - Verdict: worked. int4 down keeps its accuracy at 0.99847 and stays 0.40 ms slower than int8 at 50 tokens.
 - Follow-ups: the full 241 row prefix with the SigLIP tower and three real frames; the state row; decide theta 10000 against 100000.
 
+## EXP-105: int4 attention in the library, at 50 tokens on real weights  (2026-11-24)
+- Goal / question: EXP-103 measured int4 attention only in the single token synthetic block. Does 4-bit q, k, v and o hold on the real expert at 50 tokens, and does it pay in bytes and time?
+- Change: `GqaTokenBlock` takes `bits` and `group_size`, packs q, k, v and o through the same int4 format as the MLP, and pads each K width to whole groups, so the 720 wide expert query stream reads 768 (the DEC-044 tradeoff). `attention_from_checkpoint` and `layer_from_checkpoint` take `attention_bits`. `bench/expert_stack.py` runs four mixes: attention and down at int8 or int4.
+- Prediction: none filed by the human.
+- Command: `python -m vla_cu expertstack` in vcvars, warmup 10, iterations 50, 48 real prefix rows.
+- GPU / environment: RTX 5060 Laptop GPU, pinned 1987 MHz, 50 action tokens, four stacks resident.
+- Result (measured): fp32 392.98 MB, 7.082 ms. int8 attn, int8 down 98.68 MB, 2.290 ms, 3.09x, cosine 0.99997, rel L2 8.10e-03. int4 attn, int8 down 87.08 MB, 3.290 ms, 2.15x, cosine 0.99761, rel L2 6.92e-02. int8 attn, int4 down 88.31 MB, 2.698 ms, 2.63x, cosine 0.99847, rel L2 5.53e-02. int4 attn, int4 down 76.71 MB, 3.516 ms, 2.01x, cosine 0.99613, rel L2 8.82e-02. Every graph bit exact. `compute-sanitizer --tool memcheck` on the new int4 attention test: 1 passed, 0 errors.
+- Explanation / hypothesis: at 50 tokens the attention projections are [50, 960] by [960, 768] and [50, 48] by [320, 320] style GEMMs, and the int4 GEMM body reads at 20 to 23 GB/s against int8's rate (EXP-079), so 11.60 MB saved costs 1.000 ms. Accuracy also drops more than int4 down does (0.99761 against 0.99847), which repeats EXP-103: 4-bit attention is the larger error.
+- Caveat: this run builds four stacks and reads 2.290 ms for the same int8 path EXP-104 read at 1.977 ms, so clocks or load moved between sessions. Compare ratios inside this run, not across the two. The prefix is the 48 language rows of EXP-104, not the full 241.
+- Verdict: int4 attention loses on both axes. It is in the library as an option and int8 stays the default.
+- Follow-ups: int4 attention at one token; an int4 GEMM tuned at the 960, 320 and 720 attention shapes.
+
 ### CORRECTION to EXP-102 and STATE (2026-11-24)
 
 EXP-102 and the old STATE said the real prefix is 48 tokens. The config has `prefix_length: 0` and `tokenizer_max_length: 48`, and a prefill is 192 image rows (3 cameras x 64) plus 48 language rows plus 1 state row, so a deployed prefix is about 241 rows. 48 is the language segment only. EXP-104 measures that segment.

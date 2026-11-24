@@ -529,6 +529,13 @@
 - Decision: `vla_cu.__init__` exports through a name table and `__getattr__`, importing on first access. `Int4Linear.forward` dispatches on rank and does not capture a graph; the caller captures, and `bench/demo.py` is the reference.
 - Consequence: `import vla_cu` is cheap and cycle free, and the 3.5x graph number is available to a caller without the layer hiding mutable state. A graph wrapper is backlog, not default behavior.
 
+## DEC-092: int4 attention exists but stays off  (2026-11-24)
+- Context: EXP-105. `GqaTokenBlock` now takes `bits` and packs q, k, v and o with the same group 64 format as the MLP, padding each K width to whole groups so the 720 wide expert stream reads 768. At 50 tokens on the real expert it saves 11.60 MB, costs 1.000 ms and drops cosine from 0.99997 to 0.99761.
+- Options considered: (a) no int4 attention; (b) support it behind `attention_bits=4`, default 8; (c) default to int4 attention.
+- Chosen and why: (b). The path is now measured, memcheck clean and tested, and the negative result is worth keeping reproducible. (c) loses on both bytes per millisecond and accuracy. (a) would throw away the only evidence for the next kernel attempt.
+- Cost accepted: a padded copy of the 720 wide activation, 48 extra stored columns per row in three matrices, and one more branch in the block.
+- Revisit if: an int4 GEMM tuned at the attention shapes closes the 20 to 23 GB/s body gap from EXP-079.
+
 ## DEC-090: cross attention takes two streams and pre-rotated keys  (2026-11-24)
 - Context: EXP-104. The real expert cross layer projects cache keys with `k_proj` and cache values with `v_proj` separately, and rotates only its query (smolvlm_with_expert.py). The block rotated whatever stream it was given and used one stream for both.
 - Decision: a `GqaTokenBlock` is a cross block when `wk` reads a narrower input than `wq`. Its keys come from `other`, its values from `other_value`, neither is rotated again, it is never causal, and the key row count is an explicit `other_tokens` because it differs from the query count. `gqa_attention_into` takes the key count and `rotate_keys`, the kernel skips the key table load in that mode, and `gqa_mix` mirrors it.
